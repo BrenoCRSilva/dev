@@ -32,6 +32,7 @@ echo "=== Phase 3: System Configuration ==="
 ./run.sh 02-firewall
 ./run.sh 03-rustup
 ./run.sh 04-sddm
+./run.sh 05-laptop-kbd
 
 echo ""
 echo "=== Phase 4: Build from Source ==="
@@ -49,7 +50,7 @@ echo "=== Phase 6: Deploy Configs ==="
 
 echo ""
 echo "=== Phase 7: Copy Machine Configs ==="
-./run.sh 05-copy-configs
+./run.sh copy-configs
 
 echo ""
 echo "================================"
