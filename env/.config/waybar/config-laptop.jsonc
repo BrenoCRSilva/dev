@@ -33,7 +33,7 @@
 
     "custom/kanata": {
         "format": "<span size='21000'>󰌌</span> <span size='14000' rise='2500'>{}</span>",
-        "exec": "pgrep -x kanata >/dev/null && echo 'development' || echo 'gaming'",
+        "exec": "pgrep -x kanata >/dev/null && echo 'dev' || echo 'gaming'",
         "interval": 5,
         "on-click": "~/.config/waybar/scripts/kanata-toggle.sh",
         "tooltip": "Click to start Kanata, right-click to stop"
@@ -59,16 +59,15 @@
     "hyprland/workspaces": {
         "format": "{icon}",
         "format-icons": {
-            "1": "",
-            "2": "",
-            "3": "",
-            "4": "󰗃",
-            "5": "󰓓",
-            "6": "󰎧",
-            "7": "",
-            "8": "󰇮",
-            "9": "󰊻",
-            "10": ""
+            "1": "",      // Terminal
+            "2": "",      // Browser
+            "3": "",      // AI
+            "4": "󰗃",      // YouTube
+            "5": "󰓓",      // Gaming
+            "7": "",      // Communication
+            "8": "󰇮",      // Email
+            "9": "󰊻",      // Teams
+            "10": ""      // Spotify
         },
         "active-only": false,
         "on-click": "activate"
@@ -76,9 +75,9 @@
 
     "network": {
         "interface": "wlan0",
-        "format-wifi": "<span size='17000'>󰖨</span> <span rise='2000'>{essid}</span>",
+        "format-wifi": "<span size='17000'></span> <span rise='2000'>{essid}</span>",
         "format-ethernet": "<span size='17000'>󰈀</span> <span rise='2000'>{bandwidthDownBits}</span>",
-        "format-disconnected": "󰌙 Disconnected",
+        "format-disconnected": "󰌙",
         "tooltip-format-wifi": "Signal: {signalStrength}%\nIP: {ipaddr}\nDown: {bandwidthDownBits}\nUp: {bandwidthUpBits}",
         "tooltip-format-ethernet": "IP: {ipaddr}\nDown: {bandwidthDownBits}\nUp: {bandwidthUpBits}",
         "interval": 2,
@@ -87,7 +86,7 @@
 
     "battery": {
         "format": "<span size='17000'>{icon}</span> <span rise='2000'>{capacity}%</span>",
-        "format-icons": ["", "", "", "", ""],
+        "format-icons": ["", "", "", ""],
         "format-charging": "<span size='17000'></span> <span rise='2000'>{capacity}%</span>",
         "format-plugged": "<span size='17000'></span> <span rise='2000'>{capacity}%</span>",
         "states": {
@@ -107,7 +106,7 @@
             "phone": "󰄜",
             "portable": "󰄜",
             "car": "󰄞",
-            "default": [" ", " ", " "] 
+            "default": [" ", " ", " "] 
         },
         "scroll-step": 1,
         "on-click": "pavucontrol",
@@ -149,7 +148,7 @@
     },
 
     "memory": {
-        "format": "<span size='18000'></span> <span rise='1500'>{percentage}%</span>",
+        "format": "<span size='18000'></span> <span rise='1500'>{percentage}%</span>",
         "interval": 10,
         "tooltip": false
     }
