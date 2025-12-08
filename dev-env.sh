@@ -47,9 +47,9 @@ copy_dir() {
     
     ensure_dir "$to"
     
-    # For nvim (or any git repo), delete the target .git if it exists, then copy fresh
     if [[ "$from" == *"/nvim" ]] && [[ -d "$to/.git" ]]; then
-        execute rm -rf "$to/.git"
+        execute rm -rf "$to"
+        execute mkdir -p "$to"
     fi
     
     # Normal copy for everything
