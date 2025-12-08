@@ -1,0 +1,321 @@
+[
+  // ============================================
+  // FILE OPERATIONS
+  // ============================================
+  {
+    "key": "space s",
+    "command": "workbench.action.files.save",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "space q",
+    "command": "workbench.action.closeActiveEditor",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+
+  // ============================================
+  // PROJECT SWITCHING
+  // ============================================
+  {
+    "key": "ctrl+f",
+    "command": "projectManager.listProjects",
+    "when": "neovim.mode == 'normal'"
+  },
+
+  // ============================================
+  // PERISCOPE (TELESCOPE REPLACEMENT)
+  // ============================================
+  {
+    "key": "space f g",
+    "command": "periscope.search",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "space f w",
+    "command": "periscope.search",
+    "when": "neovim.mode == 'normal' && editorTextFocus && editorHasSelection"
+  },
+  {
+    "key": "space f shift+g",
+    "command": "periscope.resumeSearch",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "space f f",
+    "command": "periscope.searchFiles",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+
+  // ============================================
+  // TELESCOPE (OTHER SEARCHES)
+  // ============================================
+  {
+    "key": "space f b",
+    "command": "actions.find",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "space f c",
+    "command": "workbench.action.openSettingsJson",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "space f h",
+    "command": "workbench.action.showCommands",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+
+  // ============================================
+  // LSP
+  // ============================================
+  {
+    "key": "space f r",
+    "command": "references-view.findReferences",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "space f i",
+    "command": "references-view.findImplementations",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "space r n",
+    "command": "editor.action.rename",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+
+  // ============================================
+  // FILE EXPLORER
+  // ============================================
+  {
+    "key": "space o",
+    "command": "workbench.files.action.focusFilesExplorer",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "space n t",
+    "command": "workbench.action.toggleSidebarVisibility",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+
+  // ============================================
+  // HARPOON
+  // ============================================
+  {
+    "key": "space a",
+    "command": "cursor-harpoon.addEditor",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "space e",
+    "command": "cursor-harpoon.editorQuickPick",
+    "when": "neovim.mode == 'normal'"
+  },
+  {
+    "key": "space 1",
+    "command": "cursor-harpoon.gotoEditor1",
+    "when": "neovim.mode == 'normal'"
+  },
+  {
+    "key": "space 2",
+    "command": "cursor-harpoon.gotoEditor2",
+    "when": "neovim.mode == 'normal'"
+  },
+  {
+    "key": "space 3",
+    "command": "cursor-harpoon.gotoEditor3",
+    "when": "neovim.mode == 'normal'"
+  },
+  {
+    "key": "space 4",
+    "command": "cursor-harpoon.gotoEditor4",
+    "when": "neovim.mode == 'normal'"
+  },
+  {
+    "key": "space 5",
+    "command": "cursor-harpoon.gotoEditor5",
+    "when": "neovim.mode == 'normal'"
+  },
+
+  // ============================================
+  // GIT
+  // ============================================
+  {
+    "key": "space g s",
+    "command": "workbench.view.scm",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "space g b",
+    "command": "git.checkout",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "space g shift+p",
+    "command": "git.pull",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "space g p",
+    "command": "git.push",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+
+  // ============================================
+  // DIAGNOSTICS
+  // ============================================
+  {
+    "key": "space t t",
+    "command": "workbench.actions.view.problems",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "ctrl+n",
+    "command": "editor.action.marker.nextInFiles",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "ctrl+p",
+    "command": "editor.action.marker.prevInFiles",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+
+  // ============================================
+  // TERMINAL
+  // ============================================
+  {
+    "key": "space t c",
+    "command": "workbench.action.terminal.toggleTerminal",
+    "when": "neovim.mode == 'normal'"
+  },
+
+  // ============================================
+  // CHAT
+  // ============================================
+  {
+    "key": "space c c",
+    "command": "workbench.action.toggleAuxiliaryBar",
+    "when": "neovim.mode == 'normal'"
+  },
+
+  // ============================================
+  // WINDOW MANAGEMENT
+  // ============================================
+  {
+    "key": "space w l",
+    "command": "workbench.action.focusRightGroup",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "space w h",
+    "command": "workbench.action.focusLeftGroup",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "space w k",
+    "command": "workbench.action.focusAboveGroup",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+  {
+    "key": "space w j",
+    "command": "workbench.action.focusBelowGroup",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+
+  // ============================================
+  // FORMATTING
+  // ============================================
+  {
+    "key": "space l f",
+    "command": "editor.action.formatDocument",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+
+  // ============================================
+  // SEARCH & REPLACE
+  // ============================================
+  {
+    "key": "space r w",
+    "command": "editor.action.startFindReplaceAction",
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
+
+  // ============================================
+  // AUTOCOMPLETE
+  // ============================================
+  {
+    "key": "ctrl+space",
+    "command": "acceptSelectedSuggestion",
+    "when": "suggestWidgetVisible"
+  },
+  {
+    "key": "ctrl+j",
+    "command": "selectNextSuggestion",
+    "when": "suggestWidgetVisible"
+  },
+  {
+    "key": "ctrl+k",
+    "command": "selectPrevSuggestion",
+    "when": "suggestWidgetVisible"
+  },
+
+  // ============================================
+  // POPUP NAVIGATION
+  // ============================================
+  {
+    "key": "ctrl+j",
+    "command": "workbench.action.quickOpenNavigateNext",
+    "when": "inQuickOpen"
+  },
+  {
+    "key": "ctrl+k",
+    "command": "workbench.action.quickOpenNavigatePrevious",
+    "when": "inQuickOpen"
+  },
+
+  // ============================================
+  // ESC - CLOSE PANELS & POPUPS
+  // ============================================
+  {
+    "key": "escape",
+    "command": "workbench.action.closeQuickOpen",
+    "when": "inQuickOpen"
+  },
+  {
+    "key": "escape",
+    "command": "closeFindWidget",
+    "when": "findWidgetVisible"
+  },
+  {
+    "key": "escape",
+    "command": "closeReferenceSearch",
+    "when": "referenceSearchVisible"
+  },
+  {
+    "key": "escape",
+    "command": "workbench.action.closePanel",
+    "when": "activePanel"
+  },
+  {
+    "key": "escape",
+    "command": "list.clear",
+    "when": "periscopeActive"
+  },
+  {
+    "key": "escape",
+    "command": "workbench.action.focusActiveEditorGroup",
+    "when": "!editorTextFocus"
+  },
+
+  // ============================================
+  // UNBIND DEFAULTS
+  // ============================================
+  {
+    "key": "ctrl+d",
+    "command": "-editor.action.addSelectionToNextFindMatch"
+  },
+  {
+    "key": "ctrl+u",
+    "command": "-cursorUndo"
+  }
+]

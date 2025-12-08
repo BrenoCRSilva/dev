@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-
 script_dir="$(cd $(dirname "${BASH_SOURCE[0]}") && pwd)"
 filter=""
 dry="0"
@@ -29,7 +28,6 @@ execute() {
     if [[ $dry == "1" ]]; then
         return
     fi
-
     "$@"
 }
 

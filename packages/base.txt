@@ -1,0 +1,39 @@
+# Core utilities
+git
+base-devel
+openssh
+networkmanager
+
+# Shell & Terminal
+zsh
+tmux
+btop
+htop
+nano
+
+# CLI Tools
+ripgrep
+fzf
+jq
+curl
+wget
+zoxide
+eza
+fd
+bat
+rsync
+unzip
+zip
+7zip
+lsof
+
+# Fonts
+ttf-iosevka-nerd
+ttf-firacode-nerd
+ttf-jetbrains-mono-nerd
+noto-fonts-emoji
+
+# System utilities
+zram-generator
+inetutils
+keychain

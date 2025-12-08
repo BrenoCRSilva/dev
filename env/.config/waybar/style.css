@@ -214,6 +214,32 @@ tooltip label {
     padding: 4px;
 }
 
+/* Use your current style.css from document #7, but ADD this at the end: */
+
+/* ================================================================================
+   BATTERY (LAPTOP)
+   ================================================================================ */
+#battery {
+    color: #f6c177;  /* Rose Pine foam */
+}
+
+#battery.charging {
+    color: #9ccfd8;  /* Rose Pine foam (charging) */
+}
+
+#battery.warning {
+    color: #f6c177;
+}
+
+#battery.critical {
+    color: #eb6f92;
+    animation: blink 1s linear infinite alternate;
+}
+
+#battery:hover {
+    background: rgba(246, 193, 119, 0.5);
+}
+
 /* ================================================================================
    ANIMATIONS
    ================================================================================ */

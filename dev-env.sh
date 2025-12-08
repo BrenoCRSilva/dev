@@ -48,9 +48,9 @@ copy_dir() {
     ensure_dir "$to"
     
     if command -v rsync >/dev/null 2>&1; then
-        execute rsync -av "$from/" "$to/"  # Note the trailing slashes
+        execute rsync -av "$from/" "$to/"
     else
-        execute cp -r "$from/." "$to/"     # Use "/." to copy contents
+        execute cp -r "$from/." "$to/"
     fi
 }
 
@@ -86,7 +86,6 @@ log "XDG_DATA_HOME: $XDG_DATA_HOME"
 log "LOCAL_BIN: $LOCAL_BIN"
 log "XDG_CONFIG_HOME: $XDG_CONFIG_HOME"
 
-# If specific configs requested, only install those
 if [[ ${#only_configs[@]} -gt 0 ]]; then
     log "Installing only configs: ${only_configs[*]}"
     for config in "${only_configs[@]}"; do
@@ -99,7 +98,6 @@ if [[ ${#only_configs[@]} -gt 0 ]]; then
         fi
     done
 else
-    # Install everything
     log "Installing all configs..."
     copy_dir env/.local/share/applications $XDG_DATA_HOME/applications
     copy_dir env/.local/bin $LOCAL_BIN

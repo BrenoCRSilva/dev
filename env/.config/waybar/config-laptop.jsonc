@@ -1,0 +1,156 @@
+[{
+    "layer": "top",
+    "position": "top",
+    "margin-top": 4,
+    "margin-bottom": 4,
+    
+    "modules-left": [
+        "custom/power-menu",
+        "cpu",
+        "memory",
+        "network",
+        "battery",
+        "custom/kanata"
+    ],
+    
+    "modules-center": [
+        "hyprland/workspaces"
+    ],
+    
+    "modules-right": [
+        "mpris",
+        "bluetooth",
+        "wireplumber",
+        "clock"
+    ],
+
+    "custom/power-menu": {
+        "format": "󰣇",
+        "on-click": "~/.config/wofi/scripts/arch-menu.sh",
+        "tooltip": false,
+        "escape": true
+    },
+
+    "custom/kanata": {
+        "format": "<span size='21000'>󰌌</span> <span size='14000' rise='2500'>{}</span>",
+        "exec": "pgrep -x kanata >/dev/null && echo 'development' || echo 'gaming'",
+        "interval": 5,
+        "on-click": "~/.config/waybar/scripts/kanata-toggle.sh",
+        "tooltip": "Click to start Kanata, right-click to stop"
+    },
+
+    "mpris": {
+        "format": " <span size='15000' rise='2000'>{status_icon}</span> <span size='12000' rise='2000'><i>{artist}: {title}</i></span>",
+        "player": "playerctld",
+        "max-length": 50,
+        "on-click": "playerctl play-pause",
+        "format-paused": " <span size='15000' rise='2000'>{status_icon}</span> <span size='12000' rise='2000'><i>{artist}: {title}</i></span>",
+        "player-icons": {
+          "default": " ",
+          "spotify": " ",
+          "mpv": " "
+        },
+        "status-icons": {
+          "paused": "⏸",
+          "playing": "▶"
+        }
+    },
+
+    "hyprland/workspaces": {
+        "format": "{icon}",
+        "format-icons": {
+            "1": "",
+            "2": "",
+            "3": "",
+            "4": "󰗃",
+            "5": "󰓓",
+            "6": "󰎧",
+            "7": "",
+            "8": "󰇮",
+            "9": "󰊻",
+            "10": ""
+        },
+        "active-only": false,
+        "on-click": "activate"
+    },
+
+    "network": {
+        "interface": "wlan0",
+        "format-wifi": "<span size='17000'>󰖨</span> <span rise='2000'>{essid}</span>",
+        "format-ethernet": "<span size='17000'>󰈀</span> <span rise='2000'>{bandwidthDownBits}</span>",
+        "format-disconnected": "󰌙 Disconnected",
+        "tooltip-format-wifi": "Signal: {signalStrength}%\nIP: {ipaddr}\nDown: {bandwidthDownBits}\nUp: {bandwidthUpBits}",
+        "tooltip-format-ethernet": "IP: {ipaddr}\nDown: {bandwidthDownBits}\nUp: {bandwidthUpBits}",
+        "interval": 2,
+        "max-length": 50
+    },
+
+    "battery": {
+        "format": "<span size='17000'>{icon}</span> <span rise='2000'>{capacity}%</span>",
+        "format-icons": ["", "", "", "", ""],
+        "format-charging": "<span size='17000'></span> <span rise='2000'>{capacity}%</span>",
+        "format-plugged": "<span size='17000'></span> <span rise='2000'>{capacity}%</span>",
+        "states": {
+            "warning": 30,
+            "critical": 15
+        },
+        "tooltip-format": "{timeTo}\nPower: {power}W"
+    },
+
+    "wireplumber": {
+        "format": "{icon}",
+        "format-muted": "󰖁 ",
+        "format-icons": {
+            "headphone": "󰋋",
+            "hands-free": "󰋋", 
+            "headset": "󰋋",
+            "phone": "󰄜",
+            "portable": "󰄜",
+            "car": "󰄞",
+            "default": [" ", " ", " "] 
+        },
+        "scroll-step": 1,
+        "on-click": "pavucontrol",
+        "on-click-right": "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+    },
+
+    "bluetooth": {
+        "format": "",
+        "format-disabled": "󰂲",
+        "format-connected": "",
+        "tooltip-format": "Devices connected: {num_connections}",
+        "on-click": "blueberry"
+    },
+
+    "clock": {
+        "format": "{:%a %d, %b %H:%M}",
+        "format-alt": "{:%A %d %B %Y, %H:%M}",
+        "tooltip-format": "<tt><small>{calendar}</small></tt>",
+        "calendar": {
+            "mode": "year",
+            "mode-mon-col": 3,
+            "weeks-pos": "right",
+            "on-scroll": 1,
+            "format": {
+                "months": "<span color='#ffead3'><b>{}</b></span>",
+                "days": "<span color='#ecc6d9'><b>{}</b></span>",
+                "weeks": "<span color='#99ffdd'><b>W{}</b></span>",
+                "weekdays": "<span color='#ffcc66'><b>{}</b></span>",
+                "today": "<span color='#ff6699'><b><u>{}</u></b></span>"
+            }
+        }
+    },
+
+    "cpu": {
+        "format": "<span size='18800'>󰍛</span> <span rise='2000'>{usage}%</span>",
+        "interval": 2,
+        "on-click": "ghostty -e htop",
+        "tooltip": false
+    },
+
+    "memory": {
+        "format": "<span size='18000'></span> <span rise='1500'>{percentage}%</span>",
+        "interval": 10,
+        "tooltip": false
+    }
+}]

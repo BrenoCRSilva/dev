@@ -1,0 +1,12 @@
+# Machine-specific config
+.machine.conf
+
+# Build artifacts
+*.o
+*.a
+*.so
+
+# Paru cache
+paru/
+
+# Neovim build (lives in ~/personal/neovim)

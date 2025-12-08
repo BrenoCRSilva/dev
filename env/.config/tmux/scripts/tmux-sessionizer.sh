@@ -1,14 +1,17 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
 
-if [[ $# -eq 1 ]]; then
-    selected=$1
+# Read directories from config file
+DIRS_FILE="$HOME/.config/tmux-sessionizer/directories"
+
+if [[ -f "$DIRS_FILE" ]]; then
+    dirs=$(cat "$DIRS_FILE" | envsubst)
 else
-    selected=$(find ~/ ~/workspace/projects ~/workspace/talqui-chat ~/personal/ ~/personal/dev/env/.config/ ~/personal/uni/ /mnt/c/Users/breno/personal/ -mindepth 1 -maxdepth 1 -type d 2>/dev/null | fzf)
+    # Fallback to hardcoded
+    dirs="$HOME/workspace/projects $HOME/personal"
 fi
 
-if [[ -z $selected ]]; then
-    exit 0
-fi
+# Find all directories
+selected=$(echo "$dirs" | tr ' ' '\n' | xargs -I {} find {} -mindepth 1 -maxdepth 1 -type d 2>/dev/null | fzf)
 
 base_name=$(basename "$selected" | tr . _)
 

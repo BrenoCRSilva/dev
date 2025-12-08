@@ -1,0 +1,20 @@
+# Browsers
+firefox
+
+# Gaming
+steam
+
+# Media
+spotify-launcher
+youtube-desktop
+
+# Development
+cursor-bin
+bun-bin
+
+# Password Manager
+1password
+1password-cli
+
+# Electron (if needed for apps)
+electron

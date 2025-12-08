@@ -8,7 +8,6 @@ bindkey -v
 bindkey "^ " autosuggest-accept
 
 # Environment variables
-export DISPLAY=:0
 export PATH="$PATH:/usr/local/go/bin"
 export PATH="$PATH:$GOPATH/bin"
 export PATH="$PATH:$HOME/.cargo/bin"
@@ -76,6 +75,7 @@ alias ls='ls --color'
 alias c='clear'
 alias b='cd ..'
 alias cdwin='cd /mnt/c/Users/breno/'
+alias sync='~/personal/dev/sync.sh'
 
 # Shell integrations
 eval "$(zoxide init --cmd cd zsh)"
@@ -84,3 +84,13 @@ eval $(keychain --eval --quiet id_ed25519 id_ed25519_talqui)
 if command -v tmux &> /dev/null && [ -n "$PS1" ] && [[ ! "$TERM" =~ screen ]] && [[ ! "$TERM" =~ tmux ]] && [ -z "$TMUX" ]; then
   tmux a -t home || exec tmux new -s home && exit;
 fi
+
+# Tmux sessionizer add function
+tm-add() {
+    local dir="${1:-$(pwd)}"
+    dir=$(realpath "$dir" 2>/dev/null || echo "$dir")
+    
+    mkdir -p ~/.config/tmux-sessionizer
+    echo "$dir" >> ~/.config/tmux-sessionizer/directories
+    echo "✓ Added: $dir"
+}

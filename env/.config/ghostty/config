@@ -31,7 +31,7 @@ font-style-italic = italic
 
 # Window appearance
 window-decoration = false
-background-opacity = 0.9
+background-opacity = 0.8
 
 # Colors (matching your WezTerm theme)
 foreground = ffffff
