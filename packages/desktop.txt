@@ -9,14 +9,11 @@ waybar
 swaync
 wofi
 wlogout
-kanata-bin
 brightnessctl
 playerctl
 pavucontrol
 polkit-kde-agent
 wl-clipboard
-grim
-slurp
 network-manager-applet
 fastfetch
 thunar
@@ -60,4 +57,3 @@ rustup
 ghostty
 ccache
 dkms
-xpadneo-dkms

@@ -1,9 +1,3 @@
 firefox
 steam
-spotify-launcher
-youtube-desktop
-cursor-bin
-bun-bin
-1password
-1password-cli
 electron
