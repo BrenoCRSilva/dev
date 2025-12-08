@@ -26,6 +26,7 @@ echo "=== Phase 1: Interactive Setup ==="
 echo ""
 echo "=== Phase 2: Package Installation ==="
 ./run.sh 01-packages
+./run.sh 01.5-aur-packages
 
 echo ""
 echo "=== Phase 3: System Configuration ==="
