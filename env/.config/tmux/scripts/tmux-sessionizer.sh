@@ -7,7 +7,7 @@ core_dirs=(
 )
 
 nvim_dir=(
-    "$HOME/personal/dev/.config/nvim"
+    "$HOME/personal/dev/env/.config/nvim"
 )
 
 # Read additional directories from config
