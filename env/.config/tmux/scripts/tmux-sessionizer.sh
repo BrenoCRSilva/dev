@@ -1,17 +1,51 @@
 #!/usr/bin/env bash
 
-# Read directories from config file
-DIRS_FILE="$HOME/.config/tmux-sessionizer/directories"
+core_dirs=(
+    "$HOME/personal/projects"
+    "$HOME/personal/dev"
+    "$HOME/workspace/projects"
+)
 
+nvim_dir=(
+    "$HOME/personal/dev/.config/nvim"
+)
+
+# Read additional directories from config
+DIRS_FILE="$HOME/.config/tmux-sessionizer/directories"
+additional_dirs=()
 if [[ -f "$DIRS_FILE" ]]; then
-    dirs=$(cat "$DIRS_FILE" | envsubst)
-else
-    # Fallback to hardcoded
-    dirs="$HOME/workspace/projects $HOME/personal"
+    while IFS= read -r line; do
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        # Expand ~ and variables
+        expanded=$(eval echo "$line")
+        [[ -d "$expanded" ]] && additional_dirs+=("$expanded")
+    done < "$DIRS_FILE"
 fi
 
-# Find all directories
-selected=$(echo "$dirs" | tr ' ' '\n' | xargs -I {} find {} -mindepth 1 -maxdepth 1 -type d 2>/dev/null | fzf)
+# Combine all finds
+all_found=$(
+    # Deep search (2 levels) - core directories
+    for dir in "${core_dirs[@]}"; do
+        find "$dir" -mindepth 1 -maxdepth 2 -type d 2>/dev/null
+    done
+    
+    # Special directories - add directly (depth 0)
+    for dir in "${nvim_dir[@]}"; do
+        [[ -d "$dir" ]] && echo "$dir"
+    done
+    
+    # Additional directories from config - add directly (depth 0)
+    for dir in "${additional_dirs[@]}"; do
+        echo "$dir"
+    done
+)
+
+selected=$(echo "$all_found" | fzf)
+
+if [[ -z "$selected" ]]; then
+    exit 0
+fi
 
 base_name=$(basename "$selected" | tr . _)
 
