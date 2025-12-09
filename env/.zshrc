@@ -76,6 +76,7 @@ alias c='clear'
 alias b='cd ..'
 alias cdwin='cd /mnt/c/Users/breno/'
 alias sync='~/personal/dev/sync.sh'
+alias tsinit='~/.local/bin/ts-init.sh'
 
 # Shell integrations
 eval "$(zoxide init --cmd cd zsh)"
