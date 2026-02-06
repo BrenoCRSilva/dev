@@ -2,8 +2,7 @@
     "layer": "top",
     "output": "DP-3",
     "position": "top",
-    "margin-top": 4,
-    "margin-bottom": 4,
+    "exclusive": true,
     
     "modules-left": [
         "custom/power-menu",
@@ -14,16 +13,16 @@
         "hyprland/workspaces",
     ],
     
-    "modules-right": [
-        "custom/kanata",
+"modules-right": [
+        "custom/vial-layer",
     ],
 
-    "custom/kanata": {
+    "custom/vial-layer": {
         "format": "<span size='21000'>󰌌</span> <span size='14000' rise='2500'>{}</span>",
-        "exec": "pgrep -x kanata >/dev/null && echo 'development' || echo 'gaming'",
-        "interval": 5,
-        "on-click": "~/.config/waybar/scripts/kanata-toggle.sh",
-        "tooltip": "Click to start Kanata, right-click to stop"
+        "exec": "~/.config/waybar/scripts/vial-layer.sh",
+        "interval": 1,
+        "on-click": "~/.config/waybar/scripts/vial-set-layer.sh",
+        "tooltip": "Sofle Vial Layers: Base (0), Navigation (1), Symbols (2), Numbers (3)"
     },
 
     "mpris": {

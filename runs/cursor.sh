@@ -38,7 +38,7 @@ cursor --install-extension usernamehw.errorlens
 
 echo -e "${GREEN}✅ All extensions installed!${NC}"
 
-CONFIG_DIR="$HOME/.config/Cursor/User"
+CONFIG_DIR="$HOME/.config/cursor/User"
 mkdir -p "$CONFIG_DIR"
 
 echo -e "${BLUE}📝 Deploying configuration files...${NC}"
@@ -62,4 +62,5 @@ echo -e "${GREEN}✓${NC} Copied keybindings.json"
 
 echo ""
 echo -e "${GREEN}✅ Setup complete!${NC}"
-echo ""
+echo "You can now use 'cursor-sessionizer' to quickly switch projects."
+echo "Run 'cursor-sessionizer' to open the picker."

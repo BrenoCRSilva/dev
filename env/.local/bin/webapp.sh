@@ -10,4 +10,17 @@ else
     exit 1
 fi
 
-exec setsid uwsm app -- $browser --app="$1" "${@:2}"
+# Create app name from URL
+app_name=$(echo "$1" | sed 's|https\?://||' | sed 's|/.*||' | sed 's|\.|-|g')
+
+BROWSER=firefox exec setsid uwsm app -- $browser \
+    --app="$1" \
+    --user-data-dir="$HOME/.config/chrome-apps/$app_name" \
+    --enable-features=WebAppEnableExtensions,UseOzonePlatform \
+    --ozone-platform=wayland \
+    --disable-features=WaylandWpColorManagerV1,MediaRouter \
+    --enable-wayland-ime \
+    --no-first-run \
+    --no-default-browser-check \
+    --disable-background-networking \
+    "${@:2}"

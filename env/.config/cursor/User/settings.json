@@ -35,52 +35,31 @@
       "editorLineNumber.activeForeground": "#c0c0c0",
       "editor.lineHighlightBackground": "#00000000",
       "editor.lineHighlightBorder": "#00000000",
-
-      // Indent guides
       "editorIndentGuide.background": "#26233a",
       "editorIndentGuide.activeBackground": "#524f67",
-
-      // Scrollbar - invisible
       "scrollbarSlider.background": "#191724",
       "scrollbarSlider.hoverBackground": "#191724",
       "scrollbarSlider.activeBackground": "#191724",
-
-      // Status bar
       "statusBar.background": "#191724",
       "statusBar.foreground": "#e0def4",
-
-      // Quick pick popup
       "quickInput.background": "#191724",
       "quickInput.foreground": "#e0def4",
       "quickInputList.focusBackground": "#44415a",
       "quickInputList.focusForeground": "#e0def4",
-
-
-    // ALL UI ELEMENTS - SAME AS EDITOR
-    "sideBar.background": "#0c0b12",
-    "sideBar.foreground": "#e0def4",
-    "sideBarSectionHeader.background": "#0c0b12",
-    
-    "activityBar.background": "#0c0b12",
-    "activityBar.foreground": "#e0def4",
-    
-    "statusBar.background": "#0c0b12",
-    "statusBar.foreground": "#e0def4",
-    "statusBar.noFolderBackground": "#0c0b12",
-    
-    "titleBar.activeBackground": "#0c0b12",
-    "titleBar.activeForeground": "#e0def4",
-    "titleBar.inactiveBackground": "#0c0b12",
-    
-    "panel.background": "#0c0b12",
-    "panel.border": "#26233a",
-    "panelTitle.activeForeground": "#e0def4",
-    
-    "terminal.background": "#0c0b12",
-    
-    "tab.inactiveBackground": "#0c0b12",
-    "tab.activeBackground": "#0c0b12",
-    "editorGroupHeader.tabsBackground": "#0c0b12"
+      "sideBar.background": "#191724",
+      "sideBar.foreground": "#e0def4",
+      "activityBar.background": "#191724",
+      "activityBar.foreground": "#e0def4",
+      "statusBar.background": "#191724",
+      "statusBar.foreground": "#e0def4",
+      "statusBar.noFolderBackground": "#191724",
+      "titleBar.activeBackground": "#191724",
+      "titleBar.activeForeground": "#e0def4",
+      "panel.background": "#191724",
+      "panel.border": "#26233a",
+      "terminal.background": "#191724",
+      "tab.inactiveBackground": "#191724",
+      "tab.activeBackground": "#191724"
     }
   },
 
@@ -101,69 +80,25 @@
           }
         },
         {
-          "scope": [
-            "entity.name.function",
-            "support.function",
-            "meta.function-call",
-            "entity.name.function.sql"
-          ],
+          "scope": ["entity.name.function", "support.function"],
           "settings": {
             "foreground": "#c4a7e7"
           }
         },
         {
-          "scope": [
-            "entity.name.type",
-            "support.type",
-            "storage.type"
-          ],
+          "scope": ["entity.name.type", "support.type", "storage.type"],
           "settings": {
             "foreground": "#9ccfd8"
-          }
-        },
-        {
-          "scope": "variable.other.member",
-          "settings": {
-            "foreground": "#9ccfd8"
-          }
-        },
-        {
-          "scope": [
-            "support.function.aggregate.sql",
-            "support.function.scalar.sql",
-            "support.function.string.sql",
-            "support.function.window.sql",
-            "support.function.sql",
-            "meta.function.sql"
-          ],
-          "settings": {
-            "foreground": "#c4a7e7"
-          }
-        },
-        {
-          "scope": [
-            "keyword.other.sql",
-            "keyword.other.DML.sql",
-            "keyword.other.DDL.sql"
-          ],
-          "settings": {
-            "foreground": "#eb6f92"
           }
         }
       ]
     }
   },
 
-  // ============================================
-  // ZOOM & APPEARANCE
-  // ============================================
-  "window.zoomLevel": 1.3,
+  "window.zoomLevel": 1,
   "window.titleBarStyle": "custom",
   "window.menuBarVisibility": "toggle",
 
-  // ============================================
-  // PERISCOPE (TELESCOPE-LIKE SEARCH)
-  // ============================================
   "periscope.rgOptions": ["--smart-case"],
   "periscope.showLineNumbers": true,
   "periscope.peekBorderColor": "#eb6f92",
@@ -181,37 +116,24 @@
     }
   ],
 
-  // ============================================
-  // PROJECT MANAGER
-  // ============================================
   "projectManager.git.baseFolders": [
     "~/workspace/projects",
     "~/workspace/talqui-chat",
-    "~/personal",
-    "~/personal/dev/env/.config",
-    "~/personal/uni",
-    "/mnt/c/Users/breno/personal"
+    "~/personal/dev/.config",
+    "~/personal/projects",
+    "~/personal/dev",
+    "~/personal"
   ],
   "projectManager.sortList": "Recent",
-  "projectManager.git.maxDepthRecursion": 1,
 
-  // ============================================
-  // GIT
-  // ============================================
   "git.enableSmartCommit": true,
   "git.confirmSync": false,
   "git.autofetch": true,
   "gitlens.currentLine.enabled": false,
   "gitlens.codeLens.enabled": false,
 
-  // ============================================
-  // CHAT
-  // ============================================
   "aichat.openChatPanelOnStartup": false,
 
-  // ============================================
-  // EDITOR
-  // ============================================
   "editor.lineNumbers": "relative",
   "editor.cursorLineNumber": "on",
   "editor.renderLineHighlight": "gutter",
@@ -222,32 +144,24 @@
   "editor.scrollBeyondLastLine": false,
   "editor.wordWrap": "off",
   "editor.fontFamily": "'FiraCode Nerd Font', monospace",
-  "editor.fontSize": 16,
+  "editor.fontSize": 14,
   "editor.fontLigatures": true,
   "editor.cursorBlinking": "blink",
   "editor.cursorWidth": 2,
   "editor.selectionHighlight": false,
   "editor.occurrencesHighlight": "off",
-
-  // Folding and glyph margin
   "editor.minimap.enabled": false,
-  "editor.glyphMargin": true,
+  "editor.glyphMargin": false,
   "editor.folding": true,
   "editor.foldingStrategy": "indentation",
   "editor.showFoldingControls": "always",
-
-  // Indent guides ENABLED
-"editor.guides.indentation": true,
-
+  "editor.guides.indentation": false,
   "editor.rulers": [],
   "editor.renderWhitespace": "none",
   "editor.bracketPairColorization.enabled": false,
   "editor.guides.bracketPairs": false,
   "editor.matchBrackets": "never",
 
-  // ============================================
-  // WORKBENCH
-  // ============================================
   "workbench.activityBar.location": "hidden",
   "workbench.statusBar.visible": true,
   "workbench.sideBar.location": "left",
@@ -257,37 +171,22 @@
   "workbench.editor.enablePreview": true,
   "breadcrumbs.enabled": false,
 
-  // ============================================
-  // TERMINAL
-  // ============================================
   "terminal.integrated.fontFamily": "'FiraCode Nerd Font Mono'",
-  "terminal.integrated.fontSize": 16,
+  "terminal.integrated.fontSize": 14,
   "terminal.integrated.cursorStyle": "block",
   "terminal.integrated.cursorBlinking": true,
 
-  // ============================================
-  // FILES
-  // ============================================
   "files.autoSave": "off",
   "files.trimTrailingWhitespace": true,
   "files.insertFinalNewline": true,
   "files.hotExit": "off",
 
-  // ============================================
-  // SEARCH
-  // ============================================
   "search.smartCase": true,
 
-  // ============================================
-  // LSP
-  // ============================================
   "editor.inlineSuggest.enabled": true,
   "errorLens.enabled": true,
   "editor.formatOnSave": true,
 
-  // ============================================
-  // LANGUAGES
-  // ============================================
   "[lua]": {
     "editor.defaultFormatter": "JohnnyMorganz.stylua",
     "editor.formatOnSave": true
@@ -320,5 +219,16 @@
     "editor.defaultFormatter": "dorzey.vscode-sqlfluff"
   },
   "sqlfluff.dialect": "clickhouse",
-  "sqlfluff.linter.run": "onSave"
+  "sqlfluff.linter.run": "onSave",
+  "editor.quickSuggestions": {
+    "other": true,
+    "comments": false,
+    "strings": false
+  },
+  "editor.suggest.showStatusBar": false,
+  "editor.suggest.insertMode": "replace",
+  "notifications.timeout": 3000,
+  "extensions.ignoreRecommendations": true,
+  "explorer.confirmDragAndDrop": false,
+  "explorer.confirmDelete": false
 }

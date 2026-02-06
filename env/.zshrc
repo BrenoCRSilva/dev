@@ -86,12 +86,24 @@ if command -v tmux &> /dev/null && [ -n "$PS1" ] && [[ ! "$TERM" =~ screen ]] &&
   tmux a -t home || exec tmux new -s home && exit;
 fi
 
+source /usr/share/nvm/init-nvm.sh
+
 # Tmux sessionizer add function
 tm-add() {
     local dir="${1:-$(pwd)}"
     dir=$(realpath "$dir" 2>/dev/null || echo "$dir")
-    
+
     mkdir -p ~/.config/tmux-sessionizer
     echo "$dir" >> ~/.config/tmux-sessionizer/directories
     echo "✓ Added: $dir"
 }
+
+# pnpm
+export PNPM_HOME="/home/brenocrs/.local/share/pnpm"
+
+case ":$PATH:" in
+  *":$PNPM_HOME:"*) ;;
+  *) export PATH="$PNPM_HOME:$PATH" ;;
+esac
+
+. "$HOME/.local/share/../bin/env"

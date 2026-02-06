@@ -48,4 +48,5 @@ The setup script will prompt you for:
 - Machine type (laptop/desktop)
 - Monitor names (if desktop)
 
-Configs are automatically adapted based on your choices.
+Configs are automatically adapted based on your choices. You can rerun `./machine-conf.sh`
+anytime to regenerate `.machine.conf` without going through the entire installer.

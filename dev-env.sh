@@ -2,8 +2,9 @@
 script_dir="$(cd $(dirname "${BASH_SOURCE[0]}") && pwd)"
 dry="0"
 only_configs=()
+installed_all_configs=0
 
-while [[ $# > 0 ]]; do
+while [[ $# -gt 0 ]]; do
     if [[ "$1" == "--dry" ]]; then
         dry="1"
     elif [[ "$1" == "--config" ]]; then
@@ -13,16 +14,18 @@ while [[ $# > 0 ]]; do
     shift
 done
 
+cd "$script_dir"
+
 log() {
     if [[ $dry == "1" ]]; then
-        echo "[DRY_RUN]: $@"
+        echo "[DRY_RUN]:" "$@"
     else
         echo "$@"
     fi
 }
 
 execute() {
-    log "execute: $@"
+    log "execute:" "$@"
     if [[ $dry == "1" ]]; then
         return
     fi
@@ -68,6 +71,23 @@ copy_file() {
     execute cp $from $to/$name
 }
 
+apply_machine_configs() {
+    local copy_script="$script_dir/runs/copy-configs.sh"
+
+    if [[ ! -f "$script_dir/.machine.conf" ]]; then
+        log "Note: .machine.conf not found, skipping machine-specific configs (run ./machine-conf.sh or ./runs/00-setup.sh)"
+        return
+    fi
+
+    if [[ ! -x "$copy_script" ]]; then
+        log "Warning: $copy_script is missing or not executable, skipping machine-specific configs"
+        return
+    fi
+
+    log "Applying machine-specific configs based on .machine.conf"
+    execute "$copy_script"
+}
+
 if [ -z "$XDG_DATA_HOME" ]; then
     echo "no xdg data home"
     echo "using ~/.local/share"
@@ -109,6 +129,11 @@ else
     copy_dir env/.local/bin $LOCAL_BIN
     copy_dir env/.config $XDG_CONFIG_HOME
     copy_file env/.zshrc $HOME
+    installed_all_configs=1
+fi
+
+if [[ $installed_all_configs -eq 1 ]]; then
+    apply_machine_configs
 fi
 
 log "--------- dev-env ---------"

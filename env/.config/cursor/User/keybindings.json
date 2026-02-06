@@ -1,7 +1,4 @@
 [
-  // ============================================
-  // FILE OPERATIONS
-  // ============================================
   {
     "key": "space s",
     "command": "workbench.action.files.save",
@@ -12,19 +9,11 @@
     "command": "workbench.action.closeActiveEditor",
     "when": "neovim.mode == 'normal' && editorTextFocus"
   },
-
-  // ============================================
-  // PROJECT SWITCHING
-  // ============================================
   {
     "key": "ctrl+f",
     "command": "projectManager.listProjects",
     "when": "neovim.mode == 'normal'"
   },
-
-  // ============================================
-  // PERISCOPE (TELESCOPE REPLACEMENT)
-  // ============================================
   {
     "key": "space f g",
     "command": "periscope.search",
@@ -45,29 +34,27 @@
     "command": "periscope.searchFiles",
     "when": "neovim.mode == 'normal' && editorTextFocus"
   },
-
-  // ============================================
-  // TELESCOPE (OTHER SEARCHES)
-  // ============================================
+  {
+    "key": "space f a",
+    "command": "periscope.searchFiles",
+    "args": { "cwd": "~/" },
+    "when": "neovim.mode == 'normal'"
+  },
   {
     "key": "space f b",
-    "command": "actions.find",
+    "command": "workbench.action.findInFiles",
     "when": "neovim.mode == 'normal' && editorTextFocus"
   },
   {
     "key": "space f c",
     "command": "workbench.action.openSettingsJson",
-    "when": "neovim.mode == 'normal' && editorTextFocus"
+    "when": "neovim.mode == 'normal'"
   },
   {
     "key": "space f h",
     "command": "workbench.action.showCommands",
     "when": "neovim.mode == 'normal' && editorTextFocus"
   },
-
-  // ============================================
-  // LSP
-  // ============================================
   {
     "key": "space f r",
     "command": "references-view.findReferences",
@@ -83,13 +70,9 @@
     "command": "editor.action.rename",
     "when": "neovim.mode == 'normal' && editorTextFocus"
   },
-
-  // ============================================
-  // FILE EXPLORER
-  // ============================================
   {
     "key": "space o",
-    "command": "workbench.files.action.focusFilesExplorer",
+    "command": "workbench.files.action.showAllFiles",
     "when": "neovim.mode == 'normal' && editorTextFocus"
   },
   {
@@ -97,10 +80,6 @@
     "command": "workbench.action.toggleSidebarVisibility",
     "when": "neovim.mode == 'normal' && editorTextFocus"
   },
-
-  // ============================================
-  // HARPOON
-  // ============================================
   {
     "key": "space a",
     "command": "cursor-harpoon.addEditor",
@@ -136,10 +115,6 @@
     "command": "cursor-harpoon.gotoEditor5",
     "when": "neovim.mode == 'normal'"
   },
-
-  // ============================================
-  // GIT
-  // ============================================
   {
     "key": "space g s",
     "command": "workbench.view.scm",
@@ -160,10 +135,12 @@
     "command": "git.push",
     "when": "neovim.mode == 'normal' && editorTextFocus"
   },
-
-  // ============================================
-  // DIAGNOSTICS
-  // ============================================
+  {
+    "key": "space g shift+l",
+    "command": "git.push",
+    "args": { "upstream": true },
+    "when": "neovim.mode == 'normal' && editorTextFocus"
+  },
   {
     "key": "space t t",
     "command": "workbench.actions.view.problems",
@@ -179,28 +156,16 @@
     "command": "editor.action.marker.prevInFiles",
     "when": "neovim.mode == 'normal' && editorTextFocus"
   },
-
-  // ============================================
-  // TERMINAL
-  // ============================================
   {
     "key": "space t c",
     "command": "workbench.action.terminal.toggleTerminal",
     "when": "neovim.mode == 'normal'"
   },
-
-  // ============================================
-  // CHAT
-  // ============================================
   {
     "key": "space c c",
     "command": "workbench.action.toggleAuxiliaryBar",
     "when": "neovim.mode == 'normal'"
   },
-
-  // ============================================
-  // WINDOW MANAGEMENT
-  // ============================================
   {
     "key": "space w l",
     "command": "workbench.action.focusRightGroup",
@@ -221,28 +186,16 @@
     "command": "workbench.action.focusBelowGroup",
     "when": "neovim.mode == 'normal' && editorTextFocus"
   },
-
-  // ============================================
-  // FORMATTING
-  // ============================================
   {
     "key": "space l f",
     "command": "editor.action.formatDocument",
     "when": "neovim.mode == 'normal' && editorTextFocus"
   },
-
-  // ============================================
-  // SEARCH & REPLACE
-  // ============================================
   {
     "key": "space r w",
     "command": "editor.action.startFindReplaceAction",
     "when": "neovim.mode == 'normal' && editorTextFocus"
   },
-
-  // ============================================
-  // AUTOCOMPLETE
-  // ============================================
   {
     "key": "ctrl+space",
     "command": "acceptSelectedSuggestion",
@@ -258,10 +211,6 @@
     "command": "selectPrevSuggestion",
     "when": "suggestWidgetVisible"
   },
-
-  // ============================================
-  // POPUP NAVIGATION
-  // ============================================
   {
     "key": "ctrl+j",
     "command": "workbench.action.quickOpenNavigateNext",
@@ -272,10 +221,6 @@
     "command": "workbench.action.quickOpenNavigatePrevious",
     "when": "inQuickOpen"
   },
-
-  // ============================================
-  // ESC - CLOSE PANELS & POPUPS
-  // ============================================
   {
     "key": "escape",
     "command": "workbench.action.closeQuickOpen",
@@ -306,10 +251,16 @@
     "command": "workbench.action.focusActiveEditorGroup",
     "when": "!editorTextFocus"
   },
-
-  // ============================================
-  // UNBIND DEFAULTS
-  // ============================================
+  {
+    "key": "space n l",
+    "command": "noice.redirectCmdlineOutputToPopup",
+    "when": "neovim.mode == 'normal'"
+  },
+  {
+    "key": "space u",
+    "command": "workbench.action.openRecent",
+    "when": "neovim.mode == 'normal'"
+  },
   {
     "key": "ctrl+d",
     "command": "-editor.action.addSelectionToNextFindMatch"
