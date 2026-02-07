@@ -1,0 +1,12 @@
+[Unit]
+Description=Kanata Manager - Auto-starts kanata based on keyboard presence
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.config/waybar/scripts/kanata-manager.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

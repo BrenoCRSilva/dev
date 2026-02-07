@@ -84,7 +84,34 @@ window#waybar.hidden {
 #custom-kanata {
     margin-right: 5px;
     border-radius: 9px;
+    color: #31748f;  /* Default pine color */
+}
+
+/* Kanata ON - Rose color */
+#custom-kanata.kanata-on {
+    color: #eb6f92;
+}
+
+#custom-kanata.kanata-on:hover {
+    background: rgba(235, 111, 146, 0.5);
+}
+
+/* Kanata DEV mode (Sofle connected) - Pine color */
+#custom-kanata.kanata-dev {
     color: #31748f;
+}
+
+#custom-kanata.kanata-dev:hover {
+    background: rgba(49, 116, 143, 0.5);
+}
+
+/* Kanata OFF/NAV mode - Pine color */
+#custom-kanata.kanata-off {
+    color: #31748f;
+}
+
+#custom-kanata.kanata-off:hover {
+    background: rgba(49, 116, 143, 0.5);
 }
 
 #custom-kanata:hover {

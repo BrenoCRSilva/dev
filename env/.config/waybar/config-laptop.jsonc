@@ -6,7 +6,7 @@
     
     "modules-left": [
         "custom/power-menu",
-        "custom/kb-layer",
+        "custom/kanata",
         "cpu",
         "memory",
         "network",
@@ -31,13 +31,13 @@
         "escape": true
     },
 
-    "custom/kb-layer": {
-        "format": "<span size='18000'>󰌌</span> <span size='12000' rise='2000'>{}</span>",
-        "exec": "~/.config/waybar/scripts/kb-layer-indicator.sh",
+    "custom/kanata": {
+        "return-type": "json",
+        "exec": "~/.config/waybar/scripts/kanata-indicator.sh",
         "interval": 1,
         "signal": 8,
-        "on-click": "~/.config/waybar/scripts/kb-layer-cycle.sh",
-        "tooltip": "Layer | Layout: Base (Nav/Sym/Num) | US/BR. Click to cycle layer. Use Alt+Space for layout."
+        "on-click": "~/.config/waybar/scripts/kanata-toggle.sh",
+        "tooltip": true
     },
 
     "mpris": {
