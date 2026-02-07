@@ -76,6 +76,7 @@ alias c='clear'
 alias b='cd ..'
 alias cdwin='cd /mnt/c/Users/breno/'
 alias sync='~/personal/dev/sync.sh'
+alias dev='~/personal/dev/dev-env.sh'
 alias tsinit='~/.local/bin/ts-init.sh'
 
 # Shell integrations
