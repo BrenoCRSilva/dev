@@ -14,16 +14,8 @@
     ],
     
 "modules-right": [
-        "custom/vial-layer",
+        "custom/kb-layer"
     ],
-
-    "custom/vial-layer": {
-        "format": "<span size='21000'>󰌌</span> <span size='14000' rise='2500'>{}</span>",
-        "exec": "~/.config/waybar/scripts/vial-layer.sh",
-        "interval": 1,
-        "on-click": "~/.config/waybar/scripts/vial-set-layer.sh",
-        "tooltip": "Sofle Vial Layers: Base (0), Navigation (1), Symbols (2), Numbers (3)"
-    },
 
     "mpris": {
         "format": " <span size='15000' rise='2000'>{status_icon}</span> <span size='12000' rise='2000'><i>{artist}: {title}</i></span>",
@@ -73,6 +65,14 @@
         "escape": true
     },
 
+    "custom/kb-layer": {
+        "format": "<span size='18000'>󰌌</span> <span size='12000' rise='2000'>{}</span>",
+        "exec": "~/.config/waybar/scripts/kb-layer-indicator.sh",
+        "interval": 1,
+        "signal": 8,
+        "on-click": "~/.config/waybar/scripts/kb-layer-cycle.sh",
+        "tooltip": "Layer | Layout: Base (Nav/Sym/Num) | US/BR. Click to cycle layer. Use Alt+Space for layout."
+    },
 
 }, {
     "layer": "top",

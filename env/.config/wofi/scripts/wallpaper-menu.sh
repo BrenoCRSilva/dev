@@ -21,12 +21,26 @@ case $choice in
         case $confirm in
             "Apply")
                 echo "Applying wallpaper: $choice"
-                hyprctl hyprpaper unload all > /dev/null 2>&1
-                hyprctl hyprpaper preload "$wallpaper_dir/$choice" > /dev/null 2>&1
-                hyprctl hyprpaper wallpaper "DP-3,$wallpaper_dir/$choice" > /dev/null 2>&1
-                hyprctl hyprpaper wallpaper "$wallpaper_dir/$choice" > /dev/null 2>&1
+                wallpaper_path="$wallpaper_dir/$choice"
                 
-                # Optional: Show success notification
+                # Start hyprpaper if not running
+                if ! pgrep -x hyprpaper > /dev/null; then
+                    hyprctl dispatch exec hyprpaper
+                    sleep 1
+                fi
+                
+                # Unload all existing wallpapers
+                hyprctl hyprpaper unload all 2>/dev/null
+                
+                # Preload the new wallpaper
+                hyprctl hyprpaper preload "$wallpaper_path" 2>/dev/null
+                
+                # Apply to all connected monitors dynamically
+                hyprctl monitors | grep "^Monitor" | awk '{print $2}' | while read -r monitor; do
+                    hyprctl hyprpaper wallpaper "$monitor,$wallpaper_path" 2>/dev/null
+                done
+                
+                # Show success notification
                 notify-send "Wallpaper Applied" "$choice" 2>/dev/null
                 ;;
             "Back")

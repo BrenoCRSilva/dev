@@ -6,11 +6,11 @@
     
     "modules-left": [
         "custom/power-menu",
+        "custom/kb-layer",
         "cpu",
         "memory",
         "network",
-        "battery",
-        "custom/vial-layer"
+        "battery"
     ],
     
     "modules-center": [
@@ -31,12 +31,13 @@
         "escape": true
     },
 
-    "custom/vial-layer": {
-        "format": "<span size='21000'>󰌌</span> <span size='14000' rise='2500'>{}</span>",
-        "exec": "~/.config/waybar/scripts/vial-layer.sh",
+    "custom/kb-layer": {
+        "format": "<span size='18000'>󰌌</span> <span size='12000' rise='2000'>{}</span>",
+        "exec": "~/.config/waybar/scripts/kb-layer-indicator.sh",
         "interval": 1,
-        "on-click": "~/.config/waybar/scripts/vial-set-layer.sh",
-        "tooltip": "Sofle Vial Layers: Base (0), Navigation (1), Symbols (2), Numbers (3)"
+        "signal": 8,
+        "on-click": "~/.config/waybar/scripts/kb-layer-cycle.sh",
+        "tooltip": "Layer | Layout: Base (Nav/Sym/Num) | US/BR. Click to cycle layer. Use Alt+Space for layout."
     },
 
     "mpris": {
@@ -46,9 +47,9 @@
         "on-click": "playerctl play-pause",
         "format-paused": " <span size='15000' rise='2000'>{status_icon}</span> <span size='12000' rise='2000'><i>{artist}: {title}</i></span>",
         "player-icons": {
-          "default": " ",
-          "spotify": " ",
-          "mpv": " "
+          "default": " ",
+          "spotify": " ",
+          "mpv": " "
         },
         "status-icons": {
           "paused": "⏸",
@@ -64,6 +65,7 @@
             "3": "",      // AI
             "4": "󰗃",      // YouTube
             "5": "󰓓",      // Gaming
+            "6": "󰎧",      // Second Browser
             "7": "",      // Communication
             "8": "󰇮",      // Email
             "9": "󰊻",      // Teams
@@ -114,9 +116,9 @@
     },
 
     "bluetooth": {
-        "format": "",
+        "format": "",
         "format-disabled": "󰂲",
-        "format-connected": "",
+        "format-connected": "",
         "tooltip-format": "Devices connected: {num_connections}",
         "on-click": "blueberry"
     },
