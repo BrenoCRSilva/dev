@@ -68,7 +68,7 @@ copy_file() {
 }
 
 apply_machine_configs() {
-    local copy_script="$script_dir/runs/copy-configs.sh"
+    local copy_script="$script_dir/runs/99-copy-configs.sh"
 
     if [[ ! -f "$script_dir/.machine.conf" ]]; then
         log "Note: .machine.conf not found, skipping machine-specific configs (run ./machine-conf.sh or ./runs/00-setup.sh)"
