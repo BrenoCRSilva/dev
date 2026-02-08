@@ -27,6 +27,12 @@ if [[ -f "$HOME/.env.local" ]]; then
     source "$HOME/.env.local"
 fi
 
+# Set git user config from environment variables (if they exist)
+if [[ -n "${GIT_USER_NAME}" && -n "${GIT_USER_EMAIL}" ]]; then
+    git config --global user.name "${GIT_USER_NAME}"
+    git config --global user.email "${GIT_USER_EMAIL}"
+fi
+
 # Shell options
 unsetopt BEEP
 

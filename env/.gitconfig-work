@@ -1,7 +1,3 @@
-[user]
-	name = ${GIT_WORK_NAME}
-	email = ${GIT_WORK_EMAIL}
-
 [core]
 	sshCommand = ssh -F ~/.ssh/config-work
 
