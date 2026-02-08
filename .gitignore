@@ -1,6 +1,9 @@
 # Machine-specific config
 .machine.conf
 
+# User-specific environment variables (contains personal info)
+.env.local
+
 # Build artifacts
 *.o
 *.a

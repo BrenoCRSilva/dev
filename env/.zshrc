@@ -22,6 +22,11 @@ export ZSH_CACHE="$HOME/.cache/zsh"
 [[ ! -d $ZSH_CACHE ]] && mkdir -p $ZSH_CACHE
 export ZSH_COMPDUMP="$ZSH_CACHE/.zcompdump-${SHORT_HOST}-${ZSH_VERSION}"
 
+# Source user-specific environment variables (not tracked by git)
+if [[ -f "$HOME/.env.local" ]]; then
+    source "$HOME/.env.local"
+fi
+
 # Shell options
 unsetopt BEEP
 

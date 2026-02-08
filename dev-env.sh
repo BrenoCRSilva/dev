@@ -50,14 +50,10 @@ copy_dir() {
     
     ensure_dir "$to"
     
-    if [[ "$from" == *"/nvim" ]] && [[ -d "$to/.git" ]]; then
-        execute rm -rf "$to"
-        execute mkdir -p "$to"
-    fi
-    
     # Normal copy for everything
     if command -v rsync >/dev/null 2>&1; then
-        execute rsync -av "$from/" "$to/"
+        # Exclude nvim/.git since nvim is a separate git repo
+        execute rsync -av --exclude='nvim/.git' --exclude='nvim/.git/**' "$from/" "$to/"
     else
         execute cp -r "$from/." "$to/"
     fi
@@ -86,6 +82,41 @@ apply_machine_configs() {
 
     log "Applying machine-specific configs based on .machine.conf"
     execute "$copy_script"
+}
+
+apply_lid_switch_fix() {
+    # Only apply on laptops
+    if [[ ! -f "$script_dir/.machine.conf" ]]; then
+        return
+    fi
+    
+    # shellcheck source=/dev/null
+    source "$script_dir/.machine.conf"
+    
+    if [[ "$MACHINE_TYPE" != "laptop" ]]; then
+        return
+    fi
+    
+    # Check if already applied
+    if [[ -f "/etc/systemd/logind.conf.d/lid-switch.conf" ]]; then
+        return
+    fi
+    
+    log ""
+    log "Laptop detected - applying lid switch fix..."
+    
+    if [[ "$dry" == "1" ]]; then
+        log "[DRY_RUN]: Would run: sudo $script_dir/runs/06-lid-switch-fix.sh"
+        return
+    fi
+    
+    # Run the lid switch fix script with sudo
+    if sudo "$script_dir/runs/06-lid-switch-fix.sh"; then
+        log "✓ Lid switch fix applied successfully"
+    else
+        log "Warning: Failed to apply lid switch fix. Run manually with:"
+        log "  sudo ./runs/06-lid-switch-fix.sh"
+    fi
 }
 
 if [ -z "$XDG_DATA_HOME" ]; then
@@ -129,6 +160,34 @@ else
     copy_dir env/.local/bin $LOCAL_BIN
     copy_dir env/.config $XDG_CONFIG_HOME
     copy_file env/.zshrc $HOME
+    
+    # Git and SSH configs
+    if [[ -f "env/.gitconfig" ]]; then
+        log "Installing .gitconfig..."
+        copy_file env/.gitconfig $HOME
+    fi
+    if [[ -f "env/.gitconfig-work" ]]; then
+        log "Installing .gitconfig-work..."
+        copy_file env/.gitconfig-work $HOME
+    fi
+    if [[ -d "env/.ssh" ]]; then
+        log "Installing SSH configs..."
+        copy_dir env/.ssh $HOME/.ssh
+        chmod 700 $HOME/.ssh
+        chmod 600 $HOME/.ssh/config-work 2>/dev/null || true
+    fi
+    
+    # Copy .env.local template if user doesn't have one
+    if [[ -f "env/.env.local.template" ]]; then
+        if [[ ! -f "$HOME/.env.local" ]]; then
+            log "Creating .env.local from template..."
+            cp env/.env.local.template "$HOME/.env.local"
+            log "⚠️  Please edit ~/.env.local with your personal information"
+        else
+            log ".env.local already exists, skipping template"
+        fi
+    fi
+    
     installed_all_configs=1
 fi
 

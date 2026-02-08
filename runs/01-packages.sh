@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
+#
+# Install official repository packages
+# Phase: 01 - Core system packages
+#
 
-set -e
+# shellcheck source=common.sh
+source "$(dirname "$0")/common.sh"
 
-echo "Installing official repository packages..."
+print_header "Package Installation - Official Repository"
 
-# Base packages
-sudo pacman -S --noconfirm --needed \
+# Base system packages
+log_section "Base System"
+install_packages \
     git \
     base-devel \
     openssh \
@@ -29,16 +35,21 @@ sudo pacman -S --noconfirm --needed \
     zip \
     7zip \
     lsof \
-    ttf-iosevka-nerd \
-    ttf-firacode-nerd \
-    ttf-jetbrains-mono-nerd \
-    noto-fonts-emoji \
     zram-generator \
     inetutils \
     keychain
 
-# Desktop packages
-sudo pacman -S --noconfirm --needed \
+# Fonts
+log_section "Fonts"
+install_packages \
+    ttf-iosevka-nerd \
+    ttf-firacode-nerd \
+    ttf-jetbrains-mono-nerd \
+    noto-fonts-emoji
+
+# Desktop Environment
+log_section "Desktop Environment"
+install_packages \
     hyprland \
     xdg-desktop-portal-hyprland \
     xdg-desktop-portal-gtk \
@@ -96,9 +107,10 @@ sudo pacman -S --noconfirm --needed \
     dkms
 
 # Applications
-sudo pacman -S --noconfirm --needed \
+log_section "Applications"
+install_packages \
     firefox \
     steam \
     electron
 
-echo "✓ Official packages installed!"
+print_footer "Official packages installed successfully"

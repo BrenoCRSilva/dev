@@ -1,64 +1,62 @@
 #!/usr/bin/env bash
+#
+# Main installation orchestrator for dev environment
+# Runs all installation phases in order
+#
 
-set -e
+# shellcheck source=runs/common.sh
+source "$(dirname "$0")/runs/common.sh"
 
-echo "================================"
-echo "  Dev Environment Setup"
-echo "================================"
-echo ""
+print_header "Development Environment Setup"
 
 # Install paru if not present
-if ! command -v paru &> /dev/null; then
-    echo "=== Installing paru ==="
-    git clone https://aur.archlinux.org/paru.git ~/paru
-    pushd ~/paru
-    makepkg -si --noconfirm
-    popd
-    rm -rf ~/paru
-    echo "paru installed!"
-    echo ""
+if ! command_exists paru; then
+    log_section "Installing paru (AUR helper)"
+    
+    execute git clone https://aur.archlinux.org/paru.git ~/paru
+    cd ~/paru || exit 1
+    execute makepkg -si --noconfirm
+    cd - || exit 1
+    execute rm -rf ~/paru
+    
+    log_success "paru installed!"
 fi
 
 # Run setup scripts in order
-echo "=== Phase 1: Interactive Setup ==="
+log_section "Phase 1: Interactive Setup"
 ./run.sh 00-setup
 
-echo ""
-echo "=== Phase 2: Package Installation ==="
+log_section "Phase 2: Package Installation"
 ./run.sh 01-packages
-./run.sh 01.5-aur-packages
+./run.sh 02-aur-packages
 
-echo ""
-echo "=== Phase 3: System Configuration ==="
-./run.sh 02-firewall
-./run.sh 03-rustup
-./run.sh 04-sddm
-./run.sh 05-laptop-kbd
+log_section "Phase 3: System Configuration"
+./run.sh 03-firewall
+./run.sh 04-rustup
+./run.sh 05-sddm
+./run.sh 06-laptop-kbd
+./run.sh 07-lid-switch-fix
 
-echo ""
-echo "=== Phase 4: Build from Source ==="
-./run.sh neovim
+log_section "Phase 4: Build from Source"
+./run.sh 10-neovim
 
-echo ""
-echo "=== Phase 5: Tool Configuration ==="
-./run.sh node
-./run.sh zsh
-./run.sh cursor
+log_section "Phase 5: Tool Configuration"
+./run.sh 20-node
+./run.sh 30-zsh
+./run.sh 40-cursor
 
-echo ""
-echo "=== Phase 6: Deploy Configs ==="
+log_section "Phase 6: Deploy Configs"
 ./dev-env.sh
 
-echo ""
-echo "=== Phase 7: Copy Machine Configs ==="
-./run.sh copy-configs
+log_section "Phase 7: Copy Machine Configs"
+./run.sh 99-copy-configs
 
 echo ""
-echo "================================"
-echo "  Installation Complete!"
-echo "================================"
+echo "════════════════════════════════════════"
+log_success "Installation Complete!"
+echo "════════════════════════════════════════"
 echo ""
-echo "Next steps:"
+log_info "Next steps:"
 echo "  1. Log out and log back in (for zsh to take effect)"
 echo "  2. Reboot to test SDDM autologin + hyprlock"
 echo ""

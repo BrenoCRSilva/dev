@@ -34,6 +34,7 @@ window#waybar.hidden {
 #memory,
 #custom-kanata,
 #network,
+#battery,
 #bluetooth,
 #wireplumber,
 #clock,
@@ -119,8 +120,8 @@ window#waybar.hidden {
 }
 
 /* ================================================================================
-   MONITOR 2 (HDMI-A-1) - LEFT: CPU + Memory + Network
-   ================================================================================ */
+    MONITOR 2 (HDMI-A-1) - LEFT: CPU + Memory + Network
+    ================================================================================ */
 #cpu {
     margin-left: 5px;
     border-top-left-radius: 9px;
@@ -141,14 +142,21 @@ window#waybar.hidden {
 }
 
 #network {
-    margin-right: 5px;
-    border-top-right-radius: 9px;
-    border-bottom-right-radius: 9px;
     color: #f6c177;
 }
 
 #network:hover {
     background: rgba(246, 193, 119, 0.5);
+}
+
+/* ================================================================================
+    LAPTOP - LEFT: CPU + Memory + Network + Battery
+    ================================================================================ */
+#battery {
+    margin-right: 5px;
+    border-top-right-radius: 9px;
+    border-bottom-right-radius: 9px;
+    color: #f6c177;
 }
 
 /* ================================================================================
@@ -241,17 +249,11 @@ tooltip label {
     padding: 4px;
 }
 
-/* Use your current style.css from document #7, but ADD this at the end: */
-
 /* ================================================================================
    BATTERY (LAPTOP)
    ================================================================================ */
-#battery {
-    color: #f6c177;  /* Rose Pine foam */
-}
-
 #battery.charging {
-    color: #9ccfd8;  /* Rose Pine foam (charging) */
+    color: #9ccfd8;
 }
 
 #battery.warning {
@@ -261,10 +263,6 @@ tooltip label {
 #battery.critical {
     color: #eb6f92;
     animation: blink 1s linear infinite alternate;
-}
-
-#battery:hover {
-    background: rgba(246, 193, 119, 0.5);
 }
 
 /* ================================================================================

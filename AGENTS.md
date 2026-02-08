@@ -36,17 +36,18 @@ This is a **comprehensive Arch Linux development environment configuration repos
 **Phases**:
 1. **00-setup** - Interactive machine config (laptop/desktop selection)
 2. **01-packages** - Install official repo packages
-3. **01.5-aur-packages** - Install AUR packages (paru required)
-4. **02-firewall** - UFW configuration
-5. **03-rustup** - Rust toolchain
-6. **04-sddm** - Display manager setup
-7. **05-laptop-kbd** - Laptop keyboard fixes
-8. **neovim** - Build from source in ~/personal/neovim/
-9. **node** - Node.js/fnm setup
-10. **zsh** - Shell configuration
-11. **cursor** - Cursor IDE with vim bindings
-12. **dev-env.sh** - Deploy all configs
-13. **copy-configs** - Machine-specific config deployment
+3. **02-aur-packages** - Install AUR packages (paru required)
+4. **03-firewall** - UFW configuration
+5. **04-rustup** - Rust toolchain
+6. **05-sddm** - Display manager setup
+7. **06-laptop-kbd** - Laptop keyboard fixes
+8. **07-lid-switch-fix** - Fix keyboard not working after lid close (laptop only)
+9. **10-neovim** - Build from source in ~/personal/neovim/
+10. **20-node** - Node.js/npm setup
+11. **30-zsh** - Shell configuration
+12. **40-cursor** - Cursor IDE with vim bindings
+13. **dev-env.sh** - Deploy all configs
+14. **99-copy-configs** - Machine-specific config deployment
 
 ### 2. Daily Config Sync
 ```bash
@@ -115,6 +116,7 @@ Located in `env/.config/` subdirectories:
 **Hypr Scripts**:
 - `monitor-mode.sh` - Quick monitor cycling
 - `monitor-menu.sh` - Visual monitor configuration menu
+- `handle-lid.sh` - Handles lid switch events for laptop (disables internal display when external connected)
 
 ## Package Management
 
@@ -183,6 +185,51 @@ cp ~/.config/waybar/config-desktop.jsonc env/.config/waybar/
 
 6. **The `env/` directory is the SOURCE** - Not the destination. Changes flow: `env/` → `~/.config/`, not the reverse.
 
+## Run Scripts Architecture
+
+All installation scripts in `runs/` follow a standardized structure:
+
+### Common Library (`runs/common.sh`)
+All scripts source `common.sh` which provides:
+- **Logging functions**: `log_info`, `log_success`, `log_warning`, `log_error`, `log_section`
+- **Header/Footer**: `print_header`, `print_footer` for consistent formatting
+- **Package installation**: `install_packages` (pacman), `install_aur_packages` (paru)
+- **System checks**: `is_laptop`, `command_exists`, `is_package_installed`
+- **Service management**: `enable_service`, `enable_user_service`
+- **Utilities**: `ensure_dir`, `backup_file`, `verify_prerequisites`
+
+### Script Template
+```bash
+#!/usr/bin/env bash
+#
+# Brief description of what this script does
+# Phase: XX - Phase name
+#
+
+# shellcheck source=common.sh
+source "$(dirname "$0")/common.sh"
+
+print_header "Script Name"
+
+# Script logic here...
+log_section "Section Name"
+install_packages package1 package2
+
+print_footer "Completion message"
+```
+
+### Script Naming Convention
+- **Numbered phases** (01, 02, etc.): Core system setup
+- **Named phases** (neovim, cursor, etc.): Tool-specific setup
+- **Special scripts**: `copy-configs.sh`, `common.sh`
+
+### Running Individual Scripts
+```bash
+./run.sh 01-packages      # Run specific script
+./run.sh 01-packages --dry  # Dry run mode
+DRY_RUN=1 ./run.sh 01-packages  # Alternative dry run
+```
+
 ## Directory Structure Reference
 
 ```
@@ -233,6 +280,12 @@ env/
 - Ensure hyprpaper is running: `pgrep hyprpaper`
 - Check wallpapers exist: `ls ~/.config/wallpapers/`
 - Ensure scripts are executable and in PATH
+
+**Keyboard not working after closing laptop lid?**
+- This is fixed by the `06-lid-switch-fix.sh` installation script
+- Check if logind configuration is applied: `cat /etc/systemd/logind.conf.d/lid-switch.conf`
+- Verify handle-lid.sh is executable: `ls -la ~/.config/hypr/scripts/handle-lid.sh`
+- Restart systemd-logind: `sudo systemctl restart systemd-logind`
 
 ## External Dependencies
 
