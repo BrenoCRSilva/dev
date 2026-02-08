@@ -89,6 +89,8 @@ alias cdwin='cd /mnt/c/Users/breno/'
 alias sync='~/personal/dev/sync.sh'
 alias dev='~/personal/dev/dev-env.sh'
 alias tsinit='~/.local/bin/ts-init.sh'
+alias reload='source ~/.zshrc'
+alias tmsource='tmux source-file ~/.config/tmux/tmux.conf'
 
 # Shell integrations
 eval "$(zoxide init --cmd cd zsh)"

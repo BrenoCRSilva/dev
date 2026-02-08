@@ -4,6 +4,17 @@
 
 set -e
 
+# Source .env.local if it exists (for git credentials)
+if [[ -f "$HOME/.env.local" ]]; then
+    source "$HOME/.env.local"
+fi
+
+# Set git user config from environment variables if not already set
+if [[ -n "${GIT_USER_NAME}" && -n "${GIT_USER_EMAIL}" ]]; then
+    git config --global user.name "${GIT_USER_NAME}" 2>/dev/null || true
+    git config --global user.email "${GIT_USER_EMAIL}" 2>/dev/null || true
+fi
+
 cd ~/personal/dev
 
 # Check if nvim submodule has changes
