@@ -1,0 +1,26 @@
+(defcfg
+    process-unmapped-keys yes
+)
+(defsrc
+    ;
+    a
+    caps
+    '
+    lctl
+)
+(deflayer editor
+    (tap-hold 200 200 ; rsft)
+    (tap-hold 200 200 a lsft)
+    (tap-hold 150 200 esc lctl)
+    (tap-hold 250 200 ' rctl)
+    (tap-hold 1 1 caps caps)
+)
+
+(deflayer browser
+    ;
+    a
+    (tap-hold 150 200 esc lctl)
+    '
+    (tap-hold 1 1 caps caps)
+)
+

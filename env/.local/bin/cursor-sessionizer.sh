@@ -16,7 +16,8 @@ special_dirs=(
 )
 
 # Read additional directories from config file (add directly, no recursion)
-DIRS_FILE="$HOME/.config/tmux-sessionizer/directories"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+DIRS_FILE="$CONFIG_DIR/tmux-sessionizer/directories"
 additional_dirs=()
 if [[ -f "$DIRS_FILE" ]]; then
     while IFS= read -r line; do

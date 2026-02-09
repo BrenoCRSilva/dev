@@ -2,7 +2,8 @@
 
 # Initialize Hyprpaper wallpaper on startup
 
-WALLPAPER_DIR="$HOME/.config/wallpapers"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+WALLPAPER_DIR="$CONFIG_DIR/wallpapers"
 DEFAULT_WALLPAPER="$WALLPAPER_DIR/chinatown.png"
 
 if [ ! -f "$DEFAULT_WALLPAPER" ]; then

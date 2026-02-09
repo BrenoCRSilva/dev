@@ -5,8 +5,9 @@
 # No Sofle: Toggle kanata
 
 STATE_FILE="/tmp/kanata-state"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
 KANATA_BIN="$HOME/.cargo/bin/kanata"
-KANATA_CONFIG="$HOME/.config/kanata/kanata.kbd"
+KANATA_CONFIG="$CONFIG_DIR/kanata/kanata.kbd"
 
 # Check if Sofle is connected
 if hyprctl devices 2>/dev/null | grep -qi "josefadamcik-sofle"; then

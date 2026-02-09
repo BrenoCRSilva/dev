@@ -10,9 +10,10 @@ bun add -d eslint @typescript-eslint/parser @typescript-eslint/eslint-plugin \
 
 # Copy config files (no tsconfig, bun handles it)
 echo "⚙️  Copying config files..."
-cp ~/.config/templates/typescript/eslint.config.js .
-cp ~/.config/templates/typescript/.prettierrc.json .
-cp ~/.config/templates/typescript/.gitignore .
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+cp "$CONFIG_DIR/templates/typescript/eslint.config.js" .
+cp "$CONFIG_DIR/templates/typescript/.prettierrc.json" .
+cp "$CONFIG_DIR/templates/typescript/.gitignore" .
 
 # Create basic structure
 mkdir -p src

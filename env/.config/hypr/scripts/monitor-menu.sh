@@ -3,7 +3,8 @@
 # Wofi-based monitor configuration menu
 # Similar to Windows+P but with visual menu
 
-choice=$(echo -e "Internal Only\nExternal Only\nExtended (Side by Side)\nMirror Displays\nCancel" | wofi --dmenu --prompt "Display Mode" --conf "$HOME/.config/wofi/wpp-config")
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+choice=$(echo -e "Internal Only\nExternal Only\nExtended (Side by Side)\nMirror Displays\nCancel" | wofi --dmenu --prompt "Display Mode" --conf "$CONFIG_DIR/wofi/wpp-config")
 
 INTERNAL="eDP-1"
 EXTERNAL=$(hyprctl monitors | grep "Monitor" | grep -v "$INTERNAL" | head -1 | awk '{print $2}')

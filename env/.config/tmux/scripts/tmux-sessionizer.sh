@@ -10,8 +10,9 @@ nvim_dir=(
     "$HOME/personal/dev/env/.config/nvim"
 )
 
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
 # Read additional directories from config
-DIRS_FILE="$HOME/.config/tmux-sessionizer/directories"
+DIRS_FILE="$CONFIG_DIR/tmux-sessionizer/directories"
 additional_dirs=()
 if [[ -f "$DIRS_FILE" ]]; then
     while IFS= read -r line; do

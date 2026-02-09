@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+
 find_chrome() {
     for chrome in google-chrome google-chrome-stable chrome; do
         if command -v "$chrome" &> /dev/null; then
@@ -33,7 +35,7 @@ launch_app() {
     
     BROWSER=firefox exec setsid "$chrome_bin" \
         --app="$url" \
-        --user-data-dir="$HOME/.config/chrome-apps/$app_name" \
+        --user-data-dir="$CONFIG_DIR/chrome-apps/$app_name" \
         --enable-features=WebAppEnableExtensions,UseOzonePlatform \
         --ozone-platform=wayland \
         --disable-features=WaylandWpColorManagerV1,MediaRouter \

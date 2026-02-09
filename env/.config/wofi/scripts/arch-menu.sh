@@ -1,7 +1,8 @@
 #!/bin/bash
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-choice=$(echo -e "⏻  Power Options\n󰸉  Wallpapers\n  File Manager\n󰩈  Exit" | wofi --dmenu --prompt "Main Menu" --conf $HOME/.config/wofi/menu-config)
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+choice=$(echo -e "⏻  Power Options\n󰸉  Wallpapers\n  File Manager\n󰩈  Exit" | wofi --dmenu --prompt "Main Menu" --conf "$CONFIG_DIR/wofi/menu-config")
 
 case $choice in
     "⏻  Power Options")

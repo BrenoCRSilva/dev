@@ -4,8 +4,9 @@
 # When Sofle detected: kanata OFF, show DEV
 # When no Sofle: kanata ON (user can toggle with Alt+I)
 
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
 KANATA_BIN="$HOME/.cargo/bin/kanata"
-KANATA_CONFIG="$HOME/.config/kanata/kanata.kbd"
+KANATA_CONFIG="$CONFIG_DIR/kanata/kanata.kbd"
 STATE_FILE="/tmp/kanata-state"
 
 # Check if Sofle is connected

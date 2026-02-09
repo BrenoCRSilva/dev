@@ -1,10 +1,11 @@
 #!/bin/bash
-wallpaper_dir="$HOME/.config/wallpapers"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+wallpaper_dir="$CONFIG_DIR/wallpapers"
 
 choice=$({
     ls "$wallpaper_dir"/*.{jpg,png,jpeg} 2>/dev/null | xargs -n1 basename
     echo "Exit"
-} | wofi --dmenu --conf "$HOME/.config/wofi/wpp-config" --prompt "Select Wallpaper")
+} | wofi --dmenu --conf "$CONFIG_DIR/wofi/wpp-config" --prompt "Select Wallpaper")
 
 case $choice in
     "Exit")
@@ -14,7 +15,7 @@ case $choice in
         imv "$wallpaper_dir/$choice" &
         imv_pid=$!
         
-        confirm=$(echo -e "Apply\nBack" | wofi --dmenu --conf "$HOME/.config/wofi/confirm-config" --prompt "Apply this wallpaper?")
+        confirm=$(echo -e "Apply\nBack" | wofi --dmenu --conf "$CONFIG_DIR/wofi/confirm-config" --prompt "Apply this wallpaper?")
         
         kill $imv_pid 2>/dev/null
         

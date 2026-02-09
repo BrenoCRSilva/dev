@@ -3,8 +3,10 @@
 # Script to create desktop entries for PWAs
 # Run this after placing your pwa-launch script in ~/.local/bin/
 
-DESKTOP_DIR="$HOME/.local/share/applications"
-SCRIPT_PATH="$HOME/.local/bin/pwa-launch"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
+LOCAL_BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
+DESKTOP_DIR="$DATA_DIR/applications"
+SCRIPT_PATH="$LOCAL_BIN/pwa-launch"
 
 # Create desktop directory if it doesn't exist
 mkdir -p "$DESKTOP_DIR"
