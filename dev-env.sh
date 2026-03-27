@@ -246,16 +246,16 @@ else
         envsubst < env/.gitconfig-work.template > "$HOME/.gitconfig-work"
     fi
     
+    
     if [[ -d "env/.ssh" ]]; then
         log "Installing SSH configs..."
         copy_dir env/.ssh $HOME/.ssh
         chmod 700 $HOME/.ssh
-        if [[ -f "env/.ssh/config-work.template" ]]; then
-            envsubst < env/.ssh/config-work.template > "$HOME/.ssh/config-work"
+        if [[ -f "env/.ssh/config.template" ]]; then
+            envsubst < env/.ssh/config.template > "$HOME/.ssh/config"
         fi
-        chmod 600 $HOME/.ssh/config-work 2>/dev/null || true
+        chmod 600 $HOME/.ssh/config 2>/dev/null || true
     fi
-    
     
     installed_all_configs=1
 fi
