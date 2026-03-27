@@ -4,14 +4,76 @@ dry="0"
 only_configs=()
 installed_all_configs=0
 
-while [[ $# -gt 0 ]]; do
-    if [[ "$1" == "--dry" ]]; then
-        dry="1"
-    elif [[ "$1" == "--config" ]]; then
-        shift
-        only_configs+=("$1")
+show_help() {
+    local script_name
+    script_name="$(basename "$0")"
+
+    cat <<EOF
+Usage:
+  ./$script_name [options]
+
+What it does:
+  - With no --config: installs all files from env/ into your user paths
+  - With --config: installs only env/.config/<name> to \$XDG_CONFIG_HOME/<name>
+
+Options:
+  -c, --config <name>  Install only the given config (repeatable)
+  -d, --dry            Dry run mode (print actions without executing)
+  -h, --help           Show this help message and exit
+
+Examples:
+  ./$script_name
+  ./$script_name --dry
+  ./$script_name -c hypr
+  ./$script_name -c hypr -c waybar
+  ./$script_name --config nvim --dry
+
+Notes:
+  - Unknown options fail with an error
+  - --config requires a value (for example: -c nvim)
+EOF
+
+    local config_root="$script_dir/env/.config"
+    if [[ -d "$config_root" ]]; then
+        local config_names=()
+        local dir
+        for dir in "$config_root"/*; do
+            [[ -d "$dir" ]] || continue
+            config_names+=("$(basename "$dir")")
+        done
+
+        if [[ ${#config_names[@]} -gt 0 ]]; then
+            printf "\nAvailable config names:\n"
+            printf "  %s\n" "${config_names[@]}"
+        fi
     fi
-    shift
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -d|--dry)
+            dry="1"
+            shift
+            ;;
+        -c|--config)
+            if [[ -z "${2:-}" ]] || [[ "${2:0:1}" == "-" ]]; then
+                echo "Error: $1 requires a config name" >&2
+                show_help
+                exit 1
+            fi
+            only_configs+=("$2")
+            shift 2
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "Error: Unknown option: $1" >&2
+            show_help
+            exit 1
+            ;;
+    esac
 done
 
 cd "$script_dir"
@@ -160,24 +222,12 @@ else
     copy_dir env/.local/bin $LOCAL_BIN
     copy_dir env/.config $XDG_CONFIG_HOME
     copy_file env/.zshrc $HOME
-    
-    # Git and SSH configs
-    if [[ -f "env/.gitconfig" ]]; then
-        log "Installing .gitconfig..."
-        copy_file env/.gitconfig $HOME
-    fi
-    if [[ -f "env/.gitconfig-work" ]]; then
-        log "Installing .gitconfig-work..."
-        copy_file env/.gitconfig-work $HOME
-    fi
-    if [[ -d "env/.ssh" ]]; then
-        log "Installing SSH configs..."
-        copy_dir env/.ssh $HOME/.ssh
-        chmod 700 $HOME/.ssh
-        chmod 600 $HOME/.ssh/config-work 2>/dev/null || true
-    fi
-    
+
     # Copy .env.local template if user doesn't have one
+    if [[ -f "$HOME/.env.local" ]]; then
+        source "$HOME/.env.local"
+    fi
+
     if [[ -f "env/.env.local.template" ]]; then
         if [[ ! -f "$HOME/.env.local" ]]; then
             log "Creating .env.local from template..."
@@ -187,6 +237,25 @@ else
             log ".env.local already exists, skipping template"
         fi
     fi
+
+    # Git configs
+    if [[ -f "env/.gitconfig.template" ]]; then
+        envsubst < env/.gitconfig.template > "$HOME/.gitconfig"
+    fi
+    if [[ -f "env/.gitconfig-work.template" ]]; then
+        envsubst < env/.gitconfig-work.template > "$HOME/.gitconfig-work"
+    fi
+    
+    if [[ -d "env/.ssh" ]]; then
+        log "Installing SSH configs..."
+        copy_dir env/.ssh $HOME/.ssh
+        chmod 700 $HOME/.ssh
+        if [[ -f "env/.ssh/config-work.template" ]]; then
+            envsubst < env/.ssh/config-work.template > "$HOME/.ssh/config-work"
+        fi
+        chmod 600 $HOME/.ssh/config-work 2>/dev/null || true
+    fi
+    
     
     installed_all_configs=1
 fi

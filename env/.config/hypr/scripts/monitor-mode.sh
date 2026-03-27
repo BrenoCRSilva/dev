@@ -62,6 +62,7 @@ apply_internal_only() {
     
     # Restart waybar for single monitor
     killall waybar 2>/dev/null
+    sleep 0.5
     waybar &
 }
 
@@ -80,6 +81,7 @@ apply_external_only() {
     
     # Restart waybar
     killall waybar 2>/dev/null
+    sleep 0.5
     waybar &
 }
 
@@ -104,6 +106,7 @@ apply_extended() {
     
     # Restart waybar
     killall waybar 2>/dev/null
+    sleep 0.5
     waybar &
 }
 

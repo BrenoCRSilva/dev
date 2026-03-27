@@ -58,7 +58,17 @@ This is a **comprehensive Arch Linux development environment configuration repos
 ./dev-env.sh --config hypr
 ./dev-env.sh --config waybar
 ./dev-env.sh --config nvim
+
+# Short flags and help
+./dev-env.sh -c hypr -c waybar
+./dev-env.sh -d
+./dev-env.sh -h
 ```
+
+`dev-env.sh` options:
+- `-c, --config <name>`: install only one config (repeatable)
+- `-d, --dry`: dry run mode
+- `-h, --help`: show usage, examples, and available config names
 
 ### 3. Development & Backup
 ```bash
@@ -148,11 +158,23 @@ cd ~/personal/dev
 ./dev-env.sh
 ```
 
+If your shell uses `env/.zshrc`, you can use the alias:
+```bash
+dev
+```
+
 ### Update Specific Config
 ```bash
 ./dev-env.sh --config hypr
 ./dev-env.sh --config waybar
 ./dev-env.sh --config nvim
+
+# Equivalent short form
+./dev-env.sh -c hypr -c waybar
+
+# With alias + completion
+dev -c hypr
+dev -c <TAB>
 ```
 
 ### After Editing Configs

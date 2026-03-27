@@ -1,0 +1,9 @@
+[user]
+    name = ${GIT_USER_NAME}
+    email = ${GIT_USER_EMAIL}
+[core]
+    sshCommand = ssh
+[url "git@github.com:"]
+    insteadOf = https://github.com/
+[includeIf "gitdir:${WORK_PROJECTS_DIR}"]
+    path = ~/.gitconfig-work

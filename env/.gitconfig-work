@@ -1,5 +1,0 @@
-[core]
-	sshCommand = ssh -F ~/.ssh/config-work
-
-[url "git@github.com-talqui:"]
-	insteadOf = https://github.com/

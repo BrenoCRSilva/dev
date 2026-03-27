@@ -22,15 +22,9 @@ export ZSH_CACHE="$HOME/.cache/zsh"
 [[ ! -d $ZSH_CACHE ]] && mkdir -p $ZSH_CACHE
 export ZSH_COMPDUMP="$ZSH_CACHE/.zcompdump-${SHORT_HOST}-${ZSH_VERSION}"
 
-# Source user-specific environment variables (not tracked by git)
+# Source user-specific environment variables 
 if [[ -f "$HOME/.env.local" ]]; then
     source "$HOME/.env.local"
-fi
-
-# Set git user config from environment variables (if they exist)
-if [[ -n "${GIT_USER_NAME}" && -n "${GIT_USER_EMAIL}" ]]; then
-    git config --global user.name "${GIT_USER_NAME}"
-    git config --global user.email "${GIT_USER_EMAIL}"
 fi
 
 # Shell options
@@ -91,6 +85,33 @@ alias dev='~/personal/dev/dev-env.sh'
 alias tsinit='~/.local/bin/ts-init.sh'
 alias reload='source ~/.zshrc'
 alias tmsource='tmux source-file ~/.config/tmux/tmux.conf'
+
+# dev-env.sh completion
+_dev_env() {
+    local config_root="$HOME/personal/dev/env/.config"
+    local -a configs
+    local dir
+
+    if [[ -d "$config_root" ]]; then
+        for dir in "$config_root"/*(/N); do
+            configs+=("${dir:t}")
+        done
+    fi
+
+    _arguments \
+        '(-c --config)'{-c,--config}'[Install only one config]:config name:->configs' \
+        '(-d --dry)'{-d,--dry}'[Dry run mode]' \
+        '(-h --help)'{-h,--help}'[Show help message]' && return
+
+    case $state in
+        configs)
+            _describe -t configs 'config' configs
+            ;;
+    esac
+}
+
+compdef _dev_env dev
+compdef _dev_env dev-env.sh
 
 # Shell integrations
 eval "$(zoxide init --cmd cd zsh)"

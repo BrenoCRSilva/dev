@@ -1,0 +1,7 @@
+[user]
+    name = ${GIT_WORK_NAME}
+    email = ${GIT_WORK_EMAIL}
+[core]
+    sshCommand = ssh -F ~/.ssh/config-work
+[url "git@github.com-${COMPANY_NAME}:"]
+    insteadOf = https://github.com/

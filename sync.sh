@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-
-# Smart Sync - Handles both dev repo and nvim submodule
+#
+# Smart Sync - Handles dev repo and submodules with beautiful logging
+#
 
 set -e
+
+# Source common.sh for beautiful logging
+source "$(dirname "$0")/runs/common.sh"
 
 # Source .env.local if it exists (for git credentials)
 if [[ -f "$HOME/.env.local" ]]; then
@@ -15,46 +19,43 @@ if [[ -n "${GIT_USER_NAME}" && -n "${GIT_USER_EMAIL}" ]]; then
     git config --global user.email "${GIT_USER_EMAIL}" 2>/dev/null || true
 fi
 
-cd ~/personal/dev
+print_header "Dev Environment Sync"
 
-# Check if nvim submodule has changes
-if [ -d "env/.config/nvim/.git" ]; then
-    cd env/.config/nvim
+# Function to sync a git repo
+sync_repo() {
+    local repo_path="$1"
+    local repo_name="$2"
+    local commit_msg="$3"
     
-    # Check for uncommitted changes in nvim
-    if [ -n "$(git status --porcelain)" ]; then
-        echo "📝 Nvim submodule has uncommitted changes..."
-        git add .
-        git commit -m 'automated nvim commit' || echo "Nothing to commit in nvim"
-        git push || echo "Push failed or nothing to push in nvim"
-        cd ~/personal/dev
-        
-        # Update the submodule reference in parent repo
-        echo "📦 Updating nvim submodule reference..."
-        git add env/.config/nvim
-        git commit -m 'update nvim submodule' || echo "Submodule already up to date"
+    log_section "Syncing $repo_name"
+    
+    pushd "$repo_path" > /dev/null
+    
+    if [[ -n "$(git status --porcelain)" ]]; then
+        log_info "Found uncommitted changes"
+        execute git add .
+        execute git commit -m "$commit_msg" || log_warning "Nothing to commit"
+        execute git push || log_warning "Push failed or up to date"
     else
-        cd ~/personal/dev
-        
-        # Check if nvim is ahead/behind remote (not committed but pushed elsewhere)
-        cd env/.config/nvim
-        git fetch origin main 2>/dev/null || true
-        if [ "$(git rev-list HEAD..origin/main --count 2>/dev/null || echo 0)" -gt 0 ]; then
-            echo "⬇️  Pulling nvim updates..."
-            git pull origin main || echo "Pull failed"
-            cd ~/personal/dev
-            git add env/.config/nvim
-            git commit -m 'sync nvim submodule' || true
-        else
-            cd ~/personal/dev
-        fi
+        log_success "Already up to date"
     fi
+    
+    popd > /dev/null
+}
+
+# Sync nvim submodule
+if [[ -d "env/.config/nvim/.git" ]]; then
+    sync_repo "~/personal/dev/env/.config/nvim" "Nvim Config" "automated nvim commit"
+    
+    # Update submodule reference in parent repo
+    log_info "Updating nvim submodule reference"
+    pushd ~/personal/dev > /dev/null
+    git add env/.config/nvim
+    git commit -m "update nvim submodule" || log_warning "Submodule already up to date"
+    popd > /dev/null
 fi
 
-# Commit and push main dev repo
-echo "🚀 Syncing main dev repository..."
-git add .
-git commit -m 'automated dev commit' || echo "Nothing new to commit in dev repo"
-git push || echo "Push failed or up to date"
+# Sync main dev repo
+sync_repo ~/personal/dev "Dev Environment" "automated dev commit"
 
-echo "✅ Sync complete!"
+print_footer "Sync complete!"

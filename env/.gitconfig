@@ -1,9 +1,0 @@
-[core]
-	sshCommand = ssh
-
-[url "git@github.com:"]
-	insteadOf = https://github.com/
-
-# Work configuration for talqui projects
-[includeIf "gitdir:~/workplace/projects/talqui-*"]
-	path = ~/.gitconfig-work

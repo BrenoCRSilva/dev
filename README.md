@@ -42,6 +42,39 @@ cd dev
 - All dev tools (Node, Go, Rust, Python)
 - Configured for laptop OR desktop with dual monitors
 
+## Deploying Configs (`dev-env.sh`)
+
+Use `dev-env.sh` to copy tracked files from `env/` into your user directories.
+
+```bash
+# Install everything
+./dev-env.sh
+
+# Dry run (show actions only)
+./dev-env.sh --dry
+
+# Install only selected configs
+./dev-env.sh --config hypr
+./dev-env.sh -c waybar -c nvim
+
+# Help
+./dev-env.sh --help
+./dev-env.sh -h
+```
+
+### Options
+
+- `-c, --config <name>`: install only `env/.config/<name>` (repeatable)
+- `-d, --dry`: print actions without executing
+- `-h, --help`: show help and available config names
+
+### Zsh alias and completion
+
+If you use this repo's `.zshrc`, you also get:
+
+- Alias: `dev` -> `~/personal/dev/dev-env.sh`
+- Completion: `dev -c <TAB>` suggests config names from `~/personal/dev/env/.config/`
+
 ## Configuration
 
 The setup script will prompt you for:
