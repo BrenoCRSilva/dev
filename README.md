@@ -84,6 +84,8 @@ If you use this repo's `.zshrc`, you also get:
 
 When Neovim changes are present, `sync.sh` creates and pushes a commit in the Neovim repo first, then syncs the main dev repo.
 
+Note: repository detection is git-aware (`git -C <path> rev-parse`), so it works whether `.git` is a directory or a gitdir file.
+
 ## Configuration
 
 The setup script will prompt you for:

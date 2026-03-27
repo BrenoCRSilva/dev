@@ -43,9 +43,17 @@ sync_repo() {
     popd > /dev/null
 }
 
+is_git_repo() {
+    local repo_path="$1"
+    git -C "$repo_path" rev-parse --is-inside-work-tree > /dev/null 2>&1
+}
+
 # Sync nvim repo (separate repository)
-if [[ -d "env/.config/nvim/.git" ]]; then
-    sync_repo "$HOME/personal/dev/env/.config/nvim" "Nvim Config" "automated nvim commit"
+NVIM_REPO="$HOME/personal/dev/env/.config/nvim"
+if is_git_repo "$NVIM_REPO"; then
+    sync_repo "$NVIM_REPO" "Nvim Config" "automated nvim commit"
+else
+    log_info "Skipping Nvim Config (not a git repository)"
 fi
 
 # Sync main dev repo
