@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Smart Sync - Handles dev repo and submodules with beautiful logging
+# Smart Sync - Handles dev repo and nvim repo with beautiful logging
 #
 
 set -e
@@ -43,16 +43,9 @@ sync_repo() {
     popd > /dev/null
 }
 
-# Sync nvim submodule
+# Sync nvim repo (separate repository)
 if [[ -d "env/.config/nvim/.git" ]]; then
-    sync_repo "~/personal/dev/env/.config/nvim" "Nvim Config" "automated nvim commit"
-    
-    # Update submodule reference in parent repo
-    log_info "Updating nvim submodule reference"
-    pushd ~/personal/dev > /dev/null
-    git add env/.config/nvim
-    git commit -m "update nvim submodule" || log_warning "Submodule already up to date"
-    popd > /dev/null
+    sync_repo "$HOME/personal/dev/env/.config/nvim" "Nvim Config" "automated nvim commit"
 fi
 
 # Sync main dev repo

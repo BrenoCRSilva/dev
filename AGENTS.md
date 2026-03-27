@@ -197,7 +197,7 @@ cp ~/.config/waybar/config-desktop.jsonc env/.config/waybar/
 
 1. **DO NOT** edit files in `~/.config/` directly unless testing - always edit in `env/.config/` then deploy
 
-2. **DO NOT** commit to the neovim repo in `env/.config/nvim/` - it's a git submodule/subtree from a separate repo. Run `sync.sh` from the dev root instead.
+2. `env/.config/nvim/` may be a separate git repo. `sync.sh` syncs it when `.git` exists, then syncs the main dev repo. If working manually, treat nvim and main dev history as separate repositories.
 
 3. **Machine configs are SYMLINKED** - `~/.config/hypr/hyprland.conf` is a symlink to either `hyprland-desktop.conf` or `hyprland-laptop.conf`
 

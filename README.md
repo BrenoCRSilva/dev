@@ -75,6 +75,15 @@ If you use this repo's `.zshrc`, you also get:
 - Alias: `dev` -> `~/personal/dev/dev-env.sh`
 - Completion: `dev -c <TAB>` suggests config names from `~/personal/dev/env/.config/`
 
+## Sync Behavior (`sync.sh`)
+
+`sync.sh` syncs both repositories when available:
+
+- Main repo: `~/personal/dev`
+- Neovim repo: `~/personal/dev/env/.config/nvim` (if it has its own `.git`)
+
+When Neovim changes are present, `sync.sh` creates and pushes a commit in the Neovim repo first, then syncs the main dev repo.
+
 ## Configuration
 
 The setup script will prompt you for:
