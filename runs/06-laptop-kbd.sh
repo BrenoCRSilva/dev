@@ -4,8 +4,8 @@
 # Phase: 05 - Laptop-specific keyboard configuration
 #
 
-# shellcheck source=common.sh
-source "$(dirname "$0")/common.sh"
+# shellcheck source=../utils/utils.sh
+source "$(dirname "$0")/../utils/utils.sh"
 
 print_header "Laptop Keyboard Fixes"
 

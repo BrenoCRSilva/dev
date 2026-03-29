@@ -4,8 +4,8 @@
 # Phase: 04 - Display manager setup
 #
 
-# shellcheck source=common.sh
-source "$(dirname "$0")/common.sh"
+# shellcheck source=../utils/utils.sh
+source "$(dirname "$0")/../utils/utils.sh"
 
 print_header "SDDM Display Manager Setup"
 

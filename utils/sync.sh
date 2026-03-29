@@ -6,7 +6,7 @@
 set -e
 
 # Source common.sh for beautiful logging
-source "$(dirname "$0")/runs/common.sh"
+source "$(dirname "$0")/utils.sh"
 
 # Source .env.local if it exists (for git credentials)
 if [[ -f "$HOME/.env.local" ]]; then

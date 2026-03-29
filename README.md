@@ -42,24 +42,24 @@ cd dev
 - All dev tools (Node, Go, Rust, Python)
 - Configured for laptop OR desktop with dual monitors
 
-## Deploying Configs (`dev-env.sh`)
+## Deploying Configs (`utils/dev-env.sh`)
 
 Use `dev-env.sh` to copy tracked files from `env/` into your user directories.
 
 ```bash
 # Install everything
-./dev-env.sh
+./utils/dev-env.sh
 
 # Dry run (show actions only)
-./dev-env.sh --dry
+./utils/dev-env.sh --dry
 
 # Install only selected configs
-./dev-env.sh --config hypr
-./dev-env.sh -c waybar -c nvim
+./utils/dev-env.sh --config hypr
+./utils/dev-env.sh -c waybar -c nvim
 
 # Help
-./dev-env.sh --help
-./dev-env.sh -h
+./utils/dev-env.sh --help
+./utils/dev-env.sh -h
 ```
 
 ### Options
@@ -72,12 +72,12 @@ Use `dev-env.sh` to copy tracked files from `env/` into your user directories.
 
 If you use this repo's `.zshrc`, you also get:
 
-- Alias: `dev` -> `~/personal/dev/dev-env.sh`
+- Alias: `dev` -> `~/personal/dev/utils/dev-env.sh`
 - Completion: `dev -c <TAB>` suggests config names from `~/personal/dev/env/.config/`
 
-## Sync Behavior (`sync.sh`)
+## Sync Behavior (`utils/sync.sh`)
 
-`sync.sh` syncs both repositories when available:
+`utils/sync.sh` syncs both repositories when available:
 
 - Main repo: `~/personal/dev`
 - Neovim repo: `~/personal/dev/env/.config/nvim` (if it has its own `.git`)
@@ -92,8 +92,8 @@ The setup script will prompt you for:
 - Machine type (laptop/desktop)
 - Monitor names (if desktop)
 
-Configs are automatically adapted based on your choices. You can rerun `./machine-conf.sh`
-anytime to regenerate `.machine.conf` without going through the entire installer.
+Configs are automatically adapted based on your choices. You can rerun `./utils/machine-conf.sh`
+anytime to regenerate monitor and machine values in `~/.env.local` without going through the entire installer.
 
 ### Git Configuration
 
@@ -101,8 +101,10 @@ The dotfiles use environment variables for git user configuration. These are sto
 
 **First time setup:**
 ```bash
-# The template was copied to ~/.env.local during installation
-# Edit it with your information:
+# Run interactive setup (or run full ./install.sh)
+./runs/00-setup.sh
+
+# You can edit values later
 nano ~/.env.local
 ```
 

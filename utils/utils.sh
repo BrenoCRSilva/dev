@@ -11,35 +11,24 @@ readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
 readonly BLUE='\033[0;34m'
-readonly NC='\033[0m' # No Color
+readonly NC='\033[0m'
 
-# Script directory detection
+# Source of truth for machine-specific config
+ENV_LOCAL="$HOME/.env.local"
+
 get_script_dir() {
     cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
 }
 
 get_repo_root() {
-    local script_dir
-    script_dir="$(get_script_dir)"
-    dirname "$script_dir"
+    dirname "$(get_script_dir)"
 }
 
 # Logging functions
-log_info() {
-    echo -e "${BLUE}ℹ${NC} $1"
-}
-
-log_success() {
-    echo -e "${GREEN}✓${NC} $1"
-}
-
-log_warning() {
-    echo -e "${YELLOW}⚠${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}✗${NC} $1"
-}
+log_info()    { echo -e "${BLUE}ℹ${NC} $1"; }
+log_success() { echo -e "${GREEN}✓${NC} $1"; }
+log_warning() { echo -e "${YELLOW}⚠${NC} $1"; }
+log_error()   { echo -e "${RED}✗${NC} $1"; }
 
 log_section() {
     echo ""
@@ -47,90 +36,71 @@ log_section() {
     echo "────────────────────────────────────────"
 }
 
-# Check if running on a laptop
-is_laptop() {
-    local repo_root
-    repo_root="$(get_repo_root)"
-    
-    if [[ ! -f "$repo_root/.machine.conf" ]]; then
+# Load ~/.env.local and export machine vars
+load_machine_env() {
+    if [[ ! -f "$ENV_LOCAL" ]]; then
+        log_error "Missing $ENV_LOCAL — run ./runs/00-setup.sh first"
         return 1
     fi
-    
     # shellcheck source=/dev/null
-    source "$repo_root/.machine.conf"
+    source "$ENV_LOCAL"
+    export MACHINE_TYPE MONITOR_PRIMARY MONITOR_SECONDARY \
+           GIT_USER_NAME GIT_USER_EMAIL GIT_WORK_NAME GIT_WORK_EMAIL
+}
+
+# Check if running on a laptop
+is_laptop() {
+    [[ -f "$ENV_LOCAL" ]] || return 1
+    # shellcheck source=/dev/null
+    source "$ENV_LOCAL"
     [[ "${MACHINE_TYPE:-}" == "laptop" ]]
 }
 
-# Check if command exists
-command_exists() {
-    command -v "$1" &> /dev/null
-}
+command_exists()     { command -v "$1" &>/dev/null; }
+is_package_installed() { pacman -Q "$1" &>/dev/null; }
 
-# Check if package is installed (pacman)
-is_package_installed() {
-    pacman -Q "$1" &> /dev/null
-}
-
-# Install packages with pacman (official repo)
 install_packages() {
     local packages=("$@")
     log_info "Installing packages: ${packages[*]}"
     sudo pacman -S --noconfirm --needed "${packages[@]}"
 }
 
-# Install packages with paru (AUR)
 install_aur_packages() {
     local packages=("$@")
-    
     if ! command_exists paru; then
-        log_error "paru is not installed. Please install paru first."
+        log_error "paru is not installed."
         return 1
     fi
-    
     log_info "Installing AUR packages: ${packages[*]}"
     paru -S --noconfirm --needed "${packages[@]}"
 }
 
-# Ensure directory exists
 ensure_dir() {
     local dir="$1"
-    if [[ ! -d "$dir" ]]; then
-        mkdir -p "$dir"
-    fi
+    [[ ! -d "$dir" ]] && mkdir -p "$dir"
 }
 
-# Backup file if it exists
 backup_file() {
     local file="$1"
-    local backup
-    
     if [[ -f "$file" ]]; then
-        backup="${file}.backup.$(date +%Y%m%d_%H%M%S)"
-        log_warning "Backing up existing file: $file -> $backup"
+        local backup="${file}.backup.$(date +%Y%m%d_%H%M%S)"
+        log_warning "Backing up: $file -> $backup"
         cp "$file" "$backup"
     fi
 }
 
-# Check if service is enabled
-is_service_enabled() {
-    systemctl is-enabled --quiet "$1" 2>/dev/null
-}
+is_service_enabled() { systemctl is-enabled --quiet "$1" 2>/dev/null; }
 
-# Enable and start systemd service
 enable_service() {
-    local service="$1"
-    log_info "Enabling service: $service"
-    sudo systemctl enable --now "$service"
+    log_info "Enabling service: $1"
+    sudo systemctl enable --now "$1"
 }
 
-# Enable user systemd service
 enable_user_service() {
-    local service="$1"
-    log_info "Enabling user service: $service"
-    systemctl --user enable --now "$service"
+    log_info "Enabling user service: $1"
+    systemctl --user enable --now "$1"
 }
 
-# Run command with dry-run support
 dry_run="${DRY_RUN:-0}"
 
 execute() {
@@ -141,17 +111,14 @@ execute() {
     fi
 }
 
-# Print script header
 print_header() {
-    local script_name="$1"
     echo ""
     echo "════════════════════════════════════════"
-    echo "  $script_name"
+    echo "  $1"
     echo "════════════════════════════════════════"
     echo ""
 }
 
-# Print script footer
 print_footer() {
     local message="${1:-Complete!}"
     echo ""
@@ -161,35 +128,23 @@ print_footer() {
     echo ""
 }
 
-# Verify prerequisites
 verify_prerequisites() {
     local deps=("$@")
     local missing=()
-    
     for dep in "${deps[@]}"; do
-        if ! command_exists "$dep"; then
-            missing+=("$dep")
-        fi
+        command_exists "$dep" || missing+=("$dep")
     done
-    
     if [[ ${#missing[@]} -gt 0 ]]; then
         log_error "Missing prerequisites: ${missing[*]}"
         return 1
     fi
-    
-    return 0
 }
 
-# Check if we're in the correct directory
 verify_repo_structure() {
     local repo_root
     repo_root="$(get_repo_root)"
-    
     if [[ ! -d "$repo_root/env" ]]; then
-        log_error "Not in the correct repository structure"
-        log_error "Expected: $repo_root/env directory not found"
+        log_error "Expected $repo_root/env directory not found"
         return 1
     fi
-    
-    return 0
 }
