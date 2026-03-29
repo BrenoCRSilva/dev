@@ -5,7 +5,7 @@
 # When no Sofle: kanata ON (user can toggle with Alt+I)
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
-KANATA_BIN="$HOME/.cargo/bin/kanata"
+KANATA_BIN=$(which kanata) || { notify-send "Kanata" "Binary not found in PATH"; exit 1; }
 KANATA_CONFIG="$CONFIG_DIR/kanata/kanata.kbd"
 STATE_FILE="/tmp/kanata-state"
 

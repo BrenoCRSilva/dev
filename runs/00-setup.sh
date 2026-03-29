@@ -96,6 +96,7 @@ prompt_git_config() {
     read -r -p "Git personal email: " GIT_USER_EMAIL
     read -r -p "Git work name (leave blank to skip): "  GIT_WORK_NAME
     read -r -p "Git work email (leave blank to skip): " GIT_WORK_EMAIL
+    read -r -p "Company name (leave blank to skip): " COMPANY_NAME
 }
 
 # ─── Write ~/.env.local ───────────────────────────────────────────────────────
@@ -114,6 +115,7 @@ export GIT_USER_NAME="$GIT_USER_NAME"
 export GIT_USER_EMAIL="$GIT_USER_EMAIL"
 export GIT_WORK_NAME="$GIT_WORK_NAME"
 export GIT_WORK_EMAIL="$GIT_WORK_EMAIL"
+export COMPANY_NAME="$COMPANY_NAME"
 ENV
 
     log_success "Written to $ENV_LOCAL"
