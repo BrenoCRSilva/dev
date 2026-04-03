@@ -55,7 +55,7 @@ window#waybar.hidden {
 #custom-power-menu {
     padding-left: 14px;
     padding-right: 14px;
-    margin-left: 5px;
+    margin-left: 10px;
     margin-right: 5px;
     border-radius: 9px;
     color: #eb6f92;
@@ -83,7 +83,7 @@ window#waybar.hidden {
    MONITOR 1 (DP-3) - RIGHT: Kanata
    ================================================================================ */
 #custom-kanata {
-    margin-right: 5px;
+    margin-right: 10px;
     border-radius: 9px;
     color: #31748f;  /* Default pine color */
 }
@@ -123,7 +123,7 @@ window#waybar.hidden {
     MONITOR 2 (HDMI-A-1) - LEFT: CPU + Memory + Network
     ================================================================================ */
 #cpu {
-    margin-left: 5px;
+    margin-left: 10px;
     border-top-left-radius: 9px;
     border-bottom-left-radius: 9px;
     color: #c4a7e7;
@@ -143,6 +143,8 @@ window#waybar.hidden {
 
 #network {
     color: #f6c177;
+    border-top-right-radius: 9px;
+    border-bottom-right-radius: 9px;
 }
 
 #network:hover {
@@ -189,7 +191,7 @@ window#waybar.hidden {
 }
 
 #clock {
-    margin-right: 5px;
+    margin-right: 10px;
     border-top-right-radius: 9px;
     border-bottom-right-radius: 9px;
     color: #e0def4;
