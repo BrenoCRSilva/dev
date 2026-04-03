@@ -22,7 +22,13 @@ build_monitor_lines() {
             echo "monitor=,preferred,auto,1"
         else
             echo "monitor=$MONITOR_PRIMARY,preferred,auto,1"
-            [[ -n "$MONITOR_SECONDARY" ]] && echo "monitor=$MONITOR_SECONDARY,preferred,auto,1"
+            if [[ -n "$MONITOR_SECONDARY" ]]; then
+                local transform_suffix=""
+                if [[ -n "${MONITOR_SECONDARY_TRANSFORM:-}" && "$MONITOR_SECONDARY_TRANSFORM" != "0" ]]; then
+                    transform_suffix=",transform,$MONITOR_SECONDARY_TRANSFORM"
+                fi
+                echo "monitor=$MONITOR_SECONDARY,preferred,auto,1${transform_suffix}"
+            fi
         fi
         return
     fi
@@ -42,7 +48,6 @@ build_monitor_lines() {
     primary_y="$(jq -r --arg m "$MONITOR_PRIMARY" \
         '.[] | select(.name == $m) | .y' <<< "$monitors_json")"
 
-    # Fall back to preferred if monitor isn't detected yet (e.g. fresh install)
     primary_res="${primary_res:-preferred}"
     primary_scale="${primary_scale:-1}"
     primary_x="${primary_x:-0}"
@@ -71,8 +76,14 @@ build_monitor_lines() {
     fi
 
     echo "monitor=$MONITOR_PRIMARY,${primary_res},${primary_x}x${primary_y},${primary_scale}"
-    [[ -n "$MONITOR_SECONDARY" ]] && \
-        echo "monitor=$MONITOR_SECONDARY,${secondary_res},${secondary_x}x${secondary_y},${secondary_scale}"
+
+    if [[ -n "$MONITOR_SECONDARY" ]]; then
+        local transform_suffix=""
+        if [[ -n "${MONITOR_SECONDARY_TRANSFORM:-}" && "$MONITOR_SECONDARY_TRANSFORM" != "0" ]]; then
+            transform_suffix=",transform,$MONITOR_SECONDARY_TRANSFORM"
+        fi
+        echo "monitor=$MONITOR_SECONDARY,${secondary_res},${secondary_x}x${secondary_y},${secondary_scale}${transform_suffix}"
+    fi
 }
 
 # ─── Patch monitor section in a hyprland conf file ───────────────────────────

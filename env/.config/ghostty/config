@@ -31,11 +31,11 @@ font-style-italic = italic
 
 # Window appearance
 window-decoration = false
-background-opacity = 0.8
+background-opacity = 0.95
 
 # Colors (matching your WezTerm theme)
 foreground = ffffff
-background = 0c0b12
+background = 14121C
 cursor-color = 808080
 
 # Window padding (0 padding like WezTerm)

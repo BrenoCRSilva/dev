@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
-
 core_dirs=(
     "$HOME/personal/projects"
     "$HOME/personal/dev"
     "$HOME/workspace/projects"
 )
-
 nvim_dir=(
     "$HOME/personal/dev/env/.config/nvim"
 )
-
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
 # Read additional directories from config
 DIRS_FILE="$CONFIG_DIR/tmux-sessionizer/directories"
@@ -23,7 +20,6 @@ if [[ -f "$DIRS_FILE" ]]; then
         [[ -d "$expanded" ]] && additional_dirs+=("$expanded")
     done < "$DIRS_FILE"
 fi
-
 # Combine all finds
 all_found=$(
     # Deep search (2 levels) - core directories
@@ -41,26 +37,35 @@ all_found=$(
         echo "$dir"
     done
 )
-
 selected=$(echo "$all_found" | fzf)
-
 if [[ -z "$selected" ]]; then
     exit 0
 fi
 
-base_name=$(basename "$selected" | tr . _)
+# Git pull in background if this is a git repo
+git_pull_if_repo() {
+    local dir="$1"
+    if git -C "$dir" rev-parse --is-inside-work-tree &>/dev/null; then
+        # Only pull if there's a tracking remote branch
+        local branch
+        branch=$(git -C "$dir" symbolic-ref --short HEAD 2>/dev/null)
+        if git -C "$dir" config --get "branch.${branch}.remote" &>/dev/null; then
+            git -C "$dir" pull --rebase --autostash &>/dev/null &
+        fi
+    fi
+}
 
+base_name=$(basename "$selected" | tr . _)
 # If the path is under /mnt, prepend "win-" to the name
 if [[ "$selected" == /mnt/* ]]; then
     selected_name="win-${base_name}"
 else
     selected_name=$base_name
 fi
-
 tmux_running=$(pgrep tmux)
-
 # If not in tmux and tmux is not running, start a new session with windows
 if [[ -z $TMUX ]] && [[ -z $tmux_running ]]; then
+    git_pull_if_repo "$selected"
     tmux new-session -s "$selected_name" -c "$selected"  \; \
         send-keys -t "$selected_name" "nvim" Enter \; \
         new-window -t "$selected_name:2" -c "$selected" \; \
@@ -69,9 +74,9 @@ if [[ -z $TMUX ]] && [[ -z $tmux_running ]]; then
         select-window -t "$selected_name:1"
     exit 0
 fi
-
 # Create session if it doesn't exist
 if ! tmux has-session -t="$selected_name" 2> /dev/null; then
+    git_pull_if_repo "$selected"
     tmux new-session -ds "$selected_name" -c "$selected" \; \
         send-keys -t "$selected_name" "nvim" Enter \; \
         new-window -t "$selected_name:2" -c "$selected" \; \
@@ -79,7 +84,6 @@ if ! tmux has-session -t="$selected_name" 2> /dev/null; then
         new-window -t "$selected_name:3" -c "$selected" \; \
         select-window -t "$selected_name:1"
 fi
-
 # Switch to the session (works both inside and outside tmux)
 if [[ -z $TMUX ]]; then
     tmux attach-session -t "$selected_name"
