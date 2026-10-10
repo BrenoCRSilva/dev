@@ -1,0 +1,5 @@
+*.bak*
+*.log
+.env
+.env.*
+.config/herdr/sessions/
