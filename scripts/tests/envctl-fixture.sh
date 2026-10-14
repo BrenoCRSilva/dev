@@ -77,6 +77,24 @@ unlink "$home/.config/app/outward.conf"
 sed -i '$d' "$root/env/dotfiles.manifest"
 rm -rf "$root/env/.config/omarchy/themes" "$home/.config/omarchy/themes"
 
+# The separately installed Spotlight checkout is external plugin code. It is
+# excluded as a whole, including globbed descendants, while authored plugins
+# in the same manifest root remain deployable.
+mkdir -p "$root/env/.config/omarchy/plugins/pontual.tasks" \
+  "$root/env/.config/omarchy/plugins/io.github.maajix.spotlight" \
+  "$home/.config/omarchy/plugins/io.github.maajix.spotlight/bin"
+printf 'authored plugin\n' > "$root/env/.config/omarchy/plugins/pontual.tasks/Tasks.qml"
+printf 'external mirror candidate\n' > "$root/env/.config/omarchy/plugins/io.github.maajix.spotlight/README.md"
+printf 'external live helper\n' > "$home/.config/omarchy/plugins/io.github.maajix.spotlight/bin/spotlight-helper"
+printf '.config/omarchy/plugins\n' >> "$root/env/dotfiles.manifest"
+plugin_plan="$(run plan apply)"
+[[ "$plugin_plan" == *".config/omarchy/plugins/pontual.tasks/Tasks.qml"* ]]
+[[ "$plugin_plan" != *"io.github.maajix.spotlight"* ]]
+plugin_capture="$(run capture --dry-run)"
+[[ "$plugin_capture" != *"io.github.maajix.spotlight"* ]]
+sed -i '$d' "$root/env/dotfiles.manifest"
+rm -rf "$root/env/.config/omarchy/plugins" "$home/.config/omarchy/plugins"
+
 # Capture shows a diff, backs up env changes, replaces a final symlink itself,
 # and restore reverses the mirror update.
 printf 'captured user edit\n' > "$home/.config/app/main.conf"
@@ -204,7 +222,7 @@ run restore "$prune_backup" >/dev/null
 # fixed capture/commit/push contract. A fake Git executable keeps the fixture
 # fully local and proves it cannot publish real data.
 sync_home="$tmp/sync-home"
-sync_root="$sync_home/personal/projects/dotfiles"
+sync_root="$sync_home/Projects/dotfiles"
 sync_live="$tmp/sync-live"
 sync_state="$tmp/sync-state"
 fake_bin="$tmp/fake-bin"

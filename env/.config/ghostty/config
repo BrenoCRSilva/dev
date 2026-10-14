@@ -1,6 +1,6 @@
 # Font Configuration
 config-file = ?"~/.local/state/omarchy/current/theme/ghostty.conf"
-font-size = 15
+font-size = 12
 
 font-family = "FiraCode Nerd Font"
 font-style = Light

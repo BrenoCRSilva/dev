@@ -12,8 +12,8 @@
         },
         {
           "id": "omarchy.clock",
-          "format": "ddd HH:mm:ss",
-          "formatAlt": "d MMM yyyy HH:mm:ss"
+          "format": "HH:mm",
+          "formatAlt": "d MMM yyyy"
         },
         {
           "id": "foamy.notification-center"
@@ -27,7 +27,8 @@
           "id": "pontual.workspaces"
         },
         {
-          "id": "sys-monitor"
+          "id": "sys-monitor",
+          "showNet": false
         }
       ],
       "right": [
@@ -64,7 +65,7 @@
       ]
     },
     "position": "top",
-    "transparent": false
+    "transparent": true
   },
   "idle": {
     "lock": 300,
@@ -75,10 +76,10 @@
       "id": "pontual.tasks"
     },
     {
-      "id": "pontual.search"
+      "id": "foamy.notification-center"
     },
     {
-      "id": "foamy.notification-center"
+      "id": "io.github.maajix.spotlight"
     }
   ],
   "version": 1

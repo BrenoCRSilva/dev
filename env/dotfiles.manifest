@@ -14,6 +14,7 @@
 .config/omarchy/themes
 .config/omarchy/themed
 .config/herdr/config.toml
+.config/voxtype/config.toml
 .config/tmux
 .config/nvim
 .config/mimeapps.list
@@ -21,3 +22,4 @@
 .local/share/dbus-1/services/io.github.lgse.Strata.FileManager1.service
 !.config/hypr/input.lua
 !.config/hypr/monitors.lua
+.config/omarchy/spotlight.json

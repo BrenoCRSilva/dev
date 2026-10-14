@@ -18,6 +18,7 @@ export PATH="$PATH:$HOME/.local/share/nvim/mason/bin"
 export PATH="$PATH:$HOME/.local/npm/bin"
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"  # THIS IS THE KEY LINE
 export XDG_CONFIG_HOME="$HOME/.config"
+export XDG_PROJECTS_DIR="$HOME/Projects"
 export ZSH_CACHE="$HOME/.cache/zsh"
 export KUBECONFIG="$HOME/.kube/talqui-k3s.yaml"
 export FLUX_SYSTEM_NAMESPACE=flux-base
@@ -92,8 +93,8 @@ alias ls='ls --color'
 alias c='clear'
 alias b='cd ..'
 alias cdwin='cd /mnt/c/Users/breno/'
-alias sync='~/personal/projects/dotfiles/scripts/sync.sh'
-alias dev='~/personal/projects/dotfiles/scripts/envctl'
+alias sync='~/Projects/dotfiles/scripts/sync.sh'
+alias dev='~/Projects/dotfiles/scripts/envctl'
 alias tsinit='~/.local/bin/ts-init.sh'
 alias reload='source ~/.zshrc'
 alias tmsource='tmux source-file ~/.config/tmux/tmux.conf'
@@ -103,7 +104,7 @@ alias windows='sudo efibootmgr --bootnext 0000 && systemctl reboot'
 
 # envctl completion, including explicit managed-path pruning from env/.config.
 _dev_envctl() {
-    local repo="$HOME/personal/projects/dotfiles"
+    local repo="$HOME/Projects/dotfiles"
     local config_root="$repo/env/.config"
     local env_root="$repo/env"
     local path
@@ -185,6 +186,12 @@ eval "$(zoxide init --cmd cd zsh)"
 if [[ -o interactive ]]; then
   # Project-local tool versions, matching Omarchy's Bash startup behavior.
   eval "$(mise activate zsh)"
+
+  # Enable the Omarchy `try` workspace helper only when no user alias/function
+  # already owns that name. Its bin directory is managed by ~/Work/.mise.toml.
+  if command -v try >/dev/null 2>&1 && ! alias try >/dev/null 2>&1 && (( ! $+functions[try] )); then
+    eval "$(command try init "$HOME/Work/tries")"
+  fi
 
   # Add fzf's widgets without taking over the user's Ctrl-T/Ctrl-R or
   # fzf-tab completion key. Preserve existing bindings in every standard ZLE
