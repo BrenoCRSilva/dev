@@ -219,8 +219,6 @@ do
 
 	local PROTECTED = { main = true, master = true, develop = true, staging = true }
 
-	local BRANCH_PREFIXES = { "feat", "fix", "wip", "chore", "refactor", "docs", "test", "hotfix" }
-
 	local function get_main_branch()
 		local ref = vim.fn.system("git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null"):gsub("%s+", "")
 		if ref ~= "" then
@@ -280,109 +278,12 @@ do
 		return deletable
 	end
 
-	local function prune_merged()
-		local deletable, err = get_deletable_merged()
-		if not deletable then
-			vim.notify(err, vim.log.levels.WARN)
-			return {}
-		end
-		local deleted = {}
-		for _, branch in ipairs(deletable) do
-			vim.fn.system("git branch -d " .. vim.fn.shellescape(branch))
-			table.insert(deleted, branch)
-		end
-		return deleted
-	end
-
-	local function get_branches()
-		local output = vim.fn.systemlist("git branch --sort=-committerdate 2>/dev/null")
-		local branches, current = {}, nil
-		for _, line in ipairs(output) do
-			local is_current = line:sub(1, 1) == "*"
-			local name = line:gsub("^[%*%s]+", "")
-			if is_current then
-				current = name
-				table.insert(branches, 1, "* " .. name .. " (current)")
-			else
-				table.insert(branches, "  " .. name)
-			end
-		end
-		return branches, current
-	end
-
-	local function parse_branch(label)
-		return label:gsub("^[%*%s]+", ""):gsub("%s*%(current%)$", "")
-	end
-
-	local function pick_branch_prefix(cb)
-		vim.ui.select(BRANCH_PREFIXES, { prompt = "Branch prefix:" }, function(prefix)
-			if not prefix then
-				return
-			end
-			vim.ui.input({ prompt = "Branch name (no spaces): " }, function(name)
-				if not name or name == "" then
-					return
-				end
-				cb(prefix .. "/" .. name)
-			end)
-		end)
-	end
-
-	local function run_git_checked(args)
-		local output = vim.fn.system(vim.list_extend({ "git" }, args))
-		if vim.v.shell_error == 0 then
-			return true
-		end
-		vim.notify(vim.trim(output), vim.log.levels.ERROR)
-		return false
-	end
-
-	local function create_branch(full_name, current)
-		local base = get_main_branch()
-		local choices = { "Current branch (" .. (current or "HEAD") .. ")" }
-		if base then
-			table.insert(choices, base .. " (pull first)")
-		end
-
-		vim.ui.select(choices, { prompt = "Branch from:" }, function(choice)
-			if not choice then
-				return
-			end
-			if base and choice == base .. " (pull first)" then
-				if not run_git_checked({ "checkout", base }) then
-					return
-				end
-				if not run_git_checked({ "pull", "--rebase" }) then
-					return
-				end
-			end
-			run_git({ "checkout", "-b", full_name }, { success = "Created: " .. full_name })
-		end)
-	end
-
 	vim.keymap.set("n", "<leader>gb", function()
-		local pruned = prune_merged()
-		if #pruned > 0 then
-			vim.notify("Pruned merged: " .. table.concat(pruned, ", "), vim.log.levels.INFO)
-		end
-
-		local branches, current = get_branches()
-		local items = vim.list_extend({ "+ New branch..." }, branches)
-
-		vim.ui.select(items, { prompt = "Checkout branch:" }, function(choice)
-			if not choice then
-				return
-			end
-			if choice:match("^%+") then
-				pick_branch_prefix(function(full_name)
-					create_branch(full_name, current)
-				end)
-			else
-				local branch = parse_branch(choice)
-				run_git({ "checkout", branch }, { success = "Checked out: " .. branch })
-			end
-		end)
-	end)
+		require("brenocrs.git-branches").pick()
+	end, { desc = "Branches (picker)" })
+	vim.keymap.set("n", "<leader>gB", function()
+		require("brenocrs.git-branches").neogit_popup()
+	end, { desc = "Branches (Neogit popup)" })
 
 	vim.keymap.set("n", "<leader>gD", function()
 		local deletable, err = get_deletable_merged()
