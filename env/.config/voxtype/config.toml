@@ -44,12 +44,12 @@ pause_media = true
 # .en models are English-only but faster and more accurate for English
 # large-v3-turbo is faster than large-v3 with minimal accuracy loss (recommended for GPU)
 # Or provide absolute path to a custom .bin model file
-model = "base"
+model = "large-v3-turbo"
 
 # Language for transcription
 # Use "en" for English, "auto" for auto-detection
 # See: https://github.com/openai/whisper#available-models-and-languages
-language = "auto"
+language = "pt,en"
 
 # Translate non-English speech to English
 translate = false
@@ -89,6 +89,16 @@ on_recording_stop = false
 
 # Show notification with transcribed text after transcription completes
 on_transcription = false
+
+[osd]
+position = "bottom-center"
+frontend = "quickshell"
+enabled = false
+
+[text]
+
+[text.replacements]
+walmart = "Omarchy"
 
 # [text]
 # Text processing options (word replacements, spoken punctuation)
