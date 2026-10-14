@@ -62,8 +62,8 @@ return {
 		},
 		file_panel = {
 			listing_style = "list",
-			-- Beside the diff, 30 columns wide. <leader>b (toggle_files) still hides it.
-			win_config = { position = "left", width = 30 },
+			-- Bottom split, so the diffs keep their full width. <leader>b (toggle_files) still hides it.
+			win_config = { position = "bottom", height = 14 },
 		},
 		file_history_panel = {
 			win_config = { position = "bottom", height = 16 },
