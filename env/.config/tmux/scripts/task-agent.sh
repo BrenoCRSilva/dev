@@ -15,10 +15,13 @@ set -euo pipefail
 ROLES_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/task-roles"
 
 declare -A MODEL=(
-    [claude:orchestrator]=claude-opus-5-5 [claude:repo]=claude-haiku-5-5 [claude:researcher]=claude-sonnet-5-5
+    [claude:orchestrator]=claude-opus-5-5 [claude:repo]=claude-haiku-5-5 [claude:researcher]=claude-haiku-5-5
     [codex:orchestrator]=gpt-6-astra      [codex:repo]=gpt-6-luna         [codex:researcher]=gpt-6-luna
 )
-declare -A EFFORT=([orchestrator]=medium [repo]=high [researcher]=medium)
+declare -A EFFORT=(
+    [claude:orchestrator]=medium [claude:repo]=high [claude:researcher]=high
+    [codex:orchestrator]=medium  [codex:repo]=high  [codex:researcher]=medium
+)
 declare -A PROMPT=([orchestrator]=orchestrator.md [repo]=repo-agent.md [researcher]=researcher.md)
 
 # --- arguments -------------------------------------------------------------
@@ -85,11 +88,11 @@ agent_args() {
     file="$ROLES_DIR/${PROMPT[$role]}"
     [[ -f "$file" ]] || { echo "task-agent: missing $file" >&2; exit 1; }
     if [[ $provider == claude ]]; then
-        ARGS=(--model "${MODEL[claude:$role]}" --effort "${EFFORT[$role]}" --append-system-prompt-file "$file")
+        ARGS=(--model "${MODEL[claude:$role]}" --effort "${EFFORT[claude:$role]}" --append-system-prompt-file "$file")
         if [[ $role == repo ]]; then
-            ARGS+=(--permission-mode acceptEdits --add-dir "$canonical_repo/.git")
+            ARGS+=(--permission-mode auto --add-dir "$canonical_repo/.git")
         elif [[ $role == researcher ]]; then
-            ARGS+=(--permission-mode acceptEdits)
+            ARGS+=(--permission-mode auto)
         fi
         if [[ $want_resume == yes ]]; then ARGS+=(--continue); fi
     else
@@ -100,10 +103,58 @@ agent_args() {
         fi
         ARGS=()
         if [[ $want_resume == yes ]]; then ARGS=(resume --last); fi
-        ARGS+=(-m "${MODEL[codex:$role]}" -c "model_reasoning_effort=\"${EFFORT[$role]}\"" -c "developer_instructions=$prompt")
-        if [[ $role == repo ]]; then ARGS+=(-s workspace-write --add-dir "$canonical_repo/.git"); fi
-        if [[ $role == researcher ]]; then ARGS+=(-s workspace-write); fi
+        ARGS+=(-m "${MODEL[codex:$role]}" -c "model_reasoning_effort=\"${EFFORT[codex:$role]}\"" -c "developer_instructions=$prompt")
+        # Codex's closest match to Claude's auto mode: the model decides when to
+        # ask (on-request), inside the same workspace-write sandbox as before.
+        if [[ $role == repo ]]; then ARGS+=(-a on-request -s workspace-write --add-dir "$canonical_repo/.git"); fi
+        if [[ $role == researcher ]]; then ARGS+=(-a on-request -s workspace-write); fi
     fi
+}
+
+# Claude asks once per directory whether to trust it, which stalls an unattended
+# start. Before a repo or researcher agent starts in its pane, mark the pane's
+# cwd trusted in ~/.claude.json. Only projects[<cwd>].hasTrustDialogAccepted is
+# set; the file is replaced through a temp file and mv, so other keys and other
+# sessions' entries are kept.
+trust_pane_cwd() {
+    local cfg="$HOME/.claude.json" cwd tmp state
+    # jq program: $p is jq's variable (passed by --arg), not a shell expansion.
+    # shellcheck disable=SC2016
+    local filter='.projects //= {} | .projects[$p] //= {} | .projects[$p].hasTrustDialogAccepted = true'
+    cwd=$(herdr pane get "$pane" 2>/dev/null | jq -r '.result.pane.cwd // empty' 2>/dev/null) || cwd=
+    if [[ -z "$cwd" ]]; then
+        if [[ $dry_run == yes ]]; then
+            echo "trust: cannot read the cwd of pane $pane (herdr lookup failed); nothing to mark"
+            return 0
+        fi
+        echo "task-agent: cannot read the cwd of pane $pane; not starting without its trust set" >&2
+        exit 1
+    fi
+    cwd=$(realpath -e "$cwd") || { echo "task-agent: pane cwd does not exist: $cwd" >&2; exit 1; }
+
+    if [[ -f $cfg ]]; then
+        state=$(jq -r --arg p "$cwd" '(.projects[$p] // {}) | .hasTrustDialogAccepted | tostring' "$cfg")
+    else
+        state=missing-file
+    fi
+    if [[ $state == true ]]; then
+        echo "trust: $cwd is already trusted in $cfg"
+        return 0
+    fi
+    if [[ $dry_run == yes ]]; then
+        echo "trust: would set projects[\"$cwd\"].hasTrustDialogAccepted = true in $cfg (currently: $state)"
+        return 0
+    fi
+
+    tmp=$(mktemp "$cfg.XXXXXX")
+    if [[ $state == missing-file ]]; then
+        printf '{}\n' | jq --arg p "$cwd" "$filter" > "$tmp" || { rm -f "$tmp"; exit 1; }
+    else
+        chmod --reference="$cfg" "$tmp"
+        jq --arg p "$cwd" "$filter" "$cfg" > "$tmp" || { rm -f "$tmp"; exit 1; }
+    fi
+    mv -f "$tmp" "$cfg"
+    echo "trust: marked $cwd trusted in $cfg (was: $state)"
 }
 
 agent_args "$role" "$resume"
@@ -117,6 +168,7 @@ if [[ $role == orchestrator ]]; then
     export TASK_PROVIDER=$provider
     cmd=("$provider" "${ARGS[@]}" "$kickoff")
 else
+    if [[ $provider == claude ]]; then trust_pane_cwd; fi
     cmd=(herdr agent start "$name" --kind "$provider" --pane "$pane" --timeout 60000 -- "${ARGS[@]}")
 fi
 
