@@ -62,7 +62,8 @@ return {
 		},
 		file_panel = {
 			listing_style = "list",
-			win_config = { position = "bottom", height = 14 },
+			-- Beside the diff, 30 columns wide. <leader>b (toggle_files) still hides it.
+			win_config = { position = "left", width = 30 },
 		},
 		file_history_panel = {
 			win_config = { position = "bottom", height = 16 },
@@ -75,6 +76,11 @@ return {
 				vim.wo[winid].cursorline = true
 				vim.wo[winid].cursorlineopt = "both"
 				vim.wo[winid].fillchars = vim.o.fillchars .. ",diff:╱"
+				-- Wrap long lines instead of cutting them off. 'diffopt' keeps "filler", so
+				-- the sides stay aligned except where a changed line wraps (see :h diff-views).
+				vim.wo[winid].wrap = true
+				vim.wo[winid].linebreak = true
+				vim.wo[winid].breakindent = true
 			end,
 		},
 		keymaps = {
