@@ -45,7 +45,10 @@ cat > "$BIN/tmux" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$TMUX_LOG"
 case "$1" in
-    has-session) exit 1 ;;
+    has-session)
+        [[ -n "${TMUX_HAS_SESSION:-}" && "${3:-}" == "=$TMUX_HAS_SESSION" ]] && exit 0
+        exit 1
+        ;;
     list-windows|list-clients) exit 0 ;;
     display-message) exit 0 ;;
     *) exit 0 ;;
@@ -79,7 +82,12 @@ EOF
 cat > "$BIN/fzf" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$FZF_LOG"
-exit 2
+cat >/dev/null
+if [[ -n "${FZF_OUTPUT_FILE:-}" ]]; then
+    cat "$FZF_OUTPUT_FILE"
+else
+    exit 2
+fi
 EOF
 cat > "$BIN/omarchy-menu-input" <<'EOF'
 #!/bin/sh
@@ -209,6 +217,41 @@ grep -Fq $'context\t'"$repo_context" "$TASKS_DIR/fixture-cli/.task-context.tsv" 
 grep -Fq $'worker\t'"$repo_worker" "$TASKS_DIR/fixture-cli/.task-context.tsv" && fail 'CLI add recorded worker as context'
 [[ -e "$TASKS_DIR/fixture-cli/worker/.git" ]] || fail 'CLI add did not create worker worktree'
 
+# Normal close refuses dirty files and unmerged commits. Explicit force removes
+# task worktrees/state but preserves branches for later recovery.
+cli_task="$TASKS_DIR/fixture-cli"
+cli_worktree="$cli_task/added"
+printf 'uncommitted\n' > "$cli_worktree/UNCOMMITTED.md"
+if close_output=$("$SESSIONIZER" close fixture-cli 2>&1); then
+    fail 'close unexpectedly accepted an uncommitted worktree'
+fi
+grep -Fq 'added: 1 uncommitted path(s)' <<< "$close_output" || fail "close did not identify dirty worktree: $close_output"
+[[ -e "$cli_worktree/.git" ]] || fail 'blocked close changed the dirty worktree'
+rm -f "$cli_worktree/UNCOMMITTED.md"
+printf 'committed but not merged\n' > "$cli_worktree/UNMERGED.md"
+git -C "$cli_worktree" add UNMERGED.md
+git -C "$cli_worktree" commit -qm 'fixture unmerged task work'
+if close_output=$("$SESSIONIZER" close fixture-cli 2>&1); then
+    fail 'close unexpectedly accepted an unmerged task branch'
+fi
+grep -Fq 'unmerged commit(s)' <<< "$close_output" || fail "close did not identify unmerged commit: $close_output"
+[[ -e "$cli_worktree/.git" ]] || fail 'blocked unmerged close changed the worktree'
+"$SESSIONIZER" close fixture-cli --force
+[[ ! -e "$cli_worktree" && ! -e "$cli_task" ]] || fail 'force close did not remove task worktree and directory'
+git -C "$repo_added" show-ref --verify --quiet refs/heads/fixture-cli || fail 'close deleted the task branch'
+printf 'PASS: close reports dirty/unmerged work; --force removes task state and keeps branches\n'
+
+# Terminal fzf exposes Ctrl+D as the close action.
+[[ ! -s "$FZF_LOG" ]] || fail 'Omarchy popup path unexpectedly invoked terminal fzf'
+"$SESSIONIZER" create fixture-fzf --worker "$repo_context"
+FZF_OUTPUT_FILE="$TMP_ROOT/fzf-output"; export FZF_OUTPUT_FILE
+printf '\nctrl-d\ntask\tfixture-fzf\tfixture task\n' > "$FZF_OUTPUT_FILE"
+TASK_SEARCH=1 "$SESSIONIZER" <<< y
+[[ ! -d "$TASKS_DIR/fixture-fzf" ]] || fail 'terminal Ctrl+D did not close the clean task'
+grep -Fq -- '--expect=ctrl-a,ctrl-d' "$FZF_LOG" || fail 'terminal picker does not bind Ctrl+D to close'
+unset FZF_OUTPUT_FILE
+printf 'PASS: terminal fzf Ctrl+D closes a selected clean task after confirmation\n'
+
 # Agent launcher confines worker metadata write access to the canonical .git
 # directory and selects the researcher role/model separately.
 repo_args=$("$TASK_AGENT" --dry-run --provider codex start repo context fixture-pane "$repo_context")
@@ -227,5 +270,31 @@ grep -Fxq 'Repos to add to fixture-menu' "$MENU_SELECT_LOG" || fail 'popup did n
 grep -Fxq 'Repo mode: worker' "$MENU_SELECT_LOG" || fail 'popup did not invoke the worker/context picker'
 grep -Fxq 'Repo mode: added' "$MENU_SELECT_LOG" || fail 'popup did not invoke the add-task mode picker'
 grep -Fxq 'Name for new task' "$MENU_INPUT_LOG" || fail 'popup did not invoke the create-task name input'
-[[ ! -s "$FZF_LOG" ]] || fail 'Omarchy popup path unexpectedly invoked terminal fzf'
 printf 'PASS: popup path invokes every Omarchy selector step; fzf remains terminal-only\n'
+
+# The Omarchy selector has no custom keybinding API, so close is an action,
+# task picker, and explicit Close/Cancel confirmation.
+queue_file "$MENU_SELECT_CHOICES" \
+    $'Close task\taction:close' \
+    $'fixture-menu\ttask: worker, context, added (context) on fixture-menu' \
+    $'Cancel\tLeave task unchanged'
+run_menu
+[[ -d "$task" ]] || fail 'cancelled popup close removed its task'
+grep -Fxq 'Task to close' "$MENU_SELECT_LOG" || fail 'popup close action did not open task picker'
+grep -Fxq 'Close task fixture-menu?' "$MENU_SELECT_LOG" || fail 'popup close action did not ask for explicit confirmation'
+printf 'PASS: popup close route can be cancelled safely\n'
+
+queue_file "$MENU_SELECT_CHOICES" \
+    $'Close task\taction:close' \
+    $'fixture-menu\ttask: running, worker, context, added (context) on fixture-menu' \
+    $'Close task\tRemove worktrees and sessions; branches stay'
+TMUX_HAS_SESSION=fixture-menu; export TMUX_HAS_SESSION
+run_menu
+unset TMUX_HAS_SESSION
+[[ ! -d "$task" && ! -e "$task/worker" && ! -e "$task/context" ]] || fail 'confirmed popup close left task worktrees or task directory'
+git -C "$repo_worker" show-ref --verify --quiet refs/heads/fixture-menu || fail 'popup close deleted worker branch'
+git -C "$repo_context" show-ref --verify --quiet refs/heads/fixture-menu || fail 'popup close deleted promoted branch'
+grep -Fq 'session stop fixture-menu' "$HERDR_LOG" || fail 'popup close did not stop the Herdr session'
+grep -Fq 'session delete fixture-menu' "$HERDR_LOG" || fail 'popup close did not delete the Herdr session record'
+grep -Fq 'kill-session -t =fixture-menu' "$TMUX_LOG" || fail 'popup close did not request tmux session removal'
+printf 'PASS: confirmed popup close removes task/worktrees and sessions while retaining branches\n'

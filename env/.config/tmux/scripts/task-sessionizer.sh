@@ -10,6 +10,7 @@
 #   task-sessionizer.sh create <task> [--worker repo|--context repo]...
 #   task-sessionizer.sh add <task> [--worker repo|--context repo]...
 #   task-sessionizer.sh promote <task> <repo> context -> worker
+#   task-sessionizer.sh close <task> [--force] close a task; branches remain
 #   task-sessionizer.sh rm <task> [--force]  remove worktrees, dir and session
 #
 # Picking a task opens it; picking a repo starts a new task from it.
@@ -28,6 +29,7 @@ ICON_DONE=$''
 ICON_CONTEXT=$'󰈙'
 CREATE_LABEL="Create new task"
 ADD_LABEL="Add repo to task"
+CLOSE_LABEL="Close task"
 
 # Worktrees created in this run whose post-create hook still has to run.
 PENDING=()
@@ -538,6 +540,89 @@ remove_context() {
     if [[ -s "$tmp" ]]; then chmod 600 "$tmp"; mv -f "$tmp" "$file"; else unlink "$tmp"; unlink "$file"; fi
 }
 
+# Summarize all data that makes task closure destructive. A normal close is
+# blocked for dirty/conflicted worktrees, commits not merged into the repo's
+# default branch, and non-generated task-root files. Branch refs are preserved.
+task_close_issues() {
+    local task=$1 dir="$TASKS_DIR/$1" wt name status state dirty_count conflict branch base ref ahead
+    local entry sub extra settings
+    local -A workers=()
+    while IFS= read -r wt; do workers["$(basename "$wt")"]=1; done < <(task_worktrees "$task")
+
+    while IFS= read -r wt; do
+        name=$(basename "$wt")
+        status=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) || {
+            printf '%s: unable to read git status; close blocked\n' "$name"
+            continue
+        }
+        if [[ -n "$status" ]]; then
+            dirty_count=$(awk 'END { print NR+0 }' <<< "$status")
+            conflict=no
+            while IFS= read -r state; do
+                state=${state:0:2}
+                [[ "$state" == *U* || "$state" == AA || "$state" == DD ]] && conflict=yes
+            done <<< "$status"
+            if [[ "$conflict" == yes ]]; then
+                printf '%s: %s unmerged/conflicted path(s)\n' "$name" "$dirty_count"
+            else
+                printf '%s: %s uncommitted path(s)\n' "$name" "$dirty_count"
+            fi
+        fi
+
+        branch=$(git -C "$wt" branch --show-current 2>/dev/null)
+        base=$(git -C "$wt" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+        for ref in "$base" origin/main origin/master main master trunk; do
+            [[ -n "$ref" && "$ref" != "$branch" ]] || continue
+            git -C "$wt" rev-parse --verify --quiet "$ref^{commit}" >/dev/null || continue
+            base=$ref
+            break
+        done
+        if [[ -n "$base" && "$base" != "$branch" ]]; then
+            ahead=$(git -C "$wt" rev-list --count "$base..HEAD" 2>/dev/null || echo 0)
+            if [[ "$ahead" =~ ^[0-9]+$ ]] && ((ahead > 0)); then
+                printf '%s: %s unmerged commit(s) versus %s (branch will be kept)\n' "$name" "$ahead" "$base"
+            fi
+        fi
+    done < <(task_worktrees "$task")
+
+    # remove_task cleans these generated entries. Anything else is explicitly
+    # named because --force removes the residual task directory as well.
+    for entry in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+        [[ -e "$entry" || -L "$entry" ]] || continue
+        name=${entry##*/}
+        [[ -n "${workers[$name]:-}" ]] && continue
+        case "$name" in
+            AGENTS.md|REPORT.md|.task-context.tsv|.task-worker-order) ;;
+            CLAUDE.md)
+                if [[ ! -L "$entry" && "$(cat "$entry" 2>/dev/null)" != "@AGENTS.md" ]]; then
+                    printf '%s: custom task-root file %s\n' "$task" "$name"
+                fi
+                ;;
+            research)
+                if [[ -d "$entry" ]] && find "$entry" -mindepth 1 -print -quit | grep -q .; then
+                    printf '%s: research notes/files (force close removes them)\n' "$task"
+                fi
+                ;;
+            .claude)
+                extra=no
+                for sub in "$entry"/* "$entry"/.[!.]*; do
+                    [[ -e "$sub" || -L "$sub" ]] || continue
+                    case "${sub##*/}" in
+                        settings.local.json) ;;
+                        settings.json)
+                            settings=$(cat "$sub" 2>/dev/null)
+                            [[ "$settings" == "$CLAUDE_TASK_SETTINGS" || "$settings" == "$CLAUDE_TASK_SETTINGS_OLD" ]] || extra=yes
+                            ;;
+                        *) extra=yes ;;
+                    esac
+                done
+                [[ "$extra" == yes ]] && printf '%s: custom task-root data in .claude (force close removes it)\n' "$task"
+                ;;
+            *) printf '%s: additional task-root data at %s (force close removes it)\n' "$task" "$name" ;;
+        esac
+    done
+}
+
 CLAUDE_TASK_SETTINGS="{
   \"permissions\": {
     \"allow\": [
@@ -944,17 +1029,16 @@ pick_session() {
 # --- cleanup -----------------------------------------------------------------
 
 remove_task() {
-    local task=${1:-} force=${2:-} dir wt origin s wts=() origins=() settings
+    local task=${1:-} force=${2:-} dir wt origin s issues wts=() origins=() settings
     [[ -n "$task" ]] || die "usage: rm <task> [--force]"
     dir="$TASKS_DIR/$task"
     [[ -d "$dir" ]] || die "no such task: $task"
     mapfile -t wts < <(task_worktrees "$task")
 
-    if [[ "$force" != --force ]]; then
-        for wt in "${wts[@]}"; do
-            [[ -z "$(git -C "$wt" status --porcelain)" ]] ||
-                die "$(basename "$wt") has uncommitted changes (use --force)"
-        done
+    issues=$(task_close_issues "$task")
+    if [[ -n "$issues" && "$force" != --force ]]; then
+        printf 'Close blocked for %s; review these items first:\n%s\n' "$task" "$issues" >&2
+        die "use close $task --force only after reviewing; task branches are kept"
     fi
 
     for wt in "${wts[@]}"; do
@@ -968,6 +1052,7 @@ remove_task() {
     rm -f "$dir/AGENTS.md"
     rm -f "$dir/REPORT.md"
     rm -f "$(task_context_file "$task")"
+    rm -f "$dir/.task-worker-order"
     rmdir "$dir/research" 2>/dev/null || true
     settings=$(cat "$dir/.claude/settings.json" 2>/dev/null)
     [[ "$settings" == "$CLAUDE_TASK_SETTINGS" || "$settings" == "$CLAUDE_TASK_SETTINGS_OLD" ]] && rm -f "$dir/.claude/settings.json"
@@ -991,6 +1076,14 @@ remove_task() {
     return 0
 }
 
+close_task() {
+    local task=${1:-} force=${2:-}
+    [[ -n "$task" ]] || die "usage: close <task> [--force]"
+    [[ $# -le 2 && ( -z "$force" || "$force" == --force ) ]] || die "usage: close <task> [--force]"
+    valid_name "$task" || die "invalid task name: $task"
+    remove_task "$task" "$force"
+}
+
 # --- fzf picker (terminal / tmux prefix key) ---------------------------------
 
 fzf_repos() {
@@ -999,7 +1092,7 @@ fzf_repos() {
 }
 
 pick() {
-    local out query key task="" branch="" t r kind value repos=()
+    local out query key task="" branch="" t r kind value task_count=0 repos=()
     mkdir -p "$TASKS_DIR"
     out=$({
         while IFS= read -r t; do
@@ -1008,16 +1101,23 @@ pick() {
         while IFS= read -r r; do
             printf 'repo\t%s\t%s %s  %s\n' "$r" "$ICON_REPO" "$(basename "$r")" "$(dirname "${r/#$HOME/\~}")"
         done < <(list_repos)
-    } | fzf -m --delimiter '\t' --with-nth 3 --print-query --expect=ctrl-a --prompt 'task or repo> ' \
-        --header $'enter: open task, or start a task from the marked repo(s)\ntab: mark repos · ctrl-a: add repos to a task · or type a new task name')
+    } | fzf -m --delimiter '\t' --with-nth 3 --print-query --expect=ctrl-a,ctrl-d --prompt 'task or repo> ' \
+        --header $'enter: open task, or start a task from marked repos\ntab: mark repos · ctrl-a: add to task · ctrl-d: close selected task · or type a new task name')
     query=$(sed -n 1p <<< "$out")
     key=$(sed -n 2p <<< "$out")
     while IFS=$'\t' read -r kind value _; do
         case "$kind" in
-            task) [[ -n "$task" ]] || task=$value ;;
+            task) [[ -n "$task" ]] || task=$value; task_count=$((task_count + 1)) ;;
             repo) repos+=("$value") ;;
         esac
     done < <(sed -n '3,$p' <<< "$out")
+
+    if [[ "$key" == ctrl-d ]]; then
+        [[ -n "$task" && $task_count -eq 1 && ${#repos[@]} -eq 0 ]] ||
+            die "Ctrl-D closes one selected task; select exactly one task and no repos"
+        close_task_terminal "$task"
+        return
+    fi
 
     if [[ -n "$task" ]]; then
         if [[ "$key" == ctrl-a ]]; then
@@ -1052,6 +1152,7 @@ menu_task_rows() {
     done < <(list_tasks)
     printf '%s\t%s\taction:add\n' "$ICON_ADD" "$ADD_LABEL"
     printf '%s\t%s\taction:create\n' "$ICON_REPO" "$CREATE_LABEL"
+    printf '%s\t%s\taction:close\n' "$ICON_CONTEXT" "$CLOSE_LABEL"
 }
 
 menu_existing_task_rows() {
@@ -1116,6 +1217,41 @@ repo_in_task() {
 MENU_WORKERS=()
 MENU_CONTEXTS=()
 
+close_task_terminal() {
+    local task=$1 out
+    confirm "Close task $task? Its worktrees and sessions will be removed; branches stay" || return 0
+    if out=$("$SELF" close "$task" 2>&1); then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    printf '%s\n' "$out" >&2
+    if [[ "$out" == *"use close $task --force"* ]] &&
+        confirm "Force close $task? Uncommitted work/task-root files will be discarded; branches stay"; then
+        "$SELF" close "$task" --force
+    fi
+}
+
+close_task_menu() {
+    local task=$1 issues rows selected action summary
+    issues=$(task_close_issues "$task")
+    if [[ -n "$issues" ]]; then
+        summary=$(paste -sd '; ' <<< "$issues")
+        rows=$(printf '%s\tForce close\t%s; worktrees and task-root data are removed, branches stay\n%s\tCancel\tLeave task unchanged' \
+            "$ICON_CONTEXT" "$summary" "$ICON_DONE")
+        selected=$(menu_choose "Close task $task?" "$rows") || return 0
+        IFS=$'\t' read -r action _ <<< "$selected"
+        [[ "$action" == "Force close" ]] || return 0
+        "$SELF" close "$task" --force
+    else
+        rows=$(printf '%s\tClose task\tRemove worktrees and sessions; branches stay\n%s\tCancel\tLeave task unchanged' \
+            "$ICON_DONE" "$ICON_CONTEXT")
+        selected=$(menu_choose "Close task $task?" "$rows") || return 0
+        IFS=$'\t' read -r action _ <<< "$selected"
+        [[ "$action" == "Close task" ]] || return 0
+        "$SELF" close "$task"
+    fi
+}
+
 # Repeated single-select steps provide multi-select behavior with an explicit
 # mode per repo. A repo remains selected after its Worker/Context choice.
 menu_repo_picker() {
@@ -1177,6 +1313,13 @@ pick_menu() {
             for mode in "${MENU_CONTEXTS[@]}"; do selection+=(--context "$mode"); done
             add_task_repos "$task" "${selection[@]}"
             ;;
+        action:close)
+            sel=$(menu_choose "Task to close" "$(menu_existing_task_rows)") || return 0
+            IFS=$'\t' read -r task detail <<< "$sel"
+            [[ "$detail" == task:* ]] || return 0
+            close_task_menu "$task"
+            return
+            ;;
         *) return 0 ;;
     esac
     open_session "$task"
@@ -1229,6 +1372,10 @@ case "$(basename "$0"):${1:-}" in
     *:promote)
         [[ $# -eq 3 ]] || die "usage: promote <task> <repo>"
         promote_context "$2" "$3"
+        ;;
+    *:close)
+        [[ $# -ge 2 && $# -le 3 ]] || die "usage: close <task> [--force]"
+        close_task "$2" "${3:-}"
         ;;
     *:sessions) [[ "${2:-}" == popup ]] && TASK_POPUP=1; pick_session ;;
     # Used by the task picker and task/session menu rows.
