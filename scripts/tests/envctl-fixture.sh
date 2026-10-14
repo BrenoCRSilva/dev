@@ -7,18 +7,22 @@ trap 'python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=Tr
 root="$tmp/repo"
 home="$tmp/home"
 state="$tmp/state"
-mkdir -p "$root/scripts" "$root/env/.config/app" "$root/env/.config/nvim/lua" "$home"
+mkdir -p "$root/scripts" "$root/env/.config/app" "$root/env/.config/nvim/lua" \
+  "$root/env/.config/omarchy/themed" "$home/.config/omarchy/themed" "$home"
 mkdir -p "$root/env/.config/app/node_modules/pkg" "$root/env/.config/app/lua"
 cp "$repo/scripts/envctl" "$root/scripts/envctl"
 cp "$repo/scripts/omarchy-theme-install-list.tsv" "$root/scripts/omarchy-theme-install-list.tsv"
 cat > "$root/env/dotfiles.manifest" <<'EOF'
 .config/app
 .config/nvim
+.config/omarchy/themed
 !.config/app/ignored
 EOF
 printf 'one\n' > "$root/env/.config/app/main.conf"
 printf 'ignored\n' > "$root/env/.config/app/node_modules/pkg/index.js"
 printf 'generated\n' > "$root/env/.config/nvim/lua/fixture-palette.lua"
+printf 'Omarchy shipped sample\n' > "$root/env/.config/omarchy/themed/alacritty.toml.tpl.sample"
+printf 'live Omarchy sample\n' > "$home/.config/omarchy/themed/alacritty.toml.tpl.sample"
 printf 'target\n' > "$root/env/.config/app/real.conf"
 ln -s real.conf "$root/env/.config/app/link.conf"
 run() { DOTFILES_ROOT="$root" DOTFILES_HOME="$home" DOTFILES_STATE_DIR="$state" "$root/scripts/envctl" "$@"; }
@@ -41,6 +45,7 @@ run apply > "$tmp/apply.out"
 [[ -L "$home/.config/app/link.conf" ]]
 [[ ! -e "$home/.config/app/node_modules/pkg/index.js" ]]
 [[ ! -e "$home/.config/nvim/lua/fixture-palette.lua" ]]
+[[ "$(cat "$home/.config/omarchy/themed/alacritty.toml.tpl.sample")" == 'live Omarchy sample' ]]
 apply_backup="$(sed -n 's/^Backups: //p' "$tmp/apply.out")"
 [[ "$(stat -c %a "$apply_backup")" == 700 ]]
 [[ "$(stat -c %a "$(dirname "$(dirname "$apply_backup")")")" == 700 ]]
@@ -48,6 +53,8 @@ apply_backup="$(sed -n 's/^Backups: //p' "$tmp/apply.out")"
 [[ "$(sed -n 's/^complete=//p' "$apply_backup/metadata")" == yes ]]
 [[ "$(run apply)" == *"0 path(s) applied"* ]]
 [[ "$(run capture)" == *"0 path(s) captured"* ]]
+sample_capture_preview="$(run capture --dry-run)"
+[[ "$sample_capture_preview" != *"alacritty.toml.tpl.sample"* ]]
 
 # External Omarchy theme collection links are discoverable runtime data, not
 # authored mirror content. The top-level link and files globbed beneath it are
@@ -102,21 +109,27 @@ rm -rf "$root/env/.config/omarchy/themes" "$home/.config/omarchy/themes"
 mkdir -p "$root/env/.config/omarchy/plugins/pontual.tasks" \
   "$root/env/.config/omarchy/plugins/io.github.maajix.spotlight" \
   "$root/env/.config/omarchy/plugins/io.github.aashbury.voxhud" \
+  "$root/env/.config/omarchy/plugins/.removed-plugin.bak.fixture" \
   "$home/.config/omarchy/plugins/io.github.maajix.spotlight/bin" \
-  "$home/.config/omarchy/plugins/io.github.aashbury.voxhud/bin"
+  "$home/.config/omarchy/plugins/io.github.aashbury.voxhud/bin" \
+  "$home/.config/omarchy/plugins/.removed-plugin.bak.fixture"
 printf 'authored plugin\n' > "$root/env/.config/omarchy/plugins/pontual.tasks/Tasks.qml"
 printf 'external mirror candidate\n' > "$root/env/.config/omarchy/plugins/io.github.maajix.spotlight/README.md"
 printf 'external live helper\n' > "$home/.config/omarchy/plugins/io.github.maajix.spotlight/bin/spotlight-helper"
 printf 'external mirror candidate\n' > "$root/env/.config/omarchy/plugins/io.github.aashbury.voxhud/README.md"
 printf 'external live helper\n' > "$home/.config/omarchy/plugins/io.github.aashbury.voxhud/bin/voxhud"
+printf 'stale mirror backup\n' > "$root/env/.config/omarchy/plugins/.removed-plugin.bak.fixture/manifest.json"
+printf 'live removal backup\n' > "$home/.config/omarchy/plugins/.removed-plugin.bak.fixture/manifest.json"
 printf '.config/omarchy/plugins\n' >> "$root/env/dotfiles.manifest"
 plugin_plan="$(run plan apply)"
 [[ "$plugin_plan" == *".config/omarchy/plugins/pontual.tasks/Tasks.qml"* ]]
 [[ "$plugin_plan" != *"io.github.maajix.spotlight"* ]]
 [[ "$plugin_plan" != *"io.github.aashbury.voxhud"* ]]
+[[ "$plugin_plan" != *"removed-plugin.bak"* ]]
 plugin_capture="$(run capture --dry-run)"
 [[ "$plugin_capture" != *"io.github.maajix.spotlight"* ]]
 [[ "$plugin_capture" != *"io.github.aashbury.voxhud"* ]]
+[[ "$plugin_capture" != *"removed-plugin.bak"* ]]
 sed -i '$d' "$root/env/dotfiles.manifest"
 rm -rf "$root/env/.config/omarchy/plugins" "$home/.config/omarchy/plugins"
 
