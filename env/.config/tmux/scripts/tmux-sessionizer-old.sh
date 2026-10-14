@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 shallow_dirs=(
-    "$HOME/personal"
-    "$HOME/workspace"
+    "$HOME/Projects"
+    "$HOME/Work"
 )
 project_dirs=(
-    "$HOME/personal/projects"
-    "$HOME/workspace/projects"
+    "$HOME/Projects"
+    "$HOME/Work"
 )
 nvim_dir=(
-    "$HOME/personal/projects/dotfiles/env/.config/nvim"
+    "$HOME/Projects/dotfiles/env/.config/nvim"
 )
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
 DIRS_FILE="$CONFIG_DIR/tmux-sessionizer/directories"

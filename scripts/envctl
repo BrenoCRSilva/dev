@@ -20,7 +20,7 @@ say() { printf '%s\n' "$*"; }
 die() { say "$*" >&2; exit 2; }
 require_canonical_sync_checkout() {
   local canonical top git_dir branch origin
-  canonical="$(realpath -e "$HOME/personal/projects/dotfiles" 2>/dev/null)" || die "Canonical checkout is missing: ~/personal/projects/dotfiles"
+  canonical="$(realpath -e "$HOME/Projects/dotfiles" 2>/dev/null)" || die "Canonical checkout is missing: ~/Projects/dotfiles"
   [[ "$ROOT" == "$canonical" ]] || die "sync is allowed only from the canonical checkout, not a task worktree"
   top="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null)" || die "sync requires a Git checkout"
   top="$(realpath -e "$top")"
@@ -58,6 +58,9 @@ excluded() {
   esac
   case "$1" in
     .config/nvim/lua/*-palette.lua|.config/nvim/lua/plugins/vectorcode.lua|.config/ghostty/themes/*|.config/tmux/themes/scripts/*-colors.sh|.config/herdr/sessions/*|.config/herdr/auth/*|.config/herdr/runtime/*|.env|.env.*|*/.env|*/.env.*|*credentials*|*secret*) return 0 ;;
+    # Spotlight is a separately installed upstream plugin. Record its source
+    # and commit, but do not vendor its checkout into the authored mirror.
+    .config/omarchy/plugins/io.github.maajix.spotlight|.config/omarchy/plugins/io.github.maajix.spotlight/*) return 0 ;;
   esac
   return 1
 }

@@ -1,0 +1,12 @@
+# kind	name	repository	ref	commit	palette/evidence
+collection	100-themes	https://github.com/bjarneo/100-themes	commit	3bc337833cc1025a66b68e4d8c06d2899fd1d860	500-link source already installed
+theme	monokai-pro	https://github.com/bjarneo/omarchy-monokai-theme	main	619b66e36f160b30bec5a421948316310aba32ab	colors.toml; current Quattro repo
+theme	one-dark-pro	https://github.com/sc0ttman/omarchy-one-dark-pro-theme	main	0874b66bf30f4525442f55fc88a443ce56a7decf	colors.toml; current Quattro repo
+theme	dracula	https://github.com/catlee/omarchy-dracula-theme	main	f776b6543119dfc8682d9eac84d934d126193be9	colors.toml; optional README hook not enabled
+theme	solarized	https://github.com/Gazler/omarchy-solarized-theme	master	236840f05449f1becfafd1f5995c2c5c9c79ca70	alacritty.toml; all normal colors present
+theme	solarized-light	https://github.com/dfrico/omarchy-solarized-light-theme	main	e7cd8f3024f34105e31faa8d83db1852a5131850	alacritty.toml; all normal colors present
+theme	ayu-dark	https://github.com/fdidron/omarchy-ayu-dark-theme	main	419ee27040f330f74e7487f391ecca65975bac26	alacritty.toml; all normal colors present
+theme	ayu-light	https://github.com/fdidron/omarchy-ayu-light-theme	main	fca0566c4e34c750fa4c09174927d4fae17a9785	alacritty.toml; all normal colors present
+theme	ayu-mirage	https://github.com/fdidron/omarchy-ayu-mirage-theme	main	8f686210ab1fd78ac0416694307bb79b9438264e	alacritty.toml; converted correctly in scratch
+theme	night-owl	https://github.com/janhesters/omarchy-night-owl-theme	master	f9d5f90ae8406a87abef5714e8073bbacbc4e79a	colors.toml; correct Night Owl repo
+plugin	spotlight	https://github.com/maajix/omarchy-spotlight	commit	a0f7fa746169a933e498037863e3353ede126413	external checkout; never vendor under env

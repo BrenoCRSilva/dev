@@ -56,7 +56,7 @@
 
   "pontual-tasks": {"icon":"󰆍","label":"Tasks / Sessions"},
   "pontual-tasks.task-sessionizer": {"icon":"󰆍","label":"Task sessionizer","action":"/home/pontual/.config/tmux/scripts/task-sessionizer.sh popup"},
-  "pontual-tasks.search": {"icon":"","label":"Search tasks and sessions","action":"omarchy-shell shell toggle pontual.search '{}'"},
+  "pontual-tasks.search": {"icon":"","label":"Search tasks and sessions","action":"omarchy-shell shell toggle pontual.tasks '{}'"},
   "pontual-tasks.sessions": {"icon":"󰆍","label":"Tasks and sessions","action":"omarchy-shell shell toggle pontual.tasks '{}'"},
 
   "pontual-windows": {"icon":"󰖯","label":"Window / Workspace"},

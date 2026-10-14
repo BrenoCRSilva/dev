@@ -18,7 +18,7 @@ local shell = "omarchy-shell shell toggle "
 -- Ctrl-Alt-Delete must not close every client without an explicit choice.
 hl.unbind("CTRL + ALT + DELETE")
 bind("SUPER + SPACE", "Terminal", { omarchy = "terminal" })
-bind("SUPER + RETURN", "Spotlight search", shell .. "pontual.search '{}'")
+bind("SUPER + RETURN", "Spotlight search", shell .. "io.github.maajix.spotlight '{}'")
 bind("SUPER + ESCAPE", "System menu", "omarchy-menu toggle system")
 bind("SUPER + M", "Omarchy menu", "omarchy-menu toggle")
 bind("SUPER + T", "Theme picker", "omarchy-menu toggle style.theme")

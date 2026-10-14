@@ -3,3 +3,6 @@
 [bar]
 scale-with-font = false
 size-horizontal = 48
+
+[font]
+base-size = 12

@@ -1,0 +1,5 @@
+# Samsung Odyssey G5 (DP-2, i2c-8) restarts on any DDC/CI write, so keep
+# ddcutil and Omarchy's display panel away from it. Acer (i2c-6) stays usable.
+# If the GPU/port layout changes, re-check the bus with `ddcutil detect`.
+[global]
+options: --ignore-bus 8

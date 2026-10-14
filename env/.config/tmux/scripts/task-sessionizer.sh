@@ -13,7 +13,7 @@
 # Deps: git, tmux, fzf, fd (popup mode also uses omarchy-menu-*).
 
 TASKS_DIR="${TASKS_DIR:-$HOME/tasks}"
-REPO_ROOTS=("$HOME/personal/projects" "$HOME/workspace/projects")
+REPO_ROOTS=("$HOME/Projects" "$HOME/Work")
 BASE_PORT=20000
 SELF=$(realpath "$0")
 AGENT_PICKER="$HOME/.config/tmux/scripts/agent-picker.sh"
@@ -696,6 +696,7 @@ pause_on_error() {
 }
 
 case "$(basename "$0"):${1:-}" in
+    *:list-repos) list_repos ;;
     *:search-rows) python3 "$(dirname "$SELF")/search-identity.py" rows ;;
     *:search-open)
         [[ $# -eq 3 ]] || die "usage: search-open tasks|sessions identifier"
