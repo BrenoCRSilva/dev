@@ -102,7 +102,7 @@ Captured the orchestrator's live-authoritative configuration into `env/`:
   `^omarchy-spotlight$` layer rule). The corresponding live backup is
   `blur-20261014T181151Z`; the removed Alt+Space block backup is
   `altspace-20261014T181253Z`.
-- `.config/omarchy/shell.json` (Spotlight enabled, `pontual.search` disabled),
+- `.config/omarchy/shell.json` (Spotlight enabled),
   `.config/omarchy/extensions/omarchy-menu.jsonc` (tasks route), and
   `.config/omarchy/spotlight.json`.
 
@@ -113,13 +113,10 @@ files. Spotlight's pin is:
 `maajix/omarchy-spotlight@a0f7fa746169a933e498037863e3353ede126413`. envctl now
 also excludes `aashbury/voxhud@7f25cf97752a11411725fb9fa6b3a02a41499992`.
 
-`pontual.search` stays disabled as requested. After user confirmation, proposed
-prune targets are `env/.config/omarchy/plugins/pontual.search/` and
-`~/.config/omarchy/plugins/pontual.search/`; neither has been removed. The
+The user removed the disabled personal search plugin from the live Omarchy
+installation; its authored plugin files are no longer in this mirror. The
 already-disabled `pontual.bar` and `pontual.bar-tools` authored directories are
-absent from `env/`; their live directories remain separate prune candidates:
-`~/.config/omarchy/plugins/pontual.bar/` and
-`~/.config/omarchy/plugins/pontual.bar-tools/`.
+also absent from `env/`.
 
 ## E. Host DDC configuration
 
@@ -143,10 +140,5 @@ curation behavior. No apply or capture was run from this worktree.
 
 Prune only after review/confirmation:
 
-- `~/.config/omarchy/plugins/pontual.search/` (disabled; user confirmation
-  requested)
-- `~/.config/omarchy/plugins/pontual.bar/`
-- `~/.config/omarchy/plugins/pontual.bar-tools/`
-
-Prune is not part of envctl apply; it must be a separate selective removal with
-a backup. No live plugin directory or theme link was removed here.
+No plugin prune is pending from this report; apply does not remove unrelated
+live paths.

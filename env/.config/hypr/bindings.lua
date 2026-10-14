@@ -87,7 +87,6 @@ bind("SUPER + CTRL + ALT + I", "Toggle locking on idle", "omarchy-toggle-idle")
 -- App and settings chords open native Omarchy menu routes. Bind() explicitly
 -- replaces the prior clipboard, hardware, quick-settings, audio and system
 -- actions on these exact bare chords; displaced utilities remain in menus/bar.
-bind("SUPER + D", "Tasks and sessions", shell .. "pontual.tasks '{}'")
 bind("SUPER + N", "Notes and writing", "omarchy-menu toggle pontual-notes")
 bind("SUPER + A", "AI tools", "omarchy-menu toggle pontual-ai")
 bind("SUPER + comma", "Settings", "omarchy-menu toggle setup")

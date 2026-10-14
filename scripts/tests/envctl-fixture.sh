@@ -106,14 +106,14 @@ rm -rf "$root/env/.config/omarchy/themes" "$home/.config/omarchy/themes"
 # Separately installed Spotlight and voxhud checkouts are external plugin code. They are
 # excluded as a whole, including globbed descendants, while authored plugins
 # in the same manifest root remain deployable.
-mkdir -p "$root/env/.config/omarchy/plugins/pontual.tasks" \
+mkdir -p "$root/env/.config/omarchy/plugins/fixture.user-plugin" \
   "$root/env/.config/omarchy/plugins/io.github.maajix.spotlight" \
   "$root/env/.config/omarchy/plugins/io.github.aashbury.voxhud" \
   "$root/env/.config/omarchy/plugins/.removed-plugin.bak.fixture" \
   "$home/.config/omarchy/plugins/io.github.maajix.spotlight/bin" \
   "$home/.config/omarchy/plugins/io.github.aashbury.voxhud/bin" \
   "$home/.config/omarchy/plugins/.removed-plugin.bak.fixture"
-printf 'authored plugin\n' > "$root/env/.config/omarchy/plugins/pontual.tasks/Tasks.qml"
+printf 'authored plugin\n' > "$root/env/.config/omarchy/plugins/fixture.user-plugin/Widget.qml"
 printf 'external mirror candidate\n' > "$root/env/.config/omarchy/plugins/io.github.maajix.spotlight/README.md"
 printf 'external live helper\n' > "$home/.config/omarchy/plugins/io.github.maajix.spotlight/bin/spotlight-helper"
 printf 'external mirror candidate\n' > "$root/env/.config/omarchy/plugins/io.github.aashbury.voxhud/README.md"
@@ -122,7 +122,7 @@ printf 'stale mirror backup\n' > "$root/env/.config/omarchy/plugins/.removed-plu
 printf 'live removal backup\n' > "$home/.config/omarchy/plugins/.removed-plugin.bak.fixture/manifest.json"
 printf '.config/omarchy/plugins\n' >> "$root/env/dotfiles.manifest"
 plugin_plan="$(run plan apply)"
-[[ "$plugin_plan" == *".config/omarchy/plugins/pontual.tasks/Tasks.qml"* ]]
+[[ "$plugin_plan" == *".config/omarchy/plugins/fixture.user-plugin/Widget.qml"* ]]
 [[ "$plugin_plan" != *"io.github.maajix.spotlight"* ]]
 [[ "$plugin_plan" != *"io.github.aashbury.voxhud"* ]]
 [[ "$plugin_plan" != *"removed-plugin.bak"* ]]

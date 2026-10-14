@@ -54,10 +54,8 @@
   "pontual-files.places": {"icon":"󰍉","label":"Places"},
   "pontual-files.places.maps": {"icon":"󰍉","label":"Maps","when":"command -v brave >/dev/null 2>&1","action":"omarchy launch webapp https://maps.google.com/"},
 
-  "pontual-tasks": {"icon":"󰆍","label":"Tasks / Sessions"},
+  "pontual-tasks": {"icon":"󰆍","label":"Tasks"},
   "pontual-tasks.task-sessionizer": {"icon":"󰆍","label":"Task sessionizer","action":"/home/pontual/.config/tmux/scripts/task-sessionizer.sh popup"},
-  "pontual-tasks.search": {"icon":"","label":"Search tasks and sessions","action":"omarchy-shell shell toggle pontual.tasks '{}'"},
-  "pontual-tasks.sessions": {"icon":"󰆍","label":"Tasks and sessions","action":"omarchy-shell shell toggle pontual.tasks '{}'"},
 
   "pontual-windows": {"icon":"󰖯","label":"Window / Workspace"},
   "pontual-windows.layout": {"icon":"󰖯","label":"Workspace layout","action":"omarchy-hyprland-workspace-layout-toggle"},

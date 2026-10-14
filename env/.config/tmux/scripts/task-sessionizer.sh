@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Task-scoped tmux sessionizer. A task is ~/tasks/<task>/ holding one git
-# worktree per repo, all on the same branch; the tmux session is scoped to it.
+# Task-scoped tmux sessionizer. A task is ~/tasks/<task>/ with worker repo
+# worktrees plus optional read-only context repo records; its tmux session and
+# herdr session are scoped to it.
 #
 #   task-sessionizer.sh                      fzf picker: tasks and repos
 #   task-sessionizer.sh popup                same, in the Omarchy menu (keybind)
 #   task-sessionizer.sh sessions             session manager in the terminal
-#                                            (Super+S uses the pontual.tasks shell plugin)
-#   task-sessionizer.sh add <task> [repo..]  add repos (picker when none given)
+#                                            (Super+S opens the task picker)
+#   task-sessionizer.sh create <task> [--worker repo|--context repo]...
+#   task-sessionizer.sh add <task> [--worker repo|--context repo]...
+#   task-sessionizer.sh promote <task> <repo> context -> worker
 #   task-sessionizer.sh rm <task> [--force]  remove worktrees, dir and session
 #
 # Picking a task opens it; picking a repo starts a new task from it.
@@ -22,12 +25,15 @@ ICON_TASK=$''
 ICON_REPO=$''
 ICON_ADD=$''
 ICON_DONE=$''
-ADD_LABEL="Add repos to a task"
+ICON_CONTEXT=$'󰈙'
+CREATE_LABEL="Create new task"
+ADD_LABEL="Add repo to task"
 
 # Worktrees created in this run whose post-create hook still has to run.
 PENDING=()
 # Repos added in this run, announced to a running orchestrator.
 NEW_REPOS=()
+NEW_CONTEXTS=()
 
 die() {
     echo "error: $*" >&2
@@ -35,9 +41,11 @@ die() {
     exit 1
 }
 
-# Repos are dirs holding a .git *directory*; worktrees (.git file) are skipped.
+# Canonical repos are found at any depth under Projects and Work. Only .git
+# directories count; task worktrees (.git files) are intentionally skipped.
 list_repos() {
-    fd -H -I -t d -d 3 '^\.git$' "${REPO_ROOTS[@]}" 2>/dev/null | sed 's#/\.git/\{0,1\}$##' | sort
+    fd -H -I -t d '^\.git$' "${REPO_ROOTS[@]}" 2>/dev/null |
+        sed 's#/\.git/\{0,1\}$##' | sort -u
 }
 
 list_tasks() {
@@ -46,20 +54,176 @@ list_tasks() {
 }
 
 task_worktrees() {
-    local d
-    for d in "$TASKS_DIR/$1"/*/; do
-        [[ -e "${d}.git" ]] && echo "${d%/}"
+    local d name order_file="$TASKS_DIR/$1/.task-worker-order"
+    local -a ordered=()
+    local -A seen=()
+    if [[ -f "$order_file" ]]; then
+        while IFS= read -r name; do
+            [[ -n "$name" && -z "${seen[$name]:-}" ]] || continue
+            d="$TASKS_DIR/$1/$name"
+            [[ -e "$d/.git" ]] || continue
+            seen[$name]=1
+            ordered+=("$d")
+        done < "$order_file"
+    fi
+    for d in "${ordered[@]}"; do
+        echo "$d"
     done
+    for d in "$TASKS_DIR/$1"/*/; do
+        [[ -e "${d}.git" ]] || continue
+        name=${d%/}
+        name=${name##*/}
+        [[ -n "${seen[$name]:-}" ]] && continue
+        echo "${d%/}"
+    done
+}
+
+# Persist worker insertion order. When upgrading an existing task that lacks
+# metadata, retain the current tmux nvim-window order before appending workers.
+ensure_worker_order() {
+    local task=$1 file="$TASKS_DIR/$1/.task-worker-order" tmp wt name
+    local -a names=()
+    local -A seen=()
+    [[ -f "$file" ]] && return 0
+    # Existing task AGENTS.md repo ordering is the durable legacy record. Use
+    # it before inferring order from a live session or the directory glob.
+    while IFS= read -r name; do
+        [[ -e "$TASKS_DIR/$task/$name/.git" ]] || continue
+        [[ -n "${seen[$name]:-}" ]] && continue
+        names+=("$name")
+        seen[$name]=1
+    done < <(task_agents_worker_order "$task")
+    if tmux has-session -t "=$(session_name "$task")" 2>/dev/null; then
+        while IFS= read -r name; do
+            [[ "$name" == nvim-* ]] || continue
+            name=${name#nvim-}
+            [[ -e "$TASKS_DIR/$task/$name/.git" ]] || continue
+            [[ -n "${seen[$name]:-}" ]] && continue
+            names+=("$name")
+            seen[$name]=1
+        done < <(tmux list-windows -t "=$(session_name "$task")" -F '#W')
+    fi
+    while IFS= read -r wt; do
+        name=$(basename "$wt")
+        [[ -n "${seen[$name]:-}" ]] && continue
+        names+=("$name")
+        seen[$name]=1
+    done < <(task_worktrees "$task")
+    tmp=$(mktemp "$TASKS_DIR/$task/.task-worker-order.XXXXXX") || return 1
+    if ((${#names[@]})); then printf '%s\n' "${names[@]}" > "$tmp"; fi
+    chmod 600 "$tmp" && mv -f "$tmp" "$file"
+}
+
+task_agents_worker_order() {
+    python3 - "$TASKS_DIR/$1/AGENTS.md" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+if not path.is_file():
+    raise SystemExit(0)
+text = path.read_text(errors="replace")
+lines = text.splitlines()
+sections = []
+in_repos = False
+in_workers = False
+for line in lines:
+    if re.match(r"^##\s+Repos\s*$", line, re.I):
+        in_repos, in_workers = True, False
+        continue
+    if re.match(r"^###\s+Worker repos\s*$", line, re.I):
+        in_workers = True
+        in_repos = False
+        continue
+    if re.match(r"^##\s+", line):
+        in_repos = in_workers = False
+    elif re.match(r"^###\s+", line):
+        in_workers = False
+    if in_repos or in_workers:
+        sections.append((in_repos or in_workers, line))
+
+seen = set()
+for active, line in sections:
+    if not active:
+        continue
+    match = re.match(r"^\s*-\s+\*\*(.+?)\*\*", line)
+    if not match:
+        match = re.match(r"^\s*-\s+([^\s:|—]+)", line)
+    if not match:
+        match = re.match(r"^\s*\|\s*([^|]+?)\s*\|", line)
+    if match:
+        name = match.group(1).strip().strip("`")
+        if name and name not in seen and name.lower() not in {"repo", "name", "none yet"}:
+            print(name)
+            seen.add(name)
+PY
+}
+
+record_worker_order() {
+    local task=$1 added=$2 file="$TASKS_DIR/$1/.task-worker-order" tmp wt name
+    local -a names=()
+    local -A seen=()
+    if [[ ! -f "$file" ]]; then
+        if tmux has-session -t "=$(session_name "$task")" 2>/dev/null; then
+            while IFS= read -r name; do
+                [[ "$name" == nvim-* ]] || continue
+                name=${name#nvim-}
+                [[ -e "$TASKS_DIR/$task/$name/.git" && "$name" != "$added" ]] || continue
+                [[ -n "${seen[$name]:-}" ]] && continue
+                names+=("$name")
+                seen[$name]=1
+            done < <(tmux list-windows -t "=$(session_name "$task")" -F '#W')
+        fi
+        while IFS= read -r wt; do
+            name=$(basename "$wt")
+            [[ "$name" == "$added" || -n "${seen[$name]:-}" ]] && continue
+            names+=("$name")
+            seen[$name]=1
+        done < <(task_worktrees "$task")
+    else
+        while IFS= read -r name; do
+            [[ -n "$name" && "$name" != "$added" && -z "${seen[$name]:-}" ]] || continue
+            [[ -e "$TASKS_DIR/$task/$name/.git" ]] || continue
+            names+=("$name")
+            seen[$name]=1
+        done < "$file"
+    fi
+    names+=("$added")
+    tmp=$(mktemp "$TASKS_DIR/$task/.task-worker-order.XXXXXX") || return 1
+    printf '%s\n' "${names[@]}" > "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod 600 "$tmp" && mv -f "$tmp" "$file"
+}
+
+task_context_file() { printf '%s/.task-context.tsv\n' "$TASKS_DIR/$1"; }
+
+task_contexts() {
+    local file
+    file=$(task_context_file "$1")
+    [[ -f "$file" ]] || return 0
+    cat "$file"
+}
+
+repo_is_context() {
+    local task=$1 repo=$2 name path
+    while IFS=$'\t' read -r name path; do
+        [[ "$path" == "$repo" ]] && return 0
+    done < <(task_contexts "$task")
+    return 1
 }
 
 # "api, web on feat-x", prefixed with "running" when its session is up.
 task_detail() {
-    local wt names="" branch=""
+    local wt names="" branch="" context
     while IFS= read -r wt; do
         names+="${names:+, }$(basename "$wt")"
         [[ -n "$branch" ]] || branch=$(git -C "$wt" branch --show-current 2>/dev/null)
     done < <(task_worktrees "$1")
-    names="$names on ${branch:-?}"
+    while IFS=$'\t' read -r context _; do
+        [[ -n "$context" ]] && names+="${names:+, }${context} (context)"
+    done < <(task_contexts "$1")
+    [[ -n "$names" ]] || names="no repos"
+    [[ -z "$branch" ]] || names="$names on $branch"
     tmux has-session -t "=$(session_name "$1")" 2>/dev/null && names="running, $names"
     echo "$names"
 }
@@ -153,12 +317,20 @@ dispatch_hooks() {
 # --- task creation -----------------------------------------------------------
 
 add_repo() {
-    local task=$1 branch=$2 repo=${3%/} name wt
+    local task=$1 branch=$2 repo=${3%/} name wt existing origin allow_context=${4:-no}
+    repo=$(canonical_repo "$repo") || { echo "skip $repo: not a canonical git checkout under ~/Projects or ~/Work"; return 1; }
     name=$(basename "$repo")
     wt="$TASKS_DIR/$task/$name"
-    [[ -d "$repo/.git" ]] || { echo "skip $repo: not a git checkout"; return 1; }
-    [[ -e "$wt" ]] && { echo "$name: already in $task"; return 0; }
+    if [[ "$allow_context" != yes ]] && repo_is_context "$task" "$repo"; then
+        die "$name is context-only in $task; use promote $task $name to create a worker"
+    fi
+    if [[ -e "$wt" ]]; then
+        origin=$(origin_repo "$wt")
+        [[ "$origin" == "$repo" ]] && { echo "$name: already in $task"; return 0; }
+        die "repo name collision in $task: $name"
+    fi
     mkdir -p "$TASKS_DIR/$task"
+    ensure_worker_order "$task" || die "could not initialize worker order for $task"
     echo "$name: worktree on $branch"
     if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch" ||
         [[ -n "$(git -C "$repo" for-each-ref "refs/remotes/*/$branch")" ]]; then
@@ -166,6 +338,7 @@ add_repo() {
     else
         git -C "$repo" worktree add -b "$branch" "$wt" || return 1
     fi
+    record_worker_order "$task" "$name" || die "could not record worker order for $task/$name"
     PENDING+=("$name")
     NEW_REPOS+=("$name")
     # Keep a running task session in sync with its repo worktrees.
@@ -176,13 +349,14 @@ add_repo() {
 write_agents_md() {
     local task=$1 branch=$2 file="$TASKS_DIR/$1/AGENTS.md" wt
     write_claude_files "$task"
-    [[ -e "$file" ]] && return 0
-    {
-        printf '# %s\n\n## Goal\n\n## Repos\n' "$task"
-        while IFS= read -r wt; do
-            printf -- '- %s: (role in this task; the orchestrator fills this in)\n' "$(basename "$wt")"
-        done < <(task_worktrees "$task")
-        cat <<EOF
+    mkdir -p "$TASKS_DIR/$task/research"
+    if [[ ! -e "$file" ]]; then
+        cat > "$file" <<EOF
+# $task
+
+## Goal
+
+## Repos
 
 ## Agents
 | name | role | model / effort | herdr workspace |
@@ -195,11 +369,173 @@ write_agents_md() {
 (Numbered steps, one owner repo each, with checks; [checkpoint] marks where the user gets a report.)
 
 ## Notes for agents
-- Each repo subfolder is a git worktree on branch $branch. Work only inside your own subfolder; the orchestrator works at the task root.
-- Don't \`git checkout\` other branches; use the existing worktrees.
-- Each agent's role comes from its launch prompt (~/.config/tmux/scripts/task-roles/). This file holds only the task's shared state; only the orchestrator edits it.
+- Worker repo subfolders are task worktrees on the branch shown in Repo modes. Each worker writes only inside its assigned worktree.
+- Context-only repos are canonical checkouts listed in Repo modes; they are read-only references with no worktree or repo agent.
+- Researcher notes belong under the task root's \`research/\`; researcher never edits repository trees.
+- Don't \`git checkout\` other branches; use the existing task worktrees.
+- Each agent's role comes from its launch prompt (~/.config/tmux/scripts/task-roles/). The orchestrator maintains the task plan and shared contracts.
 EOF
-    } > "$file"
+    fi
+    sync_repo_modes "$task"
+}
+
+sync_repo_modes() {
+    local task=$1
+    python3 - "$TASKS_DIR/$task" <<'PY'
+from pathlib import Path
+import os
+import re
+import subprocess
+import tempfile
+import sys
+
+root = Path(sys.argv[1]).resolve()
+agents = root / "AGENTS.md"
+contexts_file = root / ".task-context.tsv"
+workers = []
+ordered_names = []
+order_file = root / ".task-worker-order"
+if order_file.is_file():
+    ordered_names = [name for name in order_file.read_text().splitlines() if name]
+worktrees = {p.name: p for p in root.iterdir() if p.is_dir() and (p / ".git").exists()}
+worker_names = list(dict.fromkeys(ordered_names + sorted(worktrees, key=str.casefold)))
+for name in worker_names:
+    worktree = worktrees.get(name)
+    if worktree is None:
+        continue
+    try:
+        common = subprocess.check_output(
+            ["git", "-C", str(worktree), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+        branch = subprocess.check_output(
+            ["git", "-C", str(worktree), "branch", "--show-current"],
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        continue
+    canonical = str(Path(common).resolve().parent)
+    workers.append((worktree.name, str(worktree.resolve()), canonical, branch))
+
+contexts = []
+if contexts_file.is_file():
+    for line in contexts_file.read_text().splitlines():
+        if "\t" not in line:
+            continue
+        name, path = line.split("\t", 1)
+        if name and path:
+            contexts.append((name, path))
+
+def md(s):
+    return s.replace("`", "\\`").replace("|", "\\|")
+
+lines = [
+    "## Repo modes",
+    "",
+    "<!-- task-sessionizer:repo-modes:start -->",
+    "### Worker repos",
+]
+if workers:
+    lines.extend(
+        f"- **{md(name)}** — worktree `{md(worktree)}`; canonical checkout `{md(canonical)}`; branch `{md(branch or '?')}`."
+        for name, worktree, canonical, branch in workers
+    )
+else:
+    lines.append("- None yet.")
+lines.extend(["", "### Context only (read-only)"])
+if contexts:
+    lines.extend(
+        f"- **{md(name)}** — canonical checkout `{md(path)}`; read-only reference, no task worktree or repo agent."
+        for name, path in sorted(contexts, key=lambda row: row[0].casefold())
+    )
+else:
+    lines.append("- None.")
+lines.extend(["", "<!-- task-sessionizer:repo-modes:end -->"])
+block = "\n".join(lines)
+text = agents.read_text() if agents.exists() else f"# {root.name}\n"
+start = "<!-- task-sessionizer:repo-modes:start -->"
+end = "<!-- task-sessionizer:repo-modes:end -->"
+if start in text or end in text:
+    if start not in text or end not in text:
+        raise SystemExit("incomplete task-sessionizer Repo modes markers in AGENTS.md")
+    text = re.sub(re.escape(start) + r".*?" + re.escape(end), block[len("## Repo modes\n\n"):], text, count=1, flags=re.S)
+else:
+    match = re.search(r"(?m)^## Agents\s*$", text)
+    insertion = block + "\n\n"
+    if match:
+        text = text[:match.start()] + insertion + text[match.start():]
+    else:
+        text = text.rstrip() + "\n\n" + block + "\n"
+
+mode = agents.stat().st_mode & 0o777 if agents.exists() else 0o644
+fd, temporary = tempfile.mkstemp(prefix=".AGENTS.md.", dir=root)
+try:
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(temporary, mode)
+    os.replace(temporary, agents)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+canonical_repo() {
+    local input=${1/#\~/$HOME} path root allowed=no
+    path=$(realpath -e "$input") || return 1
+    [[ -d "$path/.git" ]] || return 1
+    for root in "${REPO_ROOTS[@]}"; do
+        [[ -d "$root" ]] || continue
+        root=$(realpath -e "$root")
+        [[ "$path" == "$root"/* ]] && allowed=yes
+    done
+    [[ "$allowed" == yes ]] || return 1
+    printf '%s\n' "$path"
+}
+
+add_context() {
+    local task=$1 input=$2 repo name file existing_name existing_path tmp worker origin
+    valid_name "$task" || die "task name must match [A-Za-z0-9._-]+ (got '$task')"
+    repo=$(canonical_repo "$input") || die "context repo must be a canonical git checkout under ~/Projects or ~/Work: $input"
+    name=$(basename "$repo")
+    mkdir -p "$TASKS_DIR/$task"
+    while IFS= read -r worker; do
+        [[ "$(basename "$worker")" == "$name" ]] || continue
+        origin=$(origin_repo "$worker")
+        [[ "$origin" == "$repo" ]] && { echo "$name: already a worker in $task"; return 0; }
+        die "repo name collision in $task: $name"
+    done < <(task_worktrees "$task")
+    file=$(task_context_file "$task")
+    while IFS=$'\t' read -r existing_name existing_path; do
+        [[ -n "$existing_name" ]] || continue
+        [[ "$existing_path" == "$repo" ]] && { echo "$name: already context in $task"; return 0; }
+        [[ "$existing_name" != "$name" ]] || die "context repo name collision in $task: $name"
+    done < <(task_contexts "$task")
+    tmp=$(mktemp "$(dirname "$file")/.task-context.XXXXXX")
+    task_contexts "$task" > "$tmp"
+    printf '%s\t%s\n' "$name" "$repo" >> "$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$file"
+    NEW_CONTEXTS+=("$name")
+    echo "$name: recorded as read-only context"
+}
+
+remove_context() {
+    local task=$1 selector=$2 file tmp name path found=0
+    file=$(task_context_file "$task")
+    [[ -f "$file" ]] || die "no context repos recorded for $task"
+    tmp=$(mktemp "$(dirname "$file")/.task-context.XXXXXX")
+    while IFS=$'\t' read -r name path; do
+        if [[ "$selector" == "$name" || "$selector" == "$path" || "$selector" == "$(basename "$path")" ]]; then
+            found=1
+            continue
+        fi
+        [[ -n "$name" ]] && printf '%s\t%s\n' "$name" "$path" >> "$tmp"
+    done < "$file"
+    [[ $found == 1 ]] || { unlink "$tmp"; die "no context repo matches $selector in $task"; }
+    if [[ -s "$tmp" ]]; then chmod 600 "$tmp"; mv -f "$tmp" "$file"; else unlink "$tmp"; unlink "$file"; fi
 }
 
 CLAUDE_TASK_SETTINGS="{
@@ -250,11 +586,86 @@ add_repos() {
         add_repo "$task" "$branch" "$r"
     done
 
-    if [[ -z "$(task_worktrees "$task")" ]]; then
-        rmdir "$TASKS_DIR/$task" 2>/dev/null
-        die "no worktree could be created for $task"
-    fi
+    [[ -n "$(task_worktrees "$task")" ]] || die "no worker worktree could be created for $task"
     write_agents_md "$task" "$branch"
+}
+
+add_contexts() {
+    local task=$1 repo
+    shift
+    mkdir -p "$TASKS_DIR/$task"
+    for repo in "$@"; do add_context "$task" "$repo"; done
+    write_agents_md "$task" "$(task_branch "$task")"
+}
+
+task_branch() {
+    local wt
+    wt=$(task_worktrees "$1" | head -n1)
+    [[ -n "$wt" ]] && git -C "$wt" branch --show-current || printf '%s\n' "$1"
+}
+
+create_task() {
+    local task=$1 repo branch
+    shift
+    local -a workers=() contexts=()
+    valid_name "$task" || die "task name must match [A-Za-z0-9._-]+ (got '$task')"
+    while (($#)); do
+        case "$1" in
+            --worker) (($# >= 2)) || die "--worker needs a repo path"; workers+=("$2"); shift 2 ;;
+            --context) (($# >= 2)) || die "--context needs a repo path"; contexts+=("$2"); shift 2 ;;
+            *) die "unknown create option: $1" ;;
+        esac
+    done
+    ((${#workers[@]} + ${#contexts[@]} > 0)) || die "create needs at least one --worker or --context repo"
+    [[ ! -e "$TASKS_DIR/$task" ]] || die "task already exists: $task"
+    mkdir -p "$TASKS_DIR/$task/research"
+    branch=$task
+    for repo in "${workers[@]}"; do add_repo "$task" "$branch" "$repo"; done
+    for repo in "${contexts[@]}"; do add_context "$task" "$repo"; done
+    write_agents_md "$task" "$branch"
+}
+
+add_task_repos() {
+    local task=$1 repo
+    shift
+    local -a workers=() contexts=()
+    valid_name "$task" || die "task name must match [A-Za-z0-9._-]+ (got '$task')"
+    while (($#)); do
+        case "$1" in
+            --worker) (($# >= 2)) || die "--worker needs a repo path"; workers+=("$2"); shift 2 ;;
+            --context) (($# >= 2)) || die "--context needs a repo path"; contexts+=("$2"); shift 2 ;;
+            --*) die "unknown add option: $1" ;;
+            *) workers+=("$1"); shift ;;
+        esac
+    done
+    ((${#workers[@]} + ${#contexts[@]} > 0)) || die "add needs at least one repo"
+    [[ -d "$TASKS_DIR/$task" ]] || mkdir -p "$TASKS_DIR/$task/research"
+    if ((${#workers[@]})); then add_repos "$task" "$(task_branch "$task")" "${workers[@]}"; fi
+    if ((${#contexts[@]})); then
+        for repo in "${contexts[@]}"; do add_context "$task" "$repo"; done
+        write_agents_md "$task" "$(task_branch "$task")"
+    fi
+    if tmux has-session -t "=$(session_name "$task")" 2>/dev/null; then
+        ensure_task_layout "$task"
+        herdr_running "$(session_name "$task")" && herdr_layout "$task" && herdr_announce "$task"
+    fi
+}
+
+promote_context() {
+    local task=$1 selector=$2 name path branch
+    valid_name "$task" || die "task name must match [A-Za-z0-9._-]+ (got '$task')"
+    [[ -d "$TASKS_DIR/$task" ]] || die "no such task: $task"
+    path=$(awk -F '\t' -v selector="$selector" '$1 == selector || $2 == selector { print $2; found=1; exit } END { if (!found) exit 1 }' \
+        "$(task_context_file "$task")") || die "no context repo matches $selector in $task"
+    name=$(basename "$path")
+    branch=$(task_branch "$task")
+    add_repo "$task" "$branch" "$path" yes
+    remove_context "$task" "$path"
+    write_agents_md "$task" "$branch"
+    ensure_task_runtime "$task"
+    dispatch_hooks "$task"
+    herdr_running "$(session_name "$task")" && herdr_layout "$task" && herdr_announce "$task"
+    echo "$name promoted to worker in $task"
 }
 
 # --- session -----------------------------------------------------------------
@@ -297,9 +708,8 @@ ensure_task_layout() {
     local -a wts=() standard=()
     s=$(session_name "$task")
     root=$(realpath "$TASKS_DIR/$task")
-    mapfile -t wts < <(task_worktrees "$task" | LC_ALL=C sort -f)
-    [[ ${#wts[@]} -gt 0 ]] || die "task $task has no worktrees"
-
+    ensure_worker_order "$task"
+    mapfile -t wts < <(task_worktrees "$task")
     active_id=$(tmux list-windows -t "=$s" -F '#{window_active} #{window_id}' |
         awk '$1 == "1" { print $2; exit }')
     ensure_task_window "$task" "$s" agent agent "$root"
@@ -330,19 +740,27 @@ ensure_task_layout() {
     [[ "$current_id" == "$active_id" ]] || tmux select-window -t "$active_id"
 }
 
-open_session() {
+ensure_task_runtime() {
     local task=$1 s created=0
     s=$(session_name "$task")
+    command -v tmux >/dev/null || die "tmux is required to prepare task session resources"
     if ! tmux has-session -t "=$s" 2>/dev/null; then
         tmux new-session -ds "$s" -n agent -c "$(realpath "$TASKS_DIR/$task")"
         tmux set-option -t "$s" @pontual_task_root "$(realpath "$TASKS_DIR/$task")"
         created=1
     fi
     ensure_task_layout "$task"
-    if [[ $created == 1 ]] && command -v herdr >/dev/null; then
+    if command -v herdr >/dev/null; then
         herdr_layout "$task"
-        tmux send-keys -t "=$s:agent" "herdr --session $s" Enter
+        if [[ $created == 1 ]]; then tmux send-keys -t "=$s:agent" "herdr --session $s" Enter; fi
     fi
+    TASK_RUNTIME_CREATED=$created
+}
+
+open_session() {
+    local task=$1 s
+    s=$(session_name "$task")
+    ensure_task_runtime "$task"
     herdr_running "$s" && herdr_layout "$task" && herdr_announce "$task"
     dispatch_hooks "$task"
     goto_session "$s"
@@ -350,14 +768,14 @@ open_session() {
 
 # --- herdr (agents) ----------------------------------------------------------
 
-# Tell a running orchestrator about repos added in this run so it starts
-# their agents. Silently does nothing when no orchestrator agent is up: the
-# kickoff prompt covers that case when one is started.
+# Tell a running orchestrator about worker/context changes so it updates its
+# plan and starts agents only for worker repos.
 herdr_announce() {
     local task=$1 s ws pane msg
-    [[ ${#NEW_REPOS[@]} -gt 0 ]] || return 0
-    msg="Added to this task just now, each with its own herdr workspace: ${NEW_REPOS[*]}. Run your start-up steps to start their agents, add them under Repos and Agents in AGENTS.md, and plan their work if the goal calls for it."
+    [[ ${#NEW_REPOS[@]} -gt 0 || ${#NEW_CONTEXTS[@]} -gt 0 ]] || return 0
+    msg="Task repos changed. Worker repos added: ${NEW_REPOS[*]:-none}. Read-only context repos added: ${NEW_CONTEXTS[*]:-none}. Repo modes are recorded in AGENTS.md; refresh workspace/pane state, start agents only for workers, and update the plan."
     NEW_REPOS=()
+    NEW_CONTEXTS=()
     command -v jq >/dev/null || return 0
     s=$(session_name "$task")
     herdr_running "$s" || return 0
@@ -374,9 +792,9 @@ herdr_running() {
     command -v herdr >/dev/null && herdr session list 2>/dev/null | grep -q "^$1  *running"
 }
 
-# One persistent herdr session per task, with a workspace per repo worktree
-# and one at the task root for an orchestrator agent, even with a single repo,
-# plus a "report" workspace (a shell at the task root) for the reporter agent.
+# One persistent herdr session per task, with an orchestrator workspace at the
+# task root, one per worker repo, and one researcher workspace under research/.
+# Context repos have no workspace. Existing legacy workspaces remain untouched.
 # Idempotent: only missing workspaces are created.
 herdr_layout() {
     local task=$1 s wt label labels pane picker i wts=() want=() role=()
@@ -392,20 +810,22 @@ herdr_layout() {
     labels=$(grep -o '"label":"[^"]*"' <<< "$labels")
 
     mapfile -t wts < <(task_worktrees "$task")
-    [[ ${#wts[@]} -gt 0 ]] || return 0
+    mkdir -p "$TASKS_DIR/$task/research"
     want+=("$TASKS_DIR/$task")
     want+=("${wts[@]}")
+    want+=("$TASKS_DIR/$task/research")
     for wt in "${want[@]}"; do
-        label=$(basename "$wt")
+        if [[ "$wt" == "$TASKS_DIR/$task/research" ]]; then label=research; else label=$(basename "$wt"); fi
         grep -qxF "\"label\":\"$label\"" <<< "$labels" && continue
         # The task-root workspace is the orchestrator, which starts
         # the repo agents itself, so repo panes must stay at a shell prompt.
         role=()
-        picker=1
+        picker=
         if [[ "$wt" == "$TASKS_DIR/$task" ]]; then
             role=(--env TASK_ROLE=orchestrator)
-        else
-            picker=
+            picker=1
+        elif [[ "$label" == research ]]; then
+            role=(--env TASK_ROLE=researcher)
         fi
         pane=$(herdr --session "$s" workspace create --cwd "$wt" --label "$label" "${role[@]}" --no-focus 2>/dev/null |
             grep -o '"pane_id":"[^"]*"' | head -n1 | cut -d'"' -f4)
@@ -413,10 +833,6 @@ herdr_layout() {
         [[ -n "$picker" && -n "$pane" && -x "$AGENT_PICKER" ]] &&
             herdr --session "$s" pane run "$pane" "$AGENT_PICKER" >/dev/null 2>&1
     done
-    # The reporter's workspace stays at a shell prompt; the orchestrator
-    # starts the reporter agent in it.
-    grep -qxF '"label":"report"' <<< "$labels" ||
-        herdr --session "$s" workspace create --cwd "$TASKS_DIR/$task" --label report --no-focus >/dev/null 2>&1
 }
 
 # Switch to a session from wherever we are: inside tmux, a plain terminal, or
@@ -551,6 +967,8 @@ remove_task() {
     [[ -L "$dir/CLAUDE.md" || "$(cat "$dir/CLAUDE.md" 2>/dev/null)" == "@AGENTS.md" ]] && rm -f "$dir/CLAUDE.md"
     rm -f "$dir/AGENTS.md"
     rm -f "$dir/REPORT.md"
+    rm -f "$(task_context_file "$task")"
+    rmdir "$dir/research" 2>/dev/null || true
     settings=$(cat "$dir/.claude/settings.json" 2>/dev/null)
     [[ "$settings" == "$CLAUDE_TASK_SETTINGS" || "$settings" == "$CLAUDE_TASK_SETTINGS_OLD" ]] && rm -f "$dir/.claude/settings.json"
     rm -f "$dir/.claude/settings.local.json"
@@ -632,59 +1050,135 @@ menu_task_rows() {
     while IFS= read -r t; do
         printf '%s\t%s\ttask: %s\n' "$ICON_TASK" "$t" "$(task_detail "$t")"
     done < <(list_tasks)
+    printf '%s\t%s\taction:add\n' "$ICON_ADD" "$ADD_LABEL"
+    printf '%s\t%s\taction:create\n' "$ICON_REPO" "$CREATE_LABEL"
+}
+
+menu_existing_task_rows() {
+    local t
+    while IFS= read -r t; do
+        printf '%s\t%s\ttask: %s\n' "$ICON_TASK" "$t" "$(task_detail "$t")"
+    done < <(list_tasks)
 }
 
 menu_repo_rows() {
     local r
     while IFS= read -r r; do
-        printf '%s\t%s\t%s\n' "$ICON_REPO" "$(basename "$r")" "$(dirname "${r/#$HOME/\~}")"
+        printf '%s\t%s\t%s\n' "$ICON_REPO" "$(basename "$r")" "${r/#$HOME/\~}"
     done
 }
 
-# Keep asking for repos until "Done"; prints the chosen repo paths.
-menu_more_repos() {
-    local prompt=$1 sel r chosen=()
-    shift
-    chosen=("$@")
+# Testable seams keep the actual menu flow covered without opening graphical UI.
+menu_choose() {
+    local title=$1 rows=$2 queue=${TASK_MENU_CHOICES_FILE:-} selected temporary selector_rows
+    if [[ -n "$queue" ]]; then
+        [[ -s "$queue" ]] || return 1
+        IFS= read -r selected < "$queue"
+        selector_rows=$(awk -F '\t' 'NF >= 2 { if (NF >= 3) print $2 "\t" $3; else print $2 }' <<< "$rows")
+        grep -Fxq -- "$selected" <<< "$selector_rows" || {
+            echo "task-sessionizer: fixture choice is not present in '$title' rows: $selected" >&2
+            return 2
+        }
+        temporary="$queue.tmp.$$"
+        tail -n +2 "$queue" > "$temporary"
+        mv -f "$temporary" "$queue"
+        printf '%s\n' "$selected"
+        return 0
+    fi
+    [[ -n "$rows" ]] || return 1
+    printf '%s\n' "$rows" | omarchy-menu-select "$title" -- --width 700
+}
+
+menu_input() {
+    local title=$1 queue=${TASK_MENU_INPUTS_FILE:-} value temporary
+    if [[ -n "$queue" ]]; then
+        [[ -s "$queue" ]] || return 1
+        IFS= read -r value < "$queue"
+        temporary="$queue.tmp.$$"
+        tail -n +2 "$queue" > "$temporary"
+        mv -f "$temporary" "$queue"
+        printf '%s\n' "$value"
+        return 0
+    fi
+    omarchy-menu-input "$title" --width 700
+}
+
+repo_in_task() {
+    local task=$1 repo=$2 wt origin name path
+    while IFS= read -r wt; do
+        origin=$(origin_repo "$wt")
+        [[ "$origin" == "$repo" ]] && return 0
+    done < <(task_worktrees "$task")
+    while IFS=$'\t' read -r name path; do [[ "$path" == "$repo" ]] && return 0; done < <(task_contexts "$task")
+    return 1
+}
+
+MENU_WORKERS=()
+MENU_CONTEXTS=()
+
+# Repeated single-select steps provide multi-select behavior with an explicit
+# mode per repo. A repo remains selected after its Worker/Context choice.
+menu_repo_picker() {
+    local task=$1 prompt=$2 rows sel icon name display repo mode mode_rows
+    local -A chosen=()
+    MENU_WORKERS=()
+    MENU_CONTEXTS=()
     while :; do
-        sel=$({
-            [[ ${#chosen[@]} -gt 0 ]] && printf '%s\tDone\n' "$ICON_DONE"
-            list_repos | grep -vxF -f <(printf '%s\n' "${chosen[@]}") | menu_repo_rows
-        } | omarchy-menu-select "$prompt" -- --width 700) || break
-        [[ "$sel" == Done ]] && break
-        r="${sel#*$'\t'}/${sel%%$'\t'*}"
-        chosen+=("${r/#\~/$HOME}")
+        rows=""
+        if ((${#MENU_WORKERS[@]} + ${#MENU_CONTEXTS[@]})); then
+            rows+=$(printf '%s\tDone\taction:done (%d worker, %d context)\n' "$ICON_DONE" "${#MENU_WORKERS[@]}" "${#MENU_CONTEXTS[@]}")$'\n'
+        fi
+        while IFS= read -r repo; do
+            [[ -n "${chosen[$repo]:-}" ]] && continue
+            repo_in_task "$task" "$repo" && continue
+            rows+=$(printf '%s\t%s\t%s\n' "$ICON_REPO" "$(basename "$repo")" "${repo/#$HOME/\~}")$'\n'
+        done < <(list_repos)
+        sel=$(menu_choose "$prompt" "$rows") || return 1
+        IFS=$'\t' read -r name display <<< "$sel"
+        [[ "$display" == action:done* ]] && break
+        repo=${display/#\~/$HOME}
+        mode_rows=$(printf '%s\tWORKER\tCreate a task worktree, nvim/srv windows, and repo agent\n%s\tCONTEXT\tRead-only canonical checkout; no worktree or repo agent' "$ICON_REPO" "$ICON_CONTEXT")
+        sel=$(menu_choose "Repo mode: $name" "$mode_rows") || return 1
+        IFS=$'\t' read -r mode _ <<< "$sel"
+        case "$mode" in
+            WORKER) MENU_WORKERS+=("$repo"); chosen[$repo]=worker ;;
+            CONTEXT) MENU_CONTEXTS+=("$repo"); chosen[$repo]=context ;;
+            *) die "unknown repo mode: $mode" ;;
+        esac
     done
-    [[ ${#chosen[@]} -gt 0 ]] && printf '%s\n' "${chosen[@]}"
+    ((${#MENU_WORKERS[@]} + ${#MENU_CONTEXTS[@]} > 0))
 }
 
 pick_menu() {
-    local sel label sub task="" branch="" input r repos=()
+    local sel label detail task input mode
+    local -a selection=()
     mkdir -p "$TASKS_DIR"
-    sel=$({
-        menu_task_rows
-        [[ -n "$(list_tasks)" ]] && printf '%s\t%s\tworktrees for more repos on its branch\n' "$ICON_ADD" "$ADD_LABEL"
-        list_repos | menu_repo_rows
-    } | omarchy-menu-select "Task or repo" -- --width 700) || exit 0
-    label=${sel%%$'\t'*}
-    sub=${sel#*$'\t'}
-
-    if [[ "$sub" == "task: "* ]]; then
-        task=$label
-    elif [[ "$label" == "$ADD_LABEL" ]]; then
-        task=$(menu_task_rows | omarchy-menu-select "Add repos to" -- --width 700) || exit 0
-        task=${task%%$'\t'*}
-        mapfile -t repos < <(menu_more_repos "Repo for $task")
-        [[ ${#repos[@]} -gt 0 ]] || exit 0
-        add_repos "$task" "" "${repos[@]}"
-    else
-        r="$sub/$label"
-        input=$(omarchy-menu-input "Task name for $label (optional: name branch)" --width 700) || exit 0
-        read -r task branch <<< "$input"
-        valid_name "$task" || die "task name must match [A-Za-z0-9._-]+ (got '$task')"
-        mapfile -t repos < <(menu_more_repos "$task: add another repo, or Done" "${r/#\~/$HOME}")
-        add_repos "$task" "$branch" "${repos[@]}"
-    fi
+    sel=$(menu_choose "Tasks" "$(menu_task_rows)") || return 0
+    IFS=$'\t' read -r label detail <<< "$sel"
+    case "$detail" in
+        task:*) open_session "$label"; return ;;
+        action:create)
+            input=$(menu_input "Name for new task") || return 0
+            task=$input
+            valid_name "$task" || die "task name must match [A-Za-z0-9._-]+ (got '$task')"
+            menu_repo_picker "$task" "Repos for $task" || return 0
+            selection=()
+            for mode in "${MENU_WORKERS[@]}"; do selection+=(--worker "$mode"); done
+            for mode in "${MENU_CONTEXTS[@]}"; do selection+=(--context "$mode"); done
+            create_task "$task" "${selection[@]}"
+            ;;
+        action:add)
+            sel=$(menu_choose "Add repo to task" "$(menu_existing_task_rows)") || return 0
+            IFS=$'\t' read -r task detail <<< "$sel"
+            [[ "$detail" == task:* ]] || return 0
+            menu_repo_picker "$task" "Repos to add to $task" || return 0
+            selection=()
+            for mode in "${MENU_WORKERS[@]}"; do selection+=(--worker "$mode"); done
+            for mode in "${MENU_CONTEXTS[@]}"; do selection+=(--context "$mode"); done
+            add_task_repos "$task" "${selection[@]}"
+            ;;
+        *) return 0 ;;
+    esac
     open_session "$task"
 }
 
@@ -710,17 +1204,34 @@ case "$(basename "$0"):${1:-}" in
     task-rm:*) remove_task "$@" ;;
     *:rm) shift; remove_task "$@" ;;
     *:hook) run_hook "${2:?task}" "${3:?repo}" ;;
+    *:create)
+        shift
+        [[ $# -ge 3 ]] || die "usage: create <task> --worker repo|--context repo [...]"
+        task=$1
+        shift
+        create_task "$task" "$@"
+        ensure_task_runtime "$task"
+        dispatch_hooks "$task"
+        ;;
     *:add)
         shift
         [[ $# -gt 0 ]] || die "usage: add <task> [repo..]"
         task=$1
         shift
-        if [[ $# -eq 0 ]]; then mapfile -t picked < <(fzf_repos "add to $task"); set -- "${picked[@]}"; fi
-        add_repos "$task" "" "$@" && dispatch_hooks "$task"
-        herdr_running "$(session_name "$task")" && herdr_layout "$task" && herdr_announce "$task"
+        if [[ $# -eq 0 ]]; then
+            mapfile -t picked < <(fzf_repos "add to $task")
+            ((${#picked[@]})) || exit 0
+            set -- "${picked[@]}"
+        fi
+        add_task_repos "$task" "$@"
+        dispatch_hooks "$task"
+        ;;
+    *:promote)
+        [[ $# -eq 3 ]] || die "usage: promote <task> <repo>"
+        promote_context "$2" "$3"
         ;;
     *:sessions) [[ "${2:-}" == popup ]] && TASK_POPUP=1; pick_session ;;
-    # Used by the pontual.tasks shell plugin (Super+S).
+    # Used by the task picker and task/session menu rows.
     *:rows) session_rows ;;
     *:open)
         TASK_POPUP=1
