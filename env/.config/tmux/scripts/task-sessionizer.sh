@@ -12,6 +12,10 @@
 #   task-sessionizer.sh promote <task> <repo> context -> worker
 #   task-sessionizer.sh close <task> [--force] close a task; branches remain
 #   task-sessionizer.sh rm <task> [--force]  remove worktrees, dir and session
+#   task-sessionizer.sh stop <task> [--dry-run] [--force]
+#                                            end its nvim, language servers and
+#                                            herdr session; worktrees and branches stay
+#   task-sessionizer.sh list                 tasks with state and RAM
 #
 # Picking a task opens it; picking a repo starts a new task from it.
 # Deps: git, tmux, fzf, fd (popup mode also uses omarchy-menu-*).
@@ -1084,6 +1088,196 @@ close_task() {
     remove_task "$task" "$force"
 }
 
+# --- stop and list -----------------------------------------------------------
+# A task's live processes are the shells in its tmux session (each owns an
+# nvim instance and the language servers it started) and its herdr server
+# (which owns the agents). Worktrees, branches, files and the tmux session with
+# its shells are never touched.
+
+# One "pid rss args" line per root and each of its descendants, from one ps run.
+process_subtree() {
+    ps -eo pid=,ppid=,rss=,args= | awk -v roots="$*" '
+        {
+            pid = $1; rss[pid] = $3; kids[$2] = kids[$2] " " pid
+            $1 = ""; $2 = ""; $3 = ""; sub(/^ +/, "")
+            args[pid] = $0
+        }
+        END {
+            n = split(roots, r, " ")
+            for (i = 1; i <= n; i++) queue[++last] = r[i]
+            for (head = 1; head <= last; head++) {
+                p = queue[head]
+                if (!(p in args) || (p in seen)) continue
+                seen[p] = 1
+                print p, rss[p], args[p]
+                m = split(kids[p], c, " ")
+                for (j = 1; j <= m; j++) queue[++last] = c[j]
+            }
+        }'
+}
+
+herdr_server_pid() {
+    ps -eo pid=,args= | awk -v want="herdr --session $1 server" '
+        { pid = $1; $1 = ""; sub(/^ +/, "") }
+        $0 == want || index($0, want " ") == 1 { print pid }'
+}
+
+# Roots of a task's processes: its tmux pane shells and its herdr server.
+task_roots() {
+    tmux list-panes -s -t "=$1" -F '#{pane_pid}' 2>/dev/null
+    herdr_server_pid "$1"
+}
+
+task_rss_kb() {
+    local -a roots=()
+    mapfile -t roots < <(task_roots "$(session_name "$1")")
+    process_subtree "${roots[@]}" | awk '{ total += $2 } END { print total + 0 }'
+}
+
+format_mib() { awk -v kb="$1" 'BEGIN { printf "%.0f MiB", kb / 1024 }'; }
+
+# Per task: state and the RAM of its processes (RSS summed, so shared pages
+# can count more than once).
+list_task_resources() {
+    local t s state
+    printf '%-28s %-8s %s\n' TASK STATE RAM
+    while IFS= read -r t; do
+        s=$(session_name "$t")
+        if herdr_running "$s"; then
+            state=running
+        elif tmux has-session -t "=$s" 2>/dev/null; then
+            state=tmux
+        else
+            state=stopped
+        fi
+        printf '%-28s %-8s %s\n' "$t" "$state" "$(format_mib "$(task_rss_kb "$t")")"
+    done < <(list_tasks)
+}
+
+# Ends a task's live processes; nothing on disk changes. nvim is asked to quit
+# with :qa, so an instance with unsaved buffers stays open, and its language
+# servers stop with it. The herdr session is stopped, which ends its agents;
+# its workspaces stay and come back with the next start. An agent that is
+# working blocks the stop unless --force is given.
+stop_task() {
+    local task=$1 dry=$2 force=$3 s pane win pane_pid cmd nvim_pid herdr_pid n pid
+    local -a nvim_panes=() busy=() agents=() workspaces=() herdr_procs=() stopped=() kept=() lsp=() leftover=()
+    local -A nvim_of=() nvim_win=() lsp_of=()
+
+    [[ -d "$TASKS_DIR/$task" ]] || die "no such task: $task"
+    s=$(session_name "$task")
+
+    # nvim instances: the top-level nvim under each pane shell. Its child
+    # (the --embed process) and everything below it are its language servers.
+    if tmux has-session -t "=$s" 2>/dev/null; then
+        while read -r pane win pane_pid cmd; do
+            [[ "$cmd" == nvim ]] || continue
+            nvim_pid=$(process_subtree "$pane_pid" | awk '$3 == "nvim" && $4 != "--embed" { print $1; exit }')
+            [[ -n "$nvim_pid" ]] || continue
+            nvim_panes+=("$pane")
+            nvim_of[$pane]=$nvim_pid
+            nvim_win[$pane]=$win
+            lsp_of[$pane]=$(process_subtree "$nvim_pid" | awk -v self="$nvim_pid" '$1 != self && $3 != "nvim" { print $1 }' | tr '\n' ' ')
+        done < <(tmux list-panes -s -t "=$s" -F '#{pane_id} #{window_name} #{pane_pid} #{pane_current_command}')
+    fi
+
+    herdr_pid=
+    if herdr_running "$s"; then
+        command -v jq >/dev/null || die "jq is required to stop herdr session $s"
+        herdr_pid=$(herdr_server_pid "$s")
+        mapfile -t agents < <(herdr --session "$s" pane list 2>/dev/null |
+            jq -r '.result.panes[] | select(.agent) | "\(.pane_id) \(.agent) \(.agent_status)"')
+        mapfile -t busy < <(printf '%s\n' "${agents[@]}" | awk '$3 == "working"')
+        mapfile -t workspaces < <(herdr --session "$s" workspace list 2>/dev/null |
+            jq -r '.result.workspaces[].label')
+        mapfile -t herdr_procs < <(process_subtree "$herdr_pid" | awk -v self="$herdr_pid" '
+            $1 != self { pid = $1; $1 = ""; $2 = ""; sub(/^ +/, ""); print pid, $0 }')
+    fi
+
+    if [[ ${#busy[@]} -gt 0 && "$force" != yes ]]; then
+        if [[ "$dry" == yes ]]; then
+            printf 'would refuse: working agents (use --force): %s\n' "${busy[*]}"
+        else
+            die "agents are working; wait for them or use stop $task --force: ${busy[*]}"
+        fi
+    fi
+
+    if [[ "$dry" == yes ]]; then
+        printf 'dry run for task %s (tmux and herdr session %s); nothing is changed\n' "$task" "$s"
+        for pane in "${nvim_panes[@]}"; do
+            printf 'nvim:  pane %s window %s pid %s (:qa; kept if it has unsaved buffers); language servers: %s\n' \
+                "$pane" "${nvim_win[$pane]}" "${nvim_of[$pane]}" "${lsp_of[$pane]:-none}"
+        done
+        [[ ${#nvim_panes[@]} -gt 0 ]] || printf 'nvim:  none running\n'
+        if [[ -n "$herdr_pid" ]]; then
+            printf 'herdr: stop session %s (server pid %s), workspaces: %s\n' "$s" "$herdr_pid" "${workspaces[*]:-none}"
+            for n in "${agents[@]}"; do printf 'agent: pane %s\n' "$n"; done
+            for n in "${herdr_procs[@]}"; do printf 'proc:  pid %.110s\n' "$n"; done
+        else
+            printf 'herdr: not running\n'
+        fi
+        printf 'kept:  worktrees, branches, task files, tmux session %s and its shells\n' "$s"
+        return 0
+    fi
+
+    # nvim: ask each instance to quit, then give its language servers a moment
+    # to exit with it; any left over are sent SIGTERM.
+    for pane in "${nvim_panes[@]}"; do
+        tmux send-keys -t "$pane" Escape ':qa' Enter
+    done
+    for pane in "${nvim_panes[@]}"; do
+        pid=${nvim_of[$pane]}
+        for n in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
+        if kill -0 "$pid" 2>/dev/null; then
+            kept+=("$pane")
+            continue
+        fi
+        stopped+=("$pane")
+        read -ra lsp <<< "${lsp_of[$pane]}"
+        for n in "${lsp[@]}"; do
+            for _ in $(seq 1 8); do kill -0 "$n" 2>/dev/null || break; sleep 0.25; done
+            kill -0 "$n" 2>/dev/null && kill -TERM "$n" 2>/dev/null
+        done
+    done
+
+    if [[ -n "$herdr_pid" ]]; then
+        herdr session stop "$s" >/dev/null 2>&1
+        for _ in $(seq 1 20); do kill -0 "$herdr_pid" 2>/dev/null || break; sleep 0.25; done
+        # Children that outlived the server (agent helpers, MCP servers) were
+        # recorded before the stop; SIGTERM any still alive.
+        for line in "${herdr_procs[@]}"; do
+            n=${line%% *}
+            for _ in $(seq 1 8); do kill -0 "$n" 2>/dev/null || break; sleep 0.25; done
+            if kill -0 "$n" 2>/dev/null; then
+                kill -TERM "$n" 2>/dev/null
+                leftover+=("$n")
+            fi
+        done
+    fi
+
+    printf 'stopped task %s\n' "$task"
+    printf '  nvim: quit %s\n' "${#stopped[@]}"
+    [[ ${#kept[@]} -eq 0 ]] || printf '  nvim kept open (unsaved buffers or a prompt): %s\n' "${kept[*]}"
+    [[ -z "$herdr_pid" ]] || printf '  herdr: session %s stopped; agents ended: %s; workspaces kept: %s\n' "$s" "${#agents[@]}" "${#workspaces[@]}"
+    [[ ${#leftover[@]} -eq 0 ]] || printf '  leftover processes sent SIGTERM: %s\n' "${leftover[*]}"
+    printf '  kept: worktrees, branches, task files, tmux session %s and its shells\n' "$s"
+}
+
+stop_command() {
+    local task=${1:-} dry=no force=no arg
+    [[ -n "$task" ]] || die "usage: stop <task> [--dry-run] [--force]"
+    valid_name "$task" || die "invalid task name: $task"
+    shift
+    for arg in "$@"; do
+        case "$arg" in
+            --dry-run) dry=yes ;;
+            --force) force=yes ;;
+            *) die "usage: stop <task> [--dry-run] [--force]" ;;
+        esac
+    done
+    stop_task "$task" "$dry" "$force"
+}
+
 # --- fzf picker (terminal / tmux prefix key) ---------------------------------
 
 fzf_repos() {
@@ -1377,6 +1571,8 @@ case "$(basename "$0"):${1:-}" in
         [[ $# -ge 2 && $# -le 3 ]] || die "usage: close <task> [--force]"
         close_task "$2" "${3:-}"
         ;;
+    *:stop) shift; stop_command "$@" ;;
+    *:list) list_task_resources ;;
     *:sessions) [[ "${2:-}" == popup ]] && TASK_POPUP=1; pick_session ;;
     # Used by the task picker and task/session menu rows.
     *:rows) session_rows ;;
