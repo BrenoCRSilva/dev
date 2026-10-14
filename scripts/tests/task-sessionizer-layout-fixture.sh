@@ -56,8 +56,18 @@ expect_windows() {
 
 make_repo fixture-multi dotfiles
 make_repo fixture-multi api
+# Older task metadata is the order source when no order file exists.
+cat > "$TASKS_DIR/fixture-multi/AGENTS.md" <<'EOF'
+# fixture-multi
+
+## Repos
+- dotfiles (primary): first repo added
+- api: second repo added
+EOF
 run_task fixture-multi
 expect_windows fixture-multi $'agent\nnvim-dotfiles\nnvim-api\nsrv-dotfiles\nsrv-api'
+[[ $(cat "$TASKS_DIR/fixture-multi/.task-worker-order") == $'dotfiles\napi' ]] ||
+    fail 'legacy AGENTS.md order was not persisted on first use'
 for expected in "$TASKS_DIR/fixture-multi/dotfiles" "$TASKS_DIR/fixture-multi/api"; do
     grep -Fxq "$expected$(printf '\t.')" "$NVIM_LOG" || fail "nvim . did not launch in $expected"
 done
@@ -74,6 +84,21 @@ active_after=$(tmux list-windows -t '=fixture-multi' -F '#W|#{window_active}' | 
 [[ "$active_before" == "$active_after" ]] || fail 're-entry changed the active window'
 [[ $(tmux display-message -p -t '=fixture-multi:srv-dotfiles' '#{pane_current_command}') == sleep ]] ||
     fail 're-entry replaced a running server process'
+
+# Explicit order metadata takes precedence and remains stable independently of
+# AGENTS.md presentation or alphabetical directory order.
+make_repo fixture-explicit api
+make_repo fixture-explicit dotfiles
+cat > "$TASKS_DIR/fixture-explicit/AGENTS.md" <<'EOF'
+# fixture-explicit
+
+## Repos
+- api: second
+- dotfiles: first
+EOF
+printf '%s\n' dotfiles api > "$TASKS_DIR/fixture-explicit/.task-worker-order"
+run_task fixture-explicit
+expect_windows fixture-explicit $'agent\nnvim-dotfiles\nnvim-api\nsrv-dotfiles\nsrv-api'
 
 make_repo fixture-single onlyrepo
 run_task fixture-single
