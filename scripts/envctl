@@ -68,7 +68,9 @@ external_theme_path() {
 excluded() {
   # Backups are never authored mirror content, even when a capture manifest
   # names the containing tree. Keep this aligned with the repository ignore.
-  case "$1" in *.bak*) return 0 ;; esac
+  case "$1" in
+    *.bak*|*.sample|.config/omarchy/plugins/.*.bak.*) return 0 ;;
+  esac
   case "/$1/" in
     */.git/*|*/node_modules/*|*/.cache/*|*/cache/*|*/build/*|*/dist/*|*/target/*|*/tests/*|*/test/*|*/__pycache__/*) return 0 ;;
   esac
