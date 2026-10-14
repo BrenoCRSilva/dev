@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# The stock picker sends its full row set as one shell IPC argument. A short
+# private runtime symlink keeps the same cache and content while shortening
+# each serialized path; XDG_CACHE_HOME is scoped to the picker process only.
+runtime_dir=${XDG_RUNTIME_DIR:-}
+if [[ -z $runtime_dir || ! -d $runtime_dir || -L $runtime_dir ]]; then
+  printf 'theme picker: no safe XDG runtime directory\n' >&2
+  exit 1
+fi
+if [[ $(stat -c '%u' -- "$runtime_dir") != "$EUID" ]]; then
+  printf 'theme picker: XDG runtime directory is not owned by this user\n' >&2
+  exit 1
+fi
+
+cache_root=${XDG_CACHE_HOME:-$HOME/.cache}
+if [[ $cache_root != /* ]]; then
+  printf 'theme picker: XDG_CACHE_HOME must be absolute\n' >&2
+  exit 1
+fi
+cache_root=$(realpath -m -- "$cache_root")
+
+short_cache=
+for suffix in {c..z} {a..b}; do
+  candidate="$runtime_dir/$suffix"
+  if [[ -L $candidate ]]; then
+    if [[ $(realpath -m -- "$candidate") == "$cache_root" ]]; then
+      short_cache=$candidate
+      break
+    fi
+  elif [[ ! -e $candidate ]]; then
+    if ln -s -- "$cache_root" "$candidate" 2>/dev/null; then
+      short_cache=$candidate
+      break
+    fi
+  fi
+done
+
+if [[ -z $short_cache ]]; then
+  printf 'theme picker: no unused short cache alias in %s\n' "$runtime_dir" >&2
+  exit 1
+fi
+
+exec env XDG_CACHE_HOME="$short_cache" omarchy-theme-switcher "$@"

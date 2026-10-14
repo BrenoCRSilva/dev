@@ -1,0 +1,477 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+shopt -s nullglob dotglob globstar
+
+ROOT="$(realpath -e "$(dirname "${BASH_SOURCE[0]}")/..")"
+ENV_DIR="$ROOT/env"
+HOME_DIR="$(realpath -m "${DOTFILES_HOME:-$HOME}")"
+MANIFEST="$ENV_DIR/dotfiles.manifest"
+STATE_HOME="$(realpath -m "${XDG_STATE_HOME:-$HOME_DIR/.local/state}")"
+STATE_DIR="${DOTFILES_STATE_DIR:-$STATE_HOME/dotfiles}"
+BACKUP_ROOT="$STATE_DIR/backups"
+COPY_BIN="${DOTFILES_CP:-cp}"
+ACTION="${1:-help}"
+shift || true
+HOST=""
+DRY=0
+PUSH=0
+POSITIONAL=()
+say() { printf '%s\n' "$*"; }
+die() { say "$*" >&2; exit 2; }
+while (($#)); do
+  case "$1" in
+    --host) (($# >= 2)) || { printf '%s\n' '--host needs a name' >&2; exit 2; }; HOST="$2"; shift 2 ;;
+    --dry-run) DRY=1; shift ;;
+    --push) PUSH=1; shift ;;
+    --) shift; POSITIONAL+=("$@"); break ;;
+    -*) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
+    *) POSITIONAL+=("$1"); shift ;;
+  esac
+done
+
+valid_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }
+valid_rel() {
+  local path="$1" part
+  [[ -n "$path" && "$path" != /* && "$path" != *$'\n'* && "$path" != *$'\t'* ]] || return 1
+  IFS=/ read -r -a parts <<< "$path"
+  for part in "${parts[@]}"; do [[ -n "$part" && "$part" != . && "$part" != .. ]] || return 1; done
+}
+excluded() {
+  # Backups are never authored mirror content, even when a capture manifest
+  # names the containing tree. Keep this aligned with the repository ignore.
+  case "$1" in *.bak*) return 0 ;; esac
+  case "/$1/" in
+    */.git/*|*/node_modules/*|*/.cache/*|*/cache/*|*/build/*|*/dist/*|*/target/*|*/tests/*|*/test/*|*/__pycache__/*) return 0 ;;
+  esac
+  case "$1" in
+    .config/nvim/lua/pontuarch-palette.lua|.config/nvim/lua/plugins/vectorcode.lua|.config/ghostty/themes/pontuarch|.config/tmux/themes/scripts/pontuarch-colors.sh|.config/herdr/sessions/*|.config/herdr/auth/*|.config/herdr/runtime/*|.env|.env.*|*/.env|*/.env.*|*credentials*|*secret*) return 0 ;;
+  esac
+  return 1
+}
+
+[[ -d "$ENV_DIR" && -f "$MANIFEST" ]] || die "Missing env/ or manifest in $ROOT"
+[[ -d "$HOME_DIR" ]] || die "Home directory does not exist: $HOME_DIR"
+if [[ -n "$HOST" ]]; then
+  valid_name "$HOST" || die "Invalid host name: $HOST"
+  HOST_DIR="$ENV_DIR/hosts/$HOST"
+  HOST_MANIFEST="$HOST_DIR/dotfiles.manifest"
+  [[ -f "$HOST_MANIFEST" ]] || die "Unknown host profile: $HOST"
+fi
+
+host_has_rel() {
+  [[ -n "$HOST" && -f "$HOST_MANIFEST" ]] || return 1
+  local item
+  while IFS= read -r item || [[ -n "$item" ]]; do
+    [[ -z "$item" || "$item" == \#* || "$item" == !* ]] && continue
+    [[ "$item" == "$1" ]] && return 0
+  done < "$HOST_MANIFEST"
+  return 1
+}
+
+check_link() {
+  local path="$1" root="$2" required="${3:-yes}" link resolved
+  [[ -L "$path" ]] || return 0
+  link="$(readlink "$path")"
+  [[ "$link" != /* ]] || die "Refusing absolute symlink: $path"
+  resolved="$(realpath -m "$path")"
+  [[ "$resolved" == "$root"/* ]] || die "Symlink escapes managed root: $path"
+  if [[ "$required" == yes ]]; then [[ -e "$resolved" || -L "$resolved" ]] || die "Dangling symlink is not deployable: $path"; fi
+}
+
+source_path() {
+  local rel="$1" source="$ENV_DIR/$1" current="$ENV_DIR" part
+  valid_rel "$rel" || die "Unsafe authored path: $rel"
+  if [[ -n "$HOST" && ( -e "$HOST_DIR/$rel" || -L "$HOST_DIR/$rel" ) ]]; then source="$HOST_DIR/$rel"; fi
+  IFS=/ read -r -a parts <<< "${source#"$ENV_DIR"/}"
+  for ((i=0; i<${#parts[@]}-1; i++)); do
+    current="$current/${parts[$i]}"
+    [[ ! -L "$current" ]] || die "Refusing symlinked authored ancestor: ${current#"$ENV_DIR"/}"
+  done
+  [[ -e "$source" || -L "$source" ]] || return 1
+  check_link "$source" "$ENV_DIR" no
+  printf '%s\n' "$source"
+}
+
+authored_target() {
+  local rel="$1" base="$ENV_DIR" current part
+  valid_rel "$rel" || die "Unsafe authored destination path: $rel"
+  host_has_rel "$rel" && base="$HOST_DIR"
+  current="$base"
+  IFS=/ read -r -a parts <<< "$rel"
+  for ((i=0; i<${#parts[@]}-1; i++)); do
+    current="$current/${parts[$i]}"
+    [[ ! -L "$current" ]] || die "Refusing symlinked authored destination ancestor: $current"
+  done
+  printf '%s/%s\n' "$base" "$rel"
+}
+
+target_path() {
+  local rel="$1" current="$HOME_DIR" part
+  valid_rel "$rel" || die "Unsafe destination path: $rel"
+  IFS=/ read -r -a parts <<< "$rel"
+  for ((i=0; i<${#parts[@]}-1; i++)); do
+    current="$current/${parts[$i]}"
+    [[ ! -L "$current" ]] || die "Refusing symlinked destination ancestor: $current"
+  done
+  printf '%s/%s\n' "$HOME_DIR" "$rel"
+}
+
+walk_paths() {
+  local source="$1" base="$2" path rel segment ancestor skip
+  [[ -e "$source" || -L "$source" ]] || return 0
+  if [[ -d "$source" && ! -L "$source" ]]; then
+    [[ -r "$source" ]] || die "Unreadable managed directory: $source"
+    for path in "$source"/**/*; do
+      [[ -e "$path" || -L "$path" ]] || continue
+      # Bash globstar can expand entries beneath a symlinked directory.
+      # Do not treat those descendants as authored files; the link itself is
+      # handled by the caller's containment rules.
+      ancestor="${path%/*}"
+      skip=0
+      while [[ "$ancestor" != "$source" && "$ancestor" == "$source"/* ]]; do
+        if [[ -L "$ancestor" ]]; then skip=1; break; fi
+        ancestor="${ancestor%/*}"
+      done
+      (( skip == 0 )) || continue
+      if [[ -d "$path" && ! -L "$path" ]]; then
+        segment="${path##*/}"
+        case "$segment" in .git|node_modules|.cache|cache|build|dist|target|tests|test|__pycache__) continue ;; esac
+        walk_paths "$path" "$base" || return 1
+      elif [[ -f "$path" || -L "$path" ]]; then
+        rel="${path#"$base"/}"
+        printf '%s\n' "$rel"
+      fi
+    done
+  else
+    rel="${source#"$base"/}"
+    printf '%s\n' "$rel"
+  fi
+}
+
+list_paths() {
+  local entry rel source output ex drop root
+  local -a includes=() excludes=() candidates=()
+  local -A seen=()
+  while IFS= read -r entry || [[ -n "$entry" ]]; do
+    [[ -z "$entry" || "$entry" == \#* ]] && continue
+    if [[ "$entry" == !* ]]; then
+      rel="${entry#!}"; valid_rel "$rel" || die "Unsafe exclusion: $entry"; excludes+=("$rel"); continue
+    fi
+    valid_rel "$entry" || die "Unsafe manifest entry: $entry"
+    includes+=("$entry")
+  done < "$MANIFEST"
+  if [[ -n "$HOST" ]]; then
+    while IFS= read -r entry || [[ -n "$entry" ]]; do
+      [[ -z "$entry" || "$entry" == \#* ]] && continue
+      valid_rel "$entry" || die "Unsafe host manifest entry: $entry"
+      includes+=("$entry")
+    done < "$HOST_MANIFEST"
+  fi
+  # Rebuild candidates directly; keeping this in-process makes parse errors observable.
+  for entry in "${includes[@]}"; do
+    for root in "$ENV_DIR" "$HOME_DIR"; do
+      if [[ "$root" == "$HOME_DIR" ]]; then source="$root/$entry"; else source="$root/$entry"; fi
+      output="$(walk_paths "$source" "$root")" || return 1
+      if [[ -n "$output" ]]; then while IFS= read -r rel; do seen["$rel"]=1; done <<< "$output"; fi
+    done
+    if [[ -n "$HOST" ]]; then
+      output="$(walk_paths "$HOST_DIR/$entry" "$HOST_DIR")" || return 1
+      if [[ -n "$output" ]]; then while IFS= read -r rel; do seen["$rel"]=1; done <<< "$output"; fi
+    fi
+  done
+  local sorted
+  sorted="$(printf '%s\n' "${!seen[@]}" | LC_ALL=C sort -u)" || return 1
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    excluded "$rel" && continue
+    drop=0
+    for ex in "${excludes[@]}"; do [[ "$rel" == "$ex" || "$rel" == "$ex"/* ]] && drop=1; done
+    host_has_rel "$rel" && drop=0
+    (( drop == 0 )) || continue
+    if [[ "$rel" == .config/omarchy/themes/* || "$rel" == .config/omarchy/backgrounds/* ]]; then
+      drop=0
+      for root in "$ENV_DIR" "$HOME_DIR"; do
+        if [[ -L "$root/$rel" ]]; then
+          output="$(realpath -m "$root/$rel")" || return 1
+          # Live Omarchy theme collections may be linked from a separate
+          # third-party checkout under $HOME. They are discoverable by Omarchy,
+          # but are not authored mirror content and must not enter envctl.
+          case "$output" in
+            "$ENV_DIR"/*) ;;
+            *) drop=1; break ;;
+          esac
+        fi
+      done
+      (( drop == 0 )) || continue
+    fi
+    printf '%s\n' "$rel"
+  done <<< "$sorted"
+}
+
+load_paths() {
+  local output
+  output="$(list_paths)" || return 1
+  PATHS=()
+  if [[ -n "$output" ]]; then while IFS= read -r rel; do PATHS+=("$rel"); done <<< "$output"; fi
+}
+
+equal_paths() {
+  local a="$1" b="$2"
+  if [[ -L "$a" || -L "$b" ]]; then [[ -L "$a" && -L "$b" && "$(readlink "$a")" == "$(readlink "$b")" ]]; return; fi
+  [[ -f "$a" && -f "$b" ]] && cmp -s "$a" "$b" && [[ "$(stat -c %a "$a")" == "$(stat -c %a "$b")" ]]
+}
+
+atomic_copy() {
+  local source="$1" target="$2" parent tmpdir tmp
+  parent="$(dirname "$target")"
+  mkdir -p "$parent" || return 1
+  if [[ -L "$source" ]]; then
+    tmpdir="$(mktemp -d "$parent/.envctl.XXXXXXXX")" || return 1
+    ln -s "$(readlink "$source")" "$tmpdir/item" || { rmdir "$tmpdir"; return 1; }
+    mv -fT "$tmpdir/item" "$target" || { unlink "$tmpdir/item"; rmdir "$tmpdir"; return 1; }
+    rmdir "$tmpdir" || return 1
+  else
+    tmp="$(mktemp "$parent/.envctl.XXXXXXXX")" || return 1
+    "$COPY_BIN" -p "$source" "$tmp" || { unlink "$tmp"; return 1; }
+    mv -fT "$tmp" "$target" || { unlink "$tmp"; return 1; }
+  fi
+}
+
+backup_one() {
+  local backup="$1" rel="$2" source="$3"
+  if [[ -e "$source" || -L "$source" ]]; then
+    mkdir -p "$backup/files/$(dirname "$rel")" || return 1
+    "$COPY_BIN" -a "$source" "$backup/files/$rel" || return 1
+    printf '%s\tpresent\n' "$rel" >> "$backup/manifest" || return 1
+  else
+    printf '%s\tmissing\n' "$rel" >> "$backup/manifest" || return 1
+  fi
+}
+
+new_backup() {
+  local prefix="$1" stamp host_key
+  stamp="$(date -u +%Y%m%dT%H%M%S.%NZ)"
+  host_key="${HOST:-default}"
+  BACKUP_DIR="$BACKUP_ROOT/$host_key/$prefix-$stamp"
+  mkdir -p -m 700 "$BACKUP_DIR" || die "Could not create backup: $BACKUP_DIR"
+  chmod 700 "$STATE_DIR" "$BACKUP_ROOT" "$BACKUP_ROOT/$host_key" "$BACKUP_DIR" || die "Could not secure backup directories"
+  : > "$BACKUP_DIR/manifest" || die "Could not initialize backup manifest"
+  chmod 600 "$BACKUP_DIR/manifest" || die "Could not secure backup manifest"
+  printf 'scope=%s\nhost=%s\ncomplete=no\n' "$prefix" "$host_key" > "$BACKUP_DIR/metadata" || die "Could not write backup metadata"
+  chmod 600 "$BACKUP_DIR/metadata" || die "Could not secure backup metadata"
+}
+
+mark_complete() {
+  local backup="$1" scope="$2" host_key
+  host_key="$(sed -n 's/^host=//p' "$backup/metadata")"
+  [[ -n "$host_key" ]] || return 1
+  printf 'scope=%s\nhost=%s\ncomplete=yes\n' "$scope" "$host_key" > "$backup/metadata.tmp" || return 1
+  chmod 600 "$backup/metadata.tmp" || return 1
+  mv -fT "$backup/metadata.tmp" "$backup/metadata" || return 1
+}
+
+restore_snapshot() {
+  local backup="$1" scope="$2" rel status target saved
+  while IFS=$'\t' read -r rel status; do
+    valid_rel "$rel" || die "Unsafe path in backup metadata: $rel"
+    if [[ "$scope" == home ]]; then target="$(target_path "$rel")"
+    elif host_has_rel "$rel"; then target="$HOST_DIR/$rel"
+    else target="$ENV_DIR/$rel"; fi
+    if [[ "$status" == present ]]; then
+      saved="$backup/files/$rel"
+      [[ -f "$saved" || -L "$saved" ]] || die "Backup file missing: $saved"
+      if [[ -L "$saved" ]]; then
+        local link projected part
+        link="$(readlink "$saved")"
+        [[ "$link" != /* ]] || die "Backup contains absolute symlink: $rel"
+        projected="$(realpath -m "$(dirname "$target")/$link")"
+        if [[ "$scope" == home ]]; then [[ "$projected" == "$HOME_DIR"/* ]] || die "Restored symlink escapes home: $rel"
+        else [[ "$projected" == "$ENV_DIR"/* ]] || die "Restored symlink escapes env/: $rel"; fi
+      fi
+      atomic_copy "$saved" "$target" || return 1
+    elif [[ "$status" == missing ]]; then
+      if [[ -e "$target" || -L "$target" ]]; then unlink "$target" || return 1; fi
+    else die "Invalid backup state for $rel"; fi
+  done < "$backup/manifest"
+}
+
+show_diff() {
+  local rel source target changes=0 rc
+  load_paths || die "Could not build or validate deployment path list"
+  for rel in "${PATHS[@]}"; do
+    if source="$(source_path "$rel")"; then :; else rc=$?; (( rc == 1 )) && continue; exit "$rc"; fi
+    target="$(target_path "$rel")"
+    if equal_paths "$source" "$target"; then continue; fi
+    ((changes+=1))
+    say "diff: $rel"
+    if [[ -f "$source" && -f "$target" ]]; then diff -u --label "live/$rel" --label "env/$rel" "$target" "$source" || [[ $? -eq 1 ]]
+    elif [[ -f "$source" ]]; then diff -u --label "live/$rel" --label "env/$rel" /dev/null "$source" || [[ $? -eq 1 ]]
+    elif [[ -f "$target" ]]; then diff -u --label "live/$rel" --label "env/$rel" "$target" /dev/null || [[ $? -eq 1 ]]
+    fi
+    if [[ -L "$source" || -L "$target" ]]; then say "  symlink: env=$(readlink "$source" 2>/dev/null || echo absent) live=$(readlink "$target" 2>/dev/null || echo absent)"; fi
+  done
+  say "$changes path(s) differ"
+}
+
+apply_action() {
+  local rel source target rc changed=0 backup managed
+  local -a managed_paths=()
+  load_paths || die "Could not build or validate deployment path list"
+  # Validate every source and destination before creating a backup or changing a file.
+  for rel in "${PATHS[@]}"; do
+    if source="$(source_path "$rel")"; then :; else rc=$?; (( rc == 1 )) && continue; exit "$rc"; fi
+    target="$(target_path "$rel")"
+    [[ -f "$source" || -L "$source" ]] || die "Unsupported source type: $source"
+    [[ ! -e "$target" || -f "$target" || -L "$target" ]] || die "Refusing non-file destination: $target"
+    check_link "$target" "$HOME_DIR" no
+    managed_paths+=("$rel")
+  done
+  new_backup apply
+  backup="$BACKUP_DIR"
+  for rel in "${PATHS[@]}"; do
+    if source="$(source_path "$rel")"; then :; else rc=$?; (( rc == 1 )) && continue; exit "$rc"; fi
+    target="$(target_path "$rel")"
+    equal_paths "$source" "$target" && continue
+    backup_one "$backup" "$rel" "$target" || { restore_snapshot "$backup" home || true; die "Backup failed before apply: $rel"; }
+  done
+  for rel in "${PATHS[@]}"; do
+    if source="$(source_path "$rel")"; then :; else rc=$?; (( rc == 1 )) && continue; exit "$rc"; fi
+    target="$(target_path "$rel")"
+    equal_paths "$source" "$target" && continue
+    say "apply: $rel"
+    if ! atomic_copy "$source" "$target"; then restore_snapshot "$backup" home || die "Apply failed and rollback failed; backup: $backup"; die "Apply failed; all changed paths rolled back; backup: $backup"; fi
+    ((changed+=1))
+  done
+  if [[ ! -s "$backup/manifest" ]]; then unlink "$backup/manifest"; unlink "$backup/metadata"; rmdir "$backup"; BACKUP_DIR=""; fi
+  if [[ -n "$BACKUP_DIR" ]]; then mark_complete "$backup" apply || { restore_snapshot "$backup" home || die "Could not finalize apply backup and rollback failed: $backup"; die "Could not finalize apply backup; changes rolled back: $backup"; }; fi
+  [[ -n "$BACKUP_DIR" ]] && say "Backups: $BACKUP_DIR"
+  managed="$STATE_DIR/managed-${HOST:-default}"
+  mkdir -p "$STATE_DIR" || die "Could not record managed paths"
+  { [[ ! -f "$managed" ]] || cat "$managed"; for rel in "${managed_paths[@]}"; do printf '%s\n' "$rel"; done; } | sed '/^$/d' | sort -u > "$managed.tmp" || die "Could not write managed paths"
+  mv "$managed.tmp" "$managed" || die "Could not save managed paths"
+  say "$changed path(s) applied"
+}
+
+capture_action() {
+  local rel source target changed=0 backup="" rc
+  load_paths || die "Could not build or validate capture path list"
+  # Validate every existing live source and authored destination before writes.
+  for rel in "${PATHS[@]}"; do
+    source="$(target_path "$rel")"
+    [[ -e "$source" || -L "$source" ]] || continue
+    check_link "$source" "$HOME_DIR" no
+    target="$(authored_target "$rel")"
+    [[ ! -e "$target" || -f "$target" || -L "$target" ]] || die "Refusing non-file authored destination: $target"
+    check_link "$target" "$ENV_DIR" no
+  done
+  if (( ! DRY )); then new_backup capture; backup="$BACKUP_DIR"; fi
+  for rel in "${PATHS[@]}"; do
+    source="$(target_path "$rel")"
+    if [[ ! -e "$source" && ! -L "$source" ]]; then say "skip missing live path (explicit prune required): $rel"; continue; fi
+    target="$(authored_target "$rel")"
+    equal_paths "$source" "$target" && continue
+    say "$([[ $DRY -eq 1 ]] && echo would-capture || echo capture): $rel"
+    if [[ -f "$source" && -f "$target" ]]; then diff -u --label "env/$rel" --label "live/$rel" "$target" "$source" || [[ $? -eq 1 ]]
+    elif [[ -f "$source" ]]; then diff -u --label "env/$rel" --label "live/$rel" /dev/null "$source" || [[ $? -eq 1 ]]; fi
+    ((changed+=1))
+    (( DRY )) && continue
+    backup_one "$backup" "$rel" "$target" || { restore_snapshot "$backup" env || true; die "Capture backup failed: $rel"; }
+  done
+  if (( DRY )); then say "$changed path(s) would be captured"; return; fi
+  for rel in "${PATHS[@]}"; do
+    source="$(target_path "$rel")"
+    [[ -e "$source" || -L "$source" ]] || continue
+    target="$(authored_target "$rel")"
+    equal_paths "$source" "$target" && continue
+    if ! atomic_copy "$source" "$target"; then restore_snapshot "$backup" env || die "Capture failed and rollback failed; backup: $backup"; die "Capture failed; all mirror changes rolled back; backup: $backup"; fi
+  done
+  if [[ ! -s "$backup/manifest" ]]; then unlink "$backup/manifest"; unlink "$backup/metadata"; rmdir "$backup"; BACKUP_DIR=""; fi
+  if [[ -n "$BACKUP_DIR" ]]; then mark_complete "$backup" capture || { restore_snapshot "$backup" env || die "Could not finalize capture backup and rollback failed: $backup"; die "Could not finalize capture backup; mirror changes rolled back: $backup"; }; fi
+  [[ -n "$BACKUP_DIR" ]] && say "Capture backup: $BACKUP_DIR"
+  say "$changed path(s) captured"
+}
+
+case "$ACTION" in
+  help)
+    say "Usage: scripts/envctl {plan [apply|capture] [--host NAME]|diff [--host NAME]|apply|capture|restore BACKUP|prune PATH...|backup|sync [message] [--push]}"
+    ;;
+  plan)
+    [[ ${#POSITIONAL[@]} -le 1 ]] || die "plan accepts one target: apply or capture"
+    case "${POSITIONAL[0]:-apply}" in apply) DRY=1; show_diff ;; capture) DRY=1; capture_action ;; *) die "Unknown plan target: ${POSITIONAL[0]}" ;; esac
+    ;;
+  diff) show_diff ;;
+  apply)
+    [[ ${#POSITIONAL[@]} -eq 0 ]] || die "apply takes no positional arguments"
+    if (( DRY )); then show_diff; else apply_action; fi
+    ;;
+  capture)
+    [[ ${#POSITIONAL[@]} -eq 0 ]] || die "capture takes no positional arguments"
+    capture_action
+    ;;
+  backup)
+    load_paths || die "Could not build or validate backup path list"
+    for rel in "${PATHS[@]}"; do
+      target="$(target_path "$rel")"
+      [[ ! -e "$target" || -f "$target" || -L "$target" ]] || die "Refusing non-file backup source: $target"
+      check_link "$target" "$HOME_DIR" no
+    done
+    new_backup backup
+    for rel in "${PATHS[@]}"; do target="$(target_path "$rel")"; backup_one "$BACKUP_DIR" "$rel" "$target" || die "Could not back up $rel; incomplete snapshot retained: $BACKUP_DIR"; done
+    mark_complete "$BACKUP_DIR" backup || die "Could not finalize backup: $BACKUP_DIR"
+    say "Backup: $BACKUP_DIR"
+    ;;
+  prune)
+    [[ ${#POSITIONAL[@]} -gt 0 ]] || die "prune requires explicit relative paths"
+    managed="$STATE_DIR/managed-${HOST:-default}"
+    [[ -f "$managed" ]] || die "No managed-path history exists; apply once before pruning"
+    load_paths || die "Could not validate active path list"
+    for rel in "${POSITIONAL[@]}"; do
+      valid_rel "$rel" || die "Unsafe prune path: $rel"
+      grep -Fxq "$rel" "$managed" || die "Not previously managed: $rel"
+      [[ ! -e "$ENV_DIR/$rel" && ! -L "$ENV_DIR/$rel" ]] || die "Remove authored base source before prune: $rel"
+      if [[ -n "$HOST" ]]; then [[ ! -e "$HOST_DIR/$rel" && ! -L "$HOST_DIR/$rel" ]] || die "Remove host source before prune: $rel"; fi
+      target="$(target_path "$rel")"
+      check_link "$target" "$HOME_DIR" no
+    done
+    new_backup prune
+    for rel in "${POSITIONAL[@]}"; do
+      target="$(target_path "$rel")"
+      backup_one "$BACKUP_DIR" "$rel" "$target" || die "Could not back up prune target: $rel"
+    done
+    for rel in "${POSITIONAL[@]}"; do
+      target="$(target_path "$rel")"
+      [[ -e "$target" || -L "$target" ]] || continue
+      if ! unlink "$target"; then restore_snapshot "$BACKUP_DIR" home || die "Prune failed and rollback failed: $BACKUP_DIR"; die "Prune failed; rollback completed"; fi
+      say "deleted: $rel"
+    done
+    for rel in "${POSITIONAL[@]}"; do grep -Fxv "$rel" "$managed" > "$managed.tmp" || true; mv "$managed.tmp" "$managed" || die "Could not update managed paths"; done
+    mark_complete "$BACKUP_DIR" prune || { restore_snapshot "$BACKUP_DIR" home || die "Could not finalize prune backup and rollback failed: $BACKUP_DIR"; die "Could not finalize prune backup; deletions rolled back: $BACKUP_DIR"; }
+    say "Prune backup: $BACKUP_DIR"
+    ;;
+  restore)
+    [[ ${#POSITIONAL[@]} -eq 1 ]] || die "restore requires one backup directory"
+    backup="$(realpath -e "${POSITIONAL[0]}")"
+    [[ "$backup" == "$BACKUP_ROOT"/* && -f "$backup/manifest" && -f "$backup/metadata" ]] || die "Backup must be valid and under $BACKUP_ROOT"
+    scope="$(sed -n 's/^scope=//p' "$backup/metadata")"
+    saved_host="$(sed -n 's/^host=//p' "$backup/metadata")"
+    complete="$(sed -n 's/^complete=//p' "$backup/metadata")"
+    [[ "$complete" == yes ]] || die "Refusing incomplete backup snapshot: $backup"
+    case "$scope" in apply|prune|backup) scope=home ;; capture) scope=env ;; *) die "Invalid backup scope: $scope" ;; esac
+    if [[ "$scope" == env ]]; then
+      if [[ "$saved_host" == default ]]; then HOST=""; unset HOST_DIR HOST_MANIFEST
+      else HOST="$saved_host"; valid_name "$HOST" || die "Invalid stored host"; HOST_DIR="$ENV_DIR/hosts/$HOST"; HOST_MANIFEST="$HOST_DIR/dotfiles.manifest"; [[ -f "$HOST_MANIFEST" ]] || die "Host profile required by backup is missing: $HOST"; fi
+    fi
+    restore_snapshot "$backup" "$scope" || die "Restore failed; backup retained at $backup"
+    say "Restored $scope paths from $backup"
+    ;;
+  sync)
+    message="${POSITIONAL[*]:-Sync authored dotfiles}"
+    git -C "$ROOT" add -A -- env scripts README.md .gitignore docs || die "Could not stage authored changes"
+    git -C "$ROOT" diff --cached --check || die "Staged diff has whitespace errors"
+    git -C "$ROOT" diff --cached --quiet && { say "No reviewed changes to commit"; exit 0; }
+    git -C "$ROOT" commit -m "$message" || die "Local commit failed"
+    if (( PUSH )); then git -C "$ROOT" push; else say "Committed locally; use --push to publish explicitly"; fi
+    ;;
+  *) die "Unknown action: $ACTION" ;;
+esac

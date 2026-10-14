@@ -1,0 +1,997 @@
+import QtQuick
+import QtQuick.Controls
+import Quickshell
+import Quickshell.Io
+import Quickshell.Bluetooth
+import qs.Commons
+import qs.Ui
+
+Panel {
+  id: root
+  moduleName: "io.github.akafrmn.galaxy-buds-pro"
+  ipcTarget: "io.github.akafrmn.galaxy-buds-pro"
+  manageIpc: false
+
+  // The helper lives in the plugin's service, mounted once per session; this
+  // widget is mounted once per monitor and only renders what the service holds.
+  readonly property var service: bar && bar.shell ? bar.shell.serviceFor(moduleName) : null
+  readonly property var buds: service ? service.state : ({})
+
+  readonly property bool connected: buds.connected === true
+  readonly property string noise: String(buds.noise || "off")
+  readonly property var battery: buds.battery || ({})
+  readonly property var touch: buds.touch || ({})
+  readonly property var modes: buds.modes || ["off", "anc", "ambient"]
+  readonly property string deviceName: String(buds.name || "Galaxy Buds")
+
+  // Models differ in what they can do at all: the Buds+ has no ANC and no
+  // 360 Audio, the original Buds has no case battery. The helper simply omits
+  // what the earbuds never report, so absence here means "hide the control".
+  readonly property bool hasSpatial: buds.spatial !== undefined
+  readonly property bool hasSeamless: buds.seamless !== undefined
+  readonly property bool hasTouch: touch.enabled !== undefined
+  readonly property bool hasModes: modes.length > 1
+  readonly property var charging: buds.charging || ({})
+  readonly property var placement: buds.placement || ({})
+  readonly property var firmware: buds.firmware || ({})
+  readonly property var firmwareBuild: firmware.build || null
+  readonly property var firmwareUpdate: buds.firmware_update || null
+  // With one bud worn the firmware refuses ANC unless "noise controls with
+  // one earbud" is on; say so rather than let the click do nothing.
+  readonly property bool ancNeedsBothBuds: {
+    if (buds.one_bud_noise !== false || modes.indexOf("anc") < 0) return false
+    var worn = (placement.left === "wearing" ? 1 : 0) + (placement.right === "wearing" ? 1 : 0)
+    return worn === 1
+  }
+  readonly property var codec: buds.codec || ({})
+  readonly property var codecOptions: codec.options || []
+  // Two pairs can be connected at once; this says whether the one being shown
+  // is the one sound is actually going to.
+  readonly property bool isAudioOutput: buds.is_default_output === true
+
+  // ---- First-time pairing: scan for earbuds sitting in an open case ----
+  // The Python helper only ever looks for a pair BlueZ already knows about
+  // (see bin/galaxy-buds' find_device), so getting brand-new earbuds paired
+  // in the first place goes through BlueZ discovery directly, the same way
+  // the built-in Bluetooth panel does it.
+  property bool searching: false
+  property bool connecting: false
+  // Whether Search has been pressed since the panel last opened (or last
+  // connected). Gates foundDevice below so a pair that is already known to
+  // BlueZ from before -- paired but currently out of range or in the case --
+  // doesn't jump straight to "Found" before Search was ever pressed.
+  property bool everSearched: false
+
+  readonly property var adapter: Bluetooth.defaultAdapter
+  readonly property var scanDevices: Bluetooth.devices ? Bluetooth.devices.values : []
+  // First not-yet-connected device whose advertised name says "Buds", once
+  // Search has been pressed: good enough for a manual search the user only
+  // runs while watching the panel, no need for the daemon's stricter
+  // UUID/model matching here.
+  //
+  // A plain reactive binding, not something latched off a change signal: a
+  // pair already sitting in BlueZ's known-device list (paired before, just
+  // disconnected) matches on the very first evaluation after Search is
+  // pressed, and a signal-based latch would miss that -- QML only emits a
+  // changed signal when a property's *value* actually differs from before,
+  // which never happens for a match that was already the same object both
+  // before and after Search was pressed. This binding reacts correctly
+  // regardless, because it genuinely flips from null to a device the moment
+  // everSearched turns true.
+  readonly property var foundDevice: {
+    if (!everSearched) return null
+    for (var i = 0; i < scanDevices.length; i++) {
+      var d = scanDevices[i]
+      if (d && !d.connected && String(d.name || d.deviceName || "").toLowerCase().indexOf("buds") >= 0)
+        return d
+    }
+    return null
+  }
+  readonly property string candidateName: foundDevice
+    ? String(foundDevice.name || foundDevice.deviceName || "Galaxy Buds") : ""
+
+  readonly property string searchPhase: {
+    if (connecting) return "connecting"
+    if (foundDevice) return "found"
+    if (searching) return "searching"
+    return "idle"
+  }
+
+  readonly property string searchText: {
+    if (searchPhase === "searching") return t("searching", "Searching for Galaxy Buds…")
+    if (searchPhase === "found") return t("found", "Found") + " " + candidateName
+    if (searchPhase === "connecting") return t("connectingDevice", "Connecting…")
+    return t("searchHint",
+      "1. Open the case\n" +
+      "2. Hold the touch sensors on both earbuds for about 7 seconds, " +
+      "until the light starts flickering\n" +
+      "3. Tap Search")
+  }
+
+  readonly property string searchButtonText: searchPhase === "found"
+    ? t("pair", "Pair") : t("search", "Search")
+  readonly property bool searchButtonVisible: searchPhase !== "connecting"
+  readonly property bool searchButtonEnabled: searchPhase !== "searching"
+
+  function startSearch() {
+    if (!adapter || searching) return
+    everSearched = true
+    searching = true
+    if (!adapter.discovering) adapter.discovering = true
+    searchTimeoutTimer.restart()
+  }
+
+  function stopScanning() {
+    searching = false
+    searchTimeoutTimer.stop()
+    if (adapter && adapter.discovering) adapter.discovering = false
+  }
+
+  function connectFound() {
+    if (!foundDevice) return
+    connecting = true
+    connectTimeoutTimer.restart()
+    // Trust needs setting before this pair's first connect, and bluetoothctl
+    // (via this helper) is what already handles that reliably for the
+    // built-in Bluetooth panel, agent included.
+    var action = (foundDevice.paired || foundDevice.bonded || foundDevice.trusted)
+      ? "connect" : "pair"
+    Quickshell.execDetached(["omarchy-bluetooth-device", action, foundDevice.address])
+  }
+
+  function onSearchButtonClicked() {
+    if (searchPhase === "found") connectFound()
+    else if (searchPhase === "idle") startSearch()
+  }
+
+  // A match means discovery has done its job; stop it rather than leave the
+  // radio scanning until the timeout.
+  onFoundDeviceChanged: if (foundDevice) stopScanning()
+  onConnectedChanged: {
+    if (connected) {
+      connecting = false
+      connectTimeoutTimer.stop()
+      everSearched = false
+      stopScanning()
+    }
+  }
+  // One handler only: QML rejects a second onOpenedChanged on the same object
+  // and the whole widget fails to load.
+  onOpenedChanged: {
+    if (opened) {
+      selectCursor(0)
+      return
+    }
+    stopScanning()
+    connecting = false
+    connectTimeoutTimer.stop()
+    everSearched = false
+  }
+
+  Timer {
+    id: searchTimeoutTimer
+    interval: 30000
+    repeat: false
+    onTriggered: root.stopScanning()
+  }
+
+  Timer {
+    id: connectTimeoutTimer
+    interval: 25000
+    repeat: false
+    onTriggered: root.connecting = false
+  }
+
+  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property color dim: Qt.darker(foreground, 1.55)
+  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+
+  // Every visible string can be replaced from this widget's shell.json entry:
+  //   { "id": "io.github.akafrmn.galaxy-buds-pro", "labels": { "anc": "ANC", ... } }
+  readonly property var labels: setting("labels", ({}))
+  function t(key, fallback) {
+    var value = labels ? labels[key] : undefined
+    return value === undefined || value === null ? fallback : String(value)
+  }
+
+  // The low-battery warning is raised by the service (mounted once per
+  // session) so it fires once, not once per monitor. Settings live on the bar
+  // widget though, so push them down; every monitor writes the same values.
+  readonly property bool lowBatteryEnabled: setting("lowBatteryWarning", true) === true
+  readonly property int lowBatteryThreshold: {
+    var n = parseInt(String(setting("lowBatteryThreshold", 15)), 10)
+    if (!isFinite(n)) n = 15
+    return Math.max(1, Math.min(50, n))
+  }
+  readonly property bool firmwareCheck: setting("firmwareCheck", true) === true
+  function pushLowBatterySettings() {
+    if (!service) return
+    service.lowBatteryEnabled = lowBatteryEnabled
+    service.lowBatteryThreshold = lowBatteryThreshold
+    service.firmwareCheck = firmwareCheck
+  }
+  onServiceChanged: pushLowBatterySettings()
+  onLowBatteryEnabledChanged: pushLowBatterySettings()
+  onLowBatteryThresholdChanged: pushLowBatterySettings()
+  onFirmwareCheckChanged: pushLowBatterySettings()
+  Component.onCompleted: pushLowBatterySettings()
+
+  // Without these the bar gives the widget zero width and nothing renders.
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
+
+  property int cursorIndex: 0
+  property int groupIndex: 0
+
+  // Flat list of keyboard-reachable rows. Each entry is one stop for the
+  // up/down cursor: the noise-mode chips, each settings toggle, then the
+  // codec chips. `groupIndex` is the chip highlighted inside a "modes" or
+  // "codec" row — a plain int because only one chip row is focused at a time.
+  readonly property var focusableRows: {
+    var rows = []
+    if (connected && hasModes) rows.push({type: "modes"})
+    for (var i = 0; i < toggleRows.length; i++)
+      rows.push({type: "toggle", index: i})
+    if (codecOptions.length > 1) rows.push({type: "codec"})
+    return rows
+  }
+  readonly property int cursorCount: focusableRows.length
+
+
+  readonly property var modeOptions: {
+    var names = {
+      "off": t("off", "Off"),
+      "anc": t("anc", "ANC"),
+      "ambient": t("ambient", "Ambient"),
+      "adaptive": t("adaptive", "Adaptive")
+    }
+    var out = []
+    for (var i = 0; i < modes.length; i++)
+      out.push({value: modes[i], label: names[modes[i]] || modes[i]})
+    return out
+  }
+
+  // A bud in the case, or one that dropped off the link, reports 0: that is
+  // "no reading", so say where it is instead of drawing an empty battery.
+  function budRow(side, label) {
+    var where = String(placement[side] || "")
+    var value = Number(battery[side])
+    var isCharging = charging[side] === true
+    var status = ""
+    if (where === "case") status = "case"
+    else if (where === "disconnected" && value <= 0) status = "offline"
+    return {label: label, value: value, charging: isCharging, status: status,
+            known: !(status === "offline" || (status === "case" && value <= 0))}
+  }
+
+  function batteryText(row) {
+    var pct = (row.charging ? "󰂄 " : "") + row.value + "%"
+    if (row.status === "offline") return "—"
+    if (row.status === "case") return row.value > 0 ? t("inCase", "In case") + " · " + pct : t("inCase", "In case")
+    return pct
+  }
+
+  readonly property var batteryRows: {
+    var rows = []
+    if (!connected) return rows
+    if (battery.left !== undefined)
+      rows.push(budRow("left", t("left", "L")))
+    if (battery.right !== undefined)
+      rows.push(budRow("right", t("right", "R")))
+    // The case only reports its own charge while the earbuds sit in it.
+    if (battery.case > 0)
+      rows.push({label: t("case", "Case"), value: battery.case, charging: charging.case === true})
+    return rows
+  }
+
+  readonly property var toggleRows: {
+    var rows = []
+    if (!connected) return rows
+    if (hasSpatial)
+      rows.push({key: "spatial", label: t("spatial", "360 Audio"), checked: buds.spatial === true})
+    if (hasTouch)
+      rows.push({key: "touch", label: t("touch", "Touch controls"), checked: touch.enabled === true})
+    if (hasSeamless)
+      rows.push({key: "seamless", label: t("seamless", "Quick connect"), checked: buds.seamless === true})
+    return rows
+  }
+
+  function setNoise(mode) { if (service) service.setNoise(mode) }
+  function cycle() { if (service) service.cycle() }
+  function setToggle(name, value) { if (service) service.setToggle(name, value) }
+  function setCodec(profile) { if (service) service.setCodec(profile) }
+
+  // ---- firmware installation --------------------------------------------
+  readonly property var install: buds.firmware_install || null
+  readonly property string installStage: install ? String(install.stage || "") : ""
+  readonly property bool installActive: ["downloading", "opening", "waiting", "transferring",
+                                         "installing", "rebooting"].indexOf(installStage) >= 0
+  readonly property bool installCancellable: ["downloading", "opening", "waiting",
+                                              "transferring"].indexOf(installStage) >= 0
+  property bool confirmInstall: false
+  readonly property var firmwareLatest: buds.firmware_latest || ({})
+  readonly property int installStep: ({"downloading": 0, "opening": 1, "waiting": 1, "transferring": 1,
+                                       "installing": 2, "rebooting": 3, "done": 4})[installStage] ?? -1
+  readonly property var installSteps: [t("fwStepDownload", "Download"), t("fwStepSend", "Send"),
+                                       t("fwStepInstall", "Install"), t("fwStepRestart", "Restart")]
+  // A bar that fills only where there is a real percentage; elsewhere it slides.
+  readonly property bool installDeterminate: (installStage === "downloading" && install && install.total > 0)
+                                             || installStage === "transferring"
+  function megabytes(n) { return (Number(n || 0) / 1048576).toFixed(1) }
+  function firmwareStatusText() {
+    switch (String(firmwareLatest.status || "")) {
+    case "latest":
+      var at = firmwareLatest.checked ? new Date(firmwareLatest.checked * 1000) : null
+      return "✓ " + t("fwLatest", "Latest version") + (at ? "  ·  " + t("fwChecked", "checked") + " "
+             + Qt.formatTime(at, "hh:mm") : "")
+    case "checking": return t("fwChecking", "Checking…")
+    case "unknown": return t("fwUnknown", "Couldn't check for updates")
+    }
+    return ""
+  }
+  function installDetail() {
+    if (!install) return ""
+    if (installStage === "downloading" && install.total > 0)
+      return megabytes(install.bytes) + " " + t("fwOf", "of") + " " + megabytes(install.total) + " MB"
+    if (installStage === "transferring" && install.total > 0) {
+      var line = megabytes(install.bytes) + " " + t("fwOf", "of") + " " + megabytes(install.total) + " MB"
+      var eta = install.eta
+      if (eta !== undefined && eta !== null)
+        line += "  ·  " + (eta < 60 ? t("fwAbout", "about") + " " + Math.max(5, Math.round(eta / 5) * 5) + " s"
+                                     : t("fwAbout", "about") + " " + Math.round(eta / 60) + " min")
+                + " " + t("fwLeft", "left")
+      return line
+    }
+    return ""
+  }
+  function installText() {
+    if (!install) return ""
+    var build = String(install.target || "")
+    switch (installStage) {
+    case "downloading": return t("fwDownloading", "Downloading and verifying") + " " + build + "…"
+    case "opening": return t("fwOpening", "Starting the update…")
+    case "waiting": return t("fwWaiting", "Waiting for the earbuds…")
+    case "transferring": return t("fwTransferring", "Sending firmware to the earbuds")
+    case "installing": return t("fwInstalling", "The earbuds are installing the update…")
+    case "rebooting": return t("fwRebooting", "The earbuds are restarting to finish. This takes about a minute.")
+    case "done": return t("fwDone", "Updated to") + " " + build + "."
+    case "failed": return String(install.error || t("fwFailed", "The update failed."))
+    case "refused": return t("fwRefused", "Not started:") + " " + (install.reasons || []).join(" ")
+    }
+    return ""
+  }
+
+  // The glyph carries the mode on its own, the way the other bar icons do:
+  // an ear that hears the room for ambient, a crossed-out one for ANC.
+  function modeIcon() {
+    if (!connected) return "󰟎"
+    if (noise === "anc" || noise === "adaptive") return "󰋏"
+    if (noise === "ambient") return "󰋎"
+    return "󰋋"
+  }
+
+  // The cursor walks rows up/down and, on a chip row, walks chips left/right.
+  // `focusedRow()` is the row the cursor sits on; `groupIndex` is the chip
+  // within a "modes"/"codec" row. Landing on a chip row resets the chip to the
+  // one currently active, so the user sees their existing choice first.
+  function focusedRow() {
+    return cursorIndex >= 0 && cursorIndex < focusableRows.length
+      ? focusableRows[cursorIndex] : null
+  }
+
+  function optionValue(o) {
+    return (o && typeof o === "object") ? String(o.value) : String(o)
+  }
+
+  function groupOptions(row) {
+    if (!row) return []
+    return row.type === "modes" ? root.modeOptions : root.codecOptions
+  }
+
+  function rowIndexFor(type) {
+    for (var i = 0; i < focusableRows.length; i++)
+      if (focusableRows[i].type === type) return i
+    return -1
+  }
+
+  function toggleRowIndex(toggleIndex) {
+    for (var i = 0; i < focusableRows.length; i++)
+      if (focusableRows[i].type === "toggle" && focusableRows[i].index === toggleIndex)
+        return i
+    return -1
+  }
+
+  function selectCursor(index) {
+    cursorIndex = Math.max(0, Math.min(cursorCount - 1, index))
+    var row = focusedRow()
+    if (row && (row.type === "modes" || row.type === "codec")) {
+      var opts = groupOptions(row)
+      var selected = row.type === "modes"
+        ? modeGroup.selectedOptionIndex() : codecGroup.selectedOptionIndex()
+      groupIndex = (selected < 0 || selected >= opts.length) ? 0 : selected
+    }
+  }
+
+  function moveGroupCursor(delta) {
+    var row = focusedRow()
+    if (!row || (row.type !== "modes" && row.type !== "codec")) return
+    var opts = groupOptions(row)
+    if (opts.length <= 0) return
+    if (groupIndex < 0) groupIndex = 0
+    groupIndex = Math.max(0, Math.min(opts.length - 1, groupIndex + delta))
+  }
+
+  function activateCursor() {
+    var row = focusedRow()
+    if (!row) return
+    if (row.type === "modes") {
+      if (!connected) return
+      var mode = root.modeOptions[groupIndex]
+      if (mode) setNoise(mode.value)
+    } else if (row.type === "toggle") {
+      var toggle = root.toggleRows[row.index]
+      if (toggle) setToggle(toggle.key, !toggle.checked)
+    } else if (row.type === "codec") {
+      var codec = root.codecOptions[groupIndex]
+      if (codec !== undefined && codec !== null) setCodec(optionValue(codec))
+    }
+  }
+
+  BarIconButton {
+    id: button
+    anchors.fill: parent
+    bar: root.bar
+    text: root.modeIcon()
+    opacity: root.connected ? 1.0 : 0.5
+    onPressed: function(mouseButton) {
+      if (mouseButton === Qt.RightButton) root.cycle()
+      else root.toggle()
+    }
+  }
+
+  KeyboardPanel {
+    id: panel
+    anchorItem: button
+    owner: root
+    bar: root.bar
+    open: root.opened
+    focusTarget: keyCatcher
+    // Codec buttons sit in one row, so the popover has to grow with them
+    // rather than let the last one run past its edge.
+    contentWidth: panel.fittedContentWidth(Style.space(root.codecOptions.length > 2 ? 400 : 320))
+    // The cap only exists to stop a runaway panel; the real limit is the
+    // screen. 420 cut the codec row off once battery, modes, three toggles and
+    // codecs were all on screen at once.
+    contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight, Style.space(620))
+
+    PanelKeyCatcher {
+      id: keyCatcher
+      anchors.fill: parent
+      onMoveRequested: function(dx, dy) {
+        if (dy !== 0) root.selectCursor(root.cursorIndex + dy)
+        else if (dx !== 0) root.moveGroupCursor(dx)
+      }
+      onActivateRequested: root.activateCursor()
+      onCloseRequested: root.close()
+      onTabRequested: function(direction) { root.switchPanel(direction) }
+      onTextKey: function(text) {
+        var index = ["1", "2", "3", "4"].indexOf(text)
+        if (index >= 0 && index < root.modes.length && root.connected)
+          root.setNoise(root.modes[index])
+      }
+
+      Column {
+        id: panelColumn
+        anchors.fill: parent
+        spacing: Style.space(12)
+
+        // ---------- Hero: headphones · device name ----------
+        Item {
+          width: parent.width
+          implicitHeight: Math.max(heroIcon.implicitHeight, heroName.implicitHeight)
+
+          Text {
+            id: heroIcon
+            text: root.modeIcon()
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.display
+            opacity: root.connected ? 1.0 : 0.5
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Column {
+            anchors.left: heroIcon.right
+            anchors.leftMargin: Style.space(14)
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(2)
+
+            Text {
+              id: heroName
+              text: root.deviceName
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+              elide: Text.ElideRight
+              width: parent.width
+            }
+
+            Text {
+              // Worth saying out loud: with two pairs connected it is easy to
+              // change the mode on the one you are not listening to.
+              visible: root.connected && !root.isAudioOutput
+              text: root.t("notOutput", "Not the audio output")
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+              width: parent.width
+            }
+          }
+        }
+
+        // ---------- Battery: one bar per earbud, plus the case ----------
+        Column {
+          width: parent.width
+          spacing: Style.space(6)
+          visible: root.batteryRows.length > 0
+
+          Repeater {
+            model: root.batteryRows
+
+            Item {
+              required property var modelData
+              width: panelColumn.width
+              height: Style.space(16)
+
+              Text {
+                id: cellLabel
+                text: modelData.label
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                width: Style.space(34)
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Rectangle {
+                id: track
+                anchors.left: cellLabel.right
+                anchors.right: cellValue.left
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                height: Style.space(6)
+                radius: height / 2
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
+
+                Rectangle {
+                  visible: modelData.known !== false
+                  width: Math.max(parent.height, parent.width * Math.max(0, Math.min(100, modelData.value)) / 100)
+                  height: parent.height
+                  radius: parent.radius
+                  // A charge this low is the one thing here worth interrupting for.
+                  color: modelData.value <= 20 && !modelData.charging && !modelData.status ? root.urgent : root.foreground
+                  Behavior on width { NumberAnimation { duration: 160 } }
+                }
+              }
+
+              Text {
+                id: cellValue
+                // The bolt reads as "this number is going up", which is the
+                // whole point of showing it while an earbud sits in the case.
+                text: root.batteryText(modelData)
+                color: modelData.status ? root.dim : root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                horizontalAlignment: Text.AlignRight
+                width: Math.max(Style.space(52), implicitWidth)
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+              }
+            }
+          }
+        }
+
+        PanelSeparator {
+          width: parent.width
+          foreground: root.foreground
+          visible: root.connected && root.hasModes
+        }
+
+        PanelSectionHeader {
+          width: parent.width
+          text: root.t("noiseControl", "Noise control")
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          visible: root.connected && root.hasModes
+        }
+
+        ButtonGroup {
+          id: modeGroup
+          width: parent.width
+          options: root.modeOptions
+          value: root.noise
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          visible: root.connected && root.hasModes
+          cursorIndex: (root.focusedRow() && root.focusedRow().type === "modes") ? root.groupIndex : -1
+          onChanged: function(value) {
+            root.selectCursor(root.rowIndexFor("modes"))
+            root.setNoise(value)
+          }
+          onHovered: function(index, isHovered) {
+            if (isHovered) {
+              root.selectCursor(root.rowIndexFor("modes"))
+              root.groupIndex = index
+            }
+          }
+        }
+
+        Text {
+          width: parent.width
+          visible: root.connected && root.hasModes && root.ancNeedsBothBuds
+          text: root.t("ancOneBud", "ANC needs both earbuds in. Galaxy Wearable can allow it with one.")
+          color: root.dim
+          wrapMode: Text.WordWrap
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+
+        PanelSectionHeader {
+          width: parent.width
+          text: root.t("settings", "Settings")
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          visible: root.toggleRows.length > 0
+        }
+
+        Repeater {
+          model: root.toggleRows
+
+          Item {
+            required property var modelData
+            required property int index
+            width: panelColumn.width
+            height: Math.max(rowLabel.implicitHeight, rowSwitch.implicitHeight)
+
+            Text {
+              id: rowLabel
+              text: modelData.label
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            ToggleSwitch {
+              id: rowSwitch
+              checked: modelData.checked
+              hasCursor: root.cursorIndex === root.toggleRowIndex(index)
+              foreground: root.foreground
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              onHovered: function(on) { if (on) root.selectCursor(root.toggleRowIndex(index)) }
+              onToggled: root.setToggle(modelData.key, !modelData.checked)
+            }
+          }
+        }
+
+        PanelSectionHeader {
+          width: parent.width
+          // The automatic profile does not say which codec it settled on, and
+          // that is the one thing worth knowing here. The mic glyph explains
+          // why the music codecs are gone: something is holding the microphone.
+          text: root.t("codec", "Codec")
+                + (root.codec.codec ? "  ·  " + (root.codec.mode === "headset" ? "󰍬 " : "") + root.codec.codec : "")
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          visible: root.codecOptions.length > 1
+        }
+
+        ButtonGroup {
+          id: codecGroup
+          width: parent.width
+          options: root.codecOptions
+          value: String(root.codec.active || "")
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          visible: root.codecOptions.length > 1
+          cursorIndex: (root.focusedRow() && root.focusedRow().type === "codec") ? root.groupIndex : -1
+          onChanged: function(value) {
+            root.selectCursor(root.rowIndexFor("codec"))
+            root.setCodec(value)
+          }
+          onHovered: function(index, isHovered) {
+            if (isHovered) {
+              root.selectCursor(root.rowIndexFor("codec"))
+              root.groupIndex = index
+            }
+          }
+        }
+
+        // ---------- Firmware: what the buds run, and whether Samsung has newer ----------
+        Column {
+          width: parent.width
+          spacing: Style.space(4)
+          visible: root.connected && root.firmwareBuild !== null
+
+          Text {
+            width: parent.width
+            text: root.firmwareBuild
+                  ? root.t("firmware", "Firmware") + "  ·  " + root.firmwareBuild.build + " (" + root.firmwareBuild.label + ")"
+                  : ""
+            color: root.dim
+            elide: Text.ElideRight
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          // Said out loud, so "no notice" never has to be read as "up to date".
+          Text {
+            width: parent.width
+            visible: text !== ""
+            text: root.firmwareStatusText()
+            color: root.firmwareLatest.status === "latest" ? root.foreground : root.dim
+            wrapMode: Text.WordWrap
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            width: parent.width
+            visible: root.firmwareUpdate !== null && root.install === null
+            text: root.firmwareUpdate
+                  ? root.t("firmwareUpdate", "Update available") + ": " + root.firmwareUpdate.build
+                    + " (" + root.firmwareUpdate.label + ")."
+                  : ""
+            color: root.urgent
+            wrapMode: Text.WordWrap
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            width: parent.width
+            visible: root.firmware.mismatch === true
+            text: root.t("firmwareMismatch", "Left and right run different firmware; updates can fail until they match.")
+            color: root.dim
+            wrapMode: Text.WordWrap
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            width: parent.width
+            visible: root.firmwareUpdate !== null && root.firmwareUpdate.installable !== true && !root.install
+            text: root.t("fwNotReviewed", "This build is not reviewed for install here yet; Galaxy Wearable can install it.")
+            color: root.dim
+            wrapMode: Text.WordWrap
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Button {
+            visible: root.firmwareUpdate !== null && root.firmwareUpdate.installable === true
+                     && !root.install && !root.confirmInstall
+            text: root.t("fwInstall", "Install") + " " + (root.firmwareUpdate ? root.firmwareUpdate.build : "")
+            bordered: true
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            onClicked: root.confirmInstall = true
+          }
+
+          // Two clicks on purpose: this is the one action here that cannot be undone.
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+            visible: root.confirmInstall && root.firmwareUpdate !== null
+                     && root.firmwareUpdate.installable === true && !root.install
+
+            Text {
+              width: parent.width
+              text: root.t("fwConfirm",
+                    "Install " + (root.firmwareUpdate ? root.firmwareUpdate.build : "") + " on both earbuds? "
+                    + "It takes about 15 minutes. Keep both earbuds out of the closed case, charged and near "
+                    + "this computer, and leave Bluetooth on. The image comes from the community mirror of "
+                    + "Samsung's builds and must match the copy reviewed for this plugin before anything is sent. If the transfer stops, the "
+                    + "earbuds keep their current firmware, but there is no recovery if an install goes wrong.")
+              color: root.foreground
+              wrapMode: Text.WordWrap
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Row {
+              spacing: Style.space(8)
+              Button {
+                text: root.t("fwInstallNow", "Install now")
+                bordered: true
+                foreground: root.urgent
+                fontFamily: root.fontFamily
+                fontSize: Style.font.caption
+                onClicked: {
+                  root.confirmInstall = false
+                  if (root.service && root.firmwareUpdate) root.service.installFirmware(root.firmwareUpdate.build)
+                }
+              }
+              Button {
+                text: root.t("fwNotNow", "Not now")
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.caption
+                onClicked: root.confirmInstall = false
+              }
+            }
+          }
+        }
+
+        // ---------- Firmware installation: stays up while the earbuds restart ----------
+        Column {
+          width: parent.width
+          spacing: Style.space(6)
+          visible: root.install !== null
+
+          Text {
+            width: parent.width
+            text: root.installText()
+            color: root.installStage === "failed" || root.installStage === "refused" ? root.urgent : root.foreground
+            wrapMode: Text.WordWrap
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          // Download · Send · Install · Restart, ticked off as they finish.
+          Row {
+            spacing: Style.space(10)
+            visible: root.installStep >= 0
+            Repeater {
+              model: root.installSteps
+              Text {
+                required property var modelData
+                required property int index
+                text: (index < root.installStep ? "✓ " : index === root.installStep ? "● " : "○ ") + modelData
+                color: index === root.installStep ? root.foreground : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: index === root.installStep
+              }
+            }
+          }
+
+          Item {
+            width: parent.width
+            height: Style.space(14)
+            visible: root.installActive
+
+            Rectangle {
+              id: installTrack
+              anchors.left: parent.left
+              anchors.right: installPercent.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              height: Style.space(6)
+              radius: height / 2
+              clip: true
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
+
+              Rectangle {
+                visible: root.installDeterminate
+                width: installTrack.width * Math.max(0, Math.min(100, Number(root.install ? root.install.percent || 0 : 0))) / 100
+                height: parent.height
+                radius: parent.radius
+                color: root.foreground
+                Behavior on width { NumberAnimation { duration: 450; easing.type: Easing.OutCubic } }
+              }
+
+              // No percentage to show: a segment slides so it never looks frozen.
+              Rectangle {
+                id: slider
+                visible: !root.installDeterminate
+                width: installTrack.width * 0.3
+                height: parent.height
+                radius: parent.radius
+                color: root.foreground
+                SequentialAnimation on x {
+                  running: slider.visible && root.installActive
+                  loops: Animation.Infinite
+                  NumberAnimation { from: -slider.width; to: installTrack.width; duration: 1400; easing.type: Easing.InOutQuad }
+                }
+              }
+            }
+
+            Text {
+              id: installPercent
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(40)
+              horizontalAlignment: Text.AlignRight
+              text: root.installDeterminate && root.install ? Number(root.install.percent || 0) + "%" : ""
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          Text {
+            width: parent.width
+            visible: text !== ""
+            text: root.installDetail()
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Button {
+            visible: root.installCancellable
+            text: root.t("fwCancel", "Cancel")
+            bordered: true
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            onClicked: if (root.service) root.service.cancelFirmware()
+          }
+
+          Button {
+            visible: root.install !== null && !root.installActive
+            text: root.t("fwDismiss", "OK")
+            bordered: true
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            onClicked: if (root.service) root.service.dismissFirmware()
+          }
+        }
+
+        Text {
+          width: parent.width
+          visible: !root.connected && !root.service
+          text: root.t("serviceOff", "The plugin service is not running.")
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          wrapMode: Text.WordWrap
+        }
+
+        // Not connected but the service is up: offer to find and pair new
+        // earbuds rather than just saying so. Already-paired earbuds still
+        // reconnect on their own the moment they come out of the case; this
+        // is for the first time a pair has never been paired at all.
+        Column {
+          width: parent.width
+          visible: !root.connected && !!root.service
+          spacing: Style.space(10)
+
+          Text {
+            width: parent.width
+            text: root.searchText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            wrapMode: Text.WordWrap
+          }
+
+          Button {
+            width: parent.width
+            visible: root.searchButtonVisible
+            enabled: root.searchButtonEnabled
+            text: root.searchButtonText
+            iconText: "󰂯"
+            iconSpinning: root.searchPhase === "searching"
+            bordered: true
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.onSearchButtonClicked()
+          }
+        }
+      }
+    }
+  }
+}

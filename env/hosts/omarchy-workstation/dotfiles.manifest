@@ -1,0 +1,3 @@
+# Physical devices belong to this host overlay.
+.config/hypr/input.lua
+.config/hypr/monitors.lua

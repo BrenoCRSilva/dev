@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 1,
+  "id": "foamy.notification-center",
+  "name": "Foamy Notification Center",
+  "version": "1.0.0",
+  "author": "foamrider",
+  "description": "Notification history with app stacks, search, and do not disturb",
+  "homepage": "https://github.com/foamrider/foamy-notification-center",
+  "license": "MIT",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Notification Center",
+    "description": "Every notification you were sent, kept, and readable again",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "language": "system",
+      "panelWidth": 420,
+      "listHeight": 0,
+      "badge": "Dot",
+      "keepDays": 30,
+      "maxItems": 1000,
+      "clickAction": "Auto",
+      "showBody": true,
+      "showPreview": true,
+      "compact": false,
+      "useBrowserFavicons": true,
+      "browserGrouping": "browser"
+    },
+    "schema": [
+      {
+        "key": "compact",
+        "type": "boolean",
+        "label": "Compact notifications",
+        "defaultValue": false,
+        "description": "Use a slim app header and tighter message spacing. Text and picture sizes stay unchanged."
+      },
+      {
+        "key": "useBrowserFavicons",
+        "type": "boolean",
+        "label": "Use website favicons",
+        "defaultValue": true,
+        "description": "Use the local browser favicon cache for identified websites. Missing icons fall back to the app icon. No website requests."
+      },
+      {
+        "key": "browserGrouping",
+        "type": "enum",
+        "label": "Group browser notifications by",
+        "options": [
+          "browser",
+          "hostname",
+          "none"
+        ],
+        "defaultValue": "browser",
+        "description": "browser keeps one stack per browser; hostname separates websites; none shows each browser notification separately. Missing website identities stay under the browser."
+      },
+      {
+        "key": "badge",
+        "type": "enum",
+        "label": "Mark what you have not read",
+        "options": [
+          "Dot",
+          "Highlight",
+          "Count",
+          "None"
+        ],
+        "defaultValue": "Dot",
+        "description": "What the bell says about notifications that arrived since you last opened the center. A dot says there are some, which is the question you actually ask of a bar; a count says how many, and turns the bell into something you read rather than glance at. Highlight adds nothing beside the bell and colours the bell itself in the theme accent instead, which is how the rest of the bar already says a thing wants you, and it is the one that leaves the row of icons exactly the shape it was."
+      },
+      {
+        "key": "keepDays",
+        "type": "integer",
+        "label": "Keep notifications for",
+        "min": 1,
+        "max": 365,
+        "step": 1,
+        "defaultValue": 30,
+        "description": "Days. Past this a notification is deleted along with the icon kept for it. Whichever of this and the count below is reached first wins."
+      },
+      {
+        "key": "maxItems",
+        "type": "integer",
+        "label": "Keep at most",
+        "min": 50,
+        "max": 10000,
+        "step": 50,
+        "defaultValue": 1000,
+        "description": "Notifications. A ceiling on the archive regardless of age, so a chatty week cannot grow it without limit. Roughly a kilobyte each, plus whatever icons come with them."
+      },
+      {
+        "key": "clickAction",
+        "type": "enum",
+        "label": "Clicking a notification",
+        "options": [
+          "Auto",
+          "Focus the app",
+          "Nothing"
+        ],
+        "defaultValue": "Auto",
+        "description": "Auto tries the current popup action first, then edits standard screenshots in Tensaku, opens other pictures, or focuses the sending app. Archived sender commands are never replayed. Focus the app skips pictures and live actions; Nothing disables body clicks."
+      },
+      {
+        "key": "showBody",
+        "type": "boolean",
+        "label": "Show the message text",
+        "defaultValue": true,
+        "description": "Off leaves the sender and the subject line only, which is the version to run on a screen other people can see."
+      },
+      {
+        "key": "showPreview",
+        "type": "boolean",
+        "label": "Show pictures",
+        "defaultValue": true,
+        "description": "Notifications that are about a picture, a camera catching movement or a screenshot that was just taken, show it in the panel. Off keeps the text and leaves the picture where it was; the archive stops keeping copies of new ones as well."
+      },
+      {
+        "key": "panelWidth",
+        "type": "integer",
+        "label": "Panel width",
+        "min": 320,
+        "max": 900,
+        "step": 20,
+        "defaultValue": 420,
+        "description": "In the shell's spacing units. Anything wider than the screen is trimmed to fit."
+      },
+      {
+        "key": "listHeight",
+        "type": "integer",
+        "label": "List height",
+        "min": 0,
+        "max": 1200,
+        "step": 20,
+        "defaultValue": 0,
+        "description": "In the shell's spacing units, or 0 to let the list run to the bottom of the screen, which is where macOS ends its notification column and the reason 0 is the default. A number stops it sooner: a short list that scrolls, rather than a tall one that fills the display."
+      }
+    ]
+  }
+}

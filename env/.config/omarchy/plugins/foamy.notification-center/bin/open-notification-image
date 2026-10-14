@@ -1,0 +1,23 @@
+#!/bin/bash
+set -euo pipefail
+
+case ${1:-} in
+  edit-screenshot) program=tensaku-edit ;;
+  view-image) program=xdg-open ;;
+  *) exit 2 ;;
+esac
+file=${2:-}
+jq -en --arg file "$file" '$file | test("\\A/[^\"\u0027\\x00-\\x1f\\x7f]*\\.(jpe?g|png|webp|gif)\\z"; "i")' >/dev/null || exit 2
+[[ -f $file && -r $file ]] || exit 4
+command -v "$program" >/dev/null || exit 127
+
+# Detect immediate launch failures, then release the editor so the center
+# remains usable while its window stays open. Never inherit collector pipes.
+"$program" "$file" </dev/null >/dev/null 2>&1 &
+image_pid=$!
+sleep 0.1
+if kill -0 "$image_pid" 2>/dev/null; then
+  disown "$image_pid"
+  exit 0
+fi
+wait "$image_pid"

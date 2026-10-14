@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "pontual.bar",
+  "name": "Pontual floating bar",
+  "version": "1.0.0",
+  "author": "Omarchy",
+  "description": "Tokyo Night floating pill rail with Omarchy native widgets",
+  "kinds": [
+    "bar"
+  ],
+  "entryPoints": {
+    "bar": "Bar.qml"
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.bar"
+  }
+}

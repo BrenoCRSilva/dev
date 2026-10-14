@@ -1,0 +1,115 @@
+{
+  // Personal categories use Omarchy's native nested menu. `when` guards app
+  // rows so the stock launcher never offers an installer as an app action.
+  "system": {"icon":"","label":"Session / Power","aliases":["power-menu"]},
+  "trigger.capture": {"icon":"","label":"Capture & Clipboard","aliases":["capture","screenshot","screenrecord","screen-record","screenrecording"]},
+  "trigger.capture.clipboard-history": {"icon":"󰅇","label":"Clipboard history","action":"omarchy menu clipboard"},
+  "trigger.capture.text": {"icon":"󰴑","label":"Capture text (OCR)","action":"omarchy-capture-text"},
+  "trigger.capture.share-clipboard": {"icon":"","label":"Share clipboard","action":"omarchy share clipboard"},
+
+  // App categories launched by Super+E/C/D/N/A.
+  "pontual-entertainment": {"icon":"󰊴","label":"Entertainment"},
+  "pontual-entertainment.youtube": {"icon":"","label":"YouTube","when":"command -v brave >/dev/null 2>&1","action":"omarchy launch webapp https://youtube.com/"},
+  "pontual-entertainment.spotify": {"icon":"󰓇","label":"Spotify","when":"command -v spotify >/dev/null 2>&1","action":"omarchy launch spotify"},
+  "pontual-entertainment.steam": {"icon":"","label":"Steam","when":"command -v steam >/dev/null 2>&1","action":"steam"},
+  "pontual-entertainment.photos": {"icon":"","label":"Photos"},
+  "pontual-entertainment.photos.google": {"icon":"","label":"Google Photos","when":"command -v brave >/dev/null 2>&1","action":"omarchy launch webapp https://photos.google.com/"},
+
+  "pontual-communication": {"icon":"󰭹","label":"Communication"},
+  "pontual-communication.signal": {"icon":"󰭹","label":"Signal","when":"command -v signal-desktop >/dev/null 2>&1","action":"omarchy launch signal"},
+  "pontual-communication.whatsapp": {"icon":"","label":"WhatsApp","when":"command -v brave >/dev/null 2>&1","action":"omarchy launch webapp https://web.whatsapp.com/"},
+  "pontual-communication.messages": {"icon":"󰍦","label":"Google Messages","when":"command -v brave >/dev/null 2>&1","action":"omarchy launch webapp https://messages.google.com/web/conversations"},
+  "pontual-communication.email": {"icon":"","label":"Email","when":"command -v brave >/dev/null 2>&1","action":"omarchy launch webapp https://app.hey.com"},
+  "pontual-communication.new-email": {"icon":"","label":"New email","when":"command -v brave >/dev/null 2>&1","action":"omarchy launch webapp 'https://app.hey.com/messages/new?display=standalone&new_window=true'"},
+  "pontual-communication.calendar": {"icon":"","label":"Calendar","when":"command -v brave >/dev/null 2>&1","action":"omarchy launch webapp https://app.hey.com/calendar/weeks/"},
+  "pontual-communication.social": {"icon":"󰫢","label":"Social"},
+  "pontual-communication.social.x": {"icon":"X","label":"X","when":"command -v brave >/dev/null 2>&1","action":"omarchy launch webapp https://x.com/"},
+  "pontual-communication.social.x-post": {"icon":"X","label":"X post","when":"command -v brave >/dev/null 2>&1","action":"omarchy launch webapp https://x.com/compose/post"},
+  "pontual-communication.teams": {"icon":"󰊻","label":"Teams (optional)","when":"command -v teams-for-linux >/dev/null 2>&1","action":"teams-for-linux"},
+  "pontual-communication.vesktop": {"icon":"󰙯","label":"Vesktop (optional)","when":"command -v vesktop >/dev/null 2>&1","action":"vesktop"},
+
+  "pontual-development": {"icon":"","label":"Development"},
+  "pontual-development.docker": {"icon":"","label":"Docker TUI","when":"command -v omarchy-launch-docker-tui >/dev/null 2>&1","action":"omarchy launch tui omarchy-launch-docker-tui"},
+  "pontual-development.postman": {"icon":"","label":"Postman","when":"command -v postman >/dev/null 2>&1","action":"postman"},
+  "pontual-development.nosqlbooster": {"icon":"","label":"NoSQLBooster","when":"command -v nosqlbooster4mongo >/dev/null 2>&1","action":"nosqlbooster4mongo"},
+  "pontual-development.mongosh": {"icon":"","label":"mongosh","when":"command -v mongosh >/dev/null 2>&1","action":"omarchy launch tui mongosh"},
+  "pontual-development.ide": {"icon":"","label":"Configured editor","when":"command -v code >/dev/null 2>&1 || command -v zed >/dev/null 2>&1 || command -v nvim >/dev/null 2>&1","action":"omarchy launch editor \"$HOME\""},
+
+  "pontual-notes": {"icon":"󰎞","label":"Notes / Writing"},
+  "pontual-notes.obsidian": {"icon":"󰎞","label":"Obsidian","when":"command -v obsidian >/dev/null 2>&1","action":"obsidian"},
+  "pontual-notes.omawrite": {"icon":"󰈙","label":"Omawrite","when":"command -v omawrite >/dev/null 2>&1","action":"omawrite"},
+  "pontual-notes.editor": {"icon":"","label":"Default editor","when":"command -v nvim >/dev/null 2>&1 || command -v vim >/dev/null 2>&1 || command -v code >/dev/null 2>&1 || command -v zed >/dev/null 2>&1","action":"omarchy launch editor \"$HOME\""},
+
+  "pontual-ai": {"icon":"󱚤","label":"AI"},
+  "pontual-ai.chatgpt": {"icon":"󰊤","label":"ChatGPT","when":"command -v brave >/dev/null 2>&1","action":"omarchy launch webapp https://chatgpt.com/"},
+  "pontual-ai.grok": {"icon":"󰫻","label":"Grok","when":"command -v brave >/dev/null 2>&1","action":"omarchy launch webapp https://grok.com/"},
+  "pontual-ai.agent": {"icon":"󰚩","label":"Agent picker","when":"command -v omarchy-agent >/dev/null 2>&1","action":"omarchy-agent --pick"},
+  "pontual-ai.claude": {"icon":"󰛄","label":"Claude (optional)","when":"command -v brave >/dev/null 2>&1","action":"omarchy launch webapp https://claude.ai/"},
+
+  // Remaining root-only destinations retain native search and existing direct
+  // chords; they do not claim dedicated Super-letter accelerators.
+  "pontual-files": {"icon":"","label":"Files & Places"},
+  "pontual-files.manager": {"icon":"","label":"File manager","when":"test -x \"$HOME/.local/bin/strata\"","action":"uwsm-app -- \"$HOME/.local/bin/strata\" \"$HOME\""},
+  "pontual-files.cwd": {"icon":"","label":"File manager in terminal directory","when":"test -x \"$HOME/.local/bin/strata\"","action":"uwsm-app -- \"$HOME/.local/bin/strata\" \"$(omarchy-cmd-terminal-cwd)\""},
+  "pontual-files.places": {"icon":"󰍉","label":"Places"},
+  "pontual-files.places.maps": {"icon":"󰍉","label":"Maps","when":"command -v brave >/dev/null 2>&1","action":"omarchy launch webapp https://maps.google.com/"},
+
+  "pontual-tasks": {"icon":"󰆍","label":"Tasks / Sessions"},
+  "pontual-tasks.task-sessionizer": {"icon":"󰆍","label":"Task sessionizer","action":"/home/pontual/.config/tmux/scripts/task-sessionizer.sh popup"},
+  "pontual-tasks.search": {"icon":"","label":"Search tasks and sessions","action":"omarchy-shell shell toggle pontual.search '{}'"},
+  "pontual-tasks.sessions": {"icon":"󰆍","label":"Tasks and sessions","action":"omarchy-shell shell toggle pontual.tasks '{}'"},
+
+  "pontual-windows": {"icon":"󰖯","label":"Window / Workspace"},
+  "pontual-windows.layout": {"icon":"󰖯","label":"Workspace layout","action":"omarchy-hyprland-workspace-layout-toggle"},
+  "pontual-windows.pseudo": {"icon":"󰖯","label":"Toggle pseudo tiling","action":"hyprctl dispatch 'hl.dsp.window.pseudo()'"},
+  "pontual-windows.floating": {"icon":"󰖯","label":"Toggle floating","action":"hyprctl dispatch 'hl.dsp.window.float({ action = \"toggle\" })'"},
+  "pontual-windows.group": {"icon":"󰖯","label":"Toggle window group","action":"hyprctl dispatch 'hl.dsp.group.toggle()'"},
+  "pontual-windows.workspace": {"icon":"󰍹","label":"Workspaces"},
+  "pontual-windows.workspace.previous": {"icon":"󰍹","label":"Previous existing workspace","action":"hyprctl dispatch 'hl.dsp.focus({ workspace = \"e-1\" })'"},
+  "pontual-windows.workspace.next": {"icon":"󰍹","label":"Next existing workspace","action":"hyprctl dispatch 'hl.dsp.focus({ workspace = \"e+1\" })'"},
+  "pontual-windows.workspace.1": {"icon":"1","label":"Workspace 1","action":"hyprctl dispatch 'hl.dsp.focus({ workspace = \"1\" })'"},
+  "pontual-windows.workspace.2": {"icon":"2","label":"Workspace 2","action":"hyprctl dispatch 'hl.dsp.focus({ workspace = \"2\" })'"},
+  "pontual-windows.workspace.3": {"icon":"3","label":"Workspace 3","action":"hyprctl dispatch 'hl.dsp.focus({ workspace = \"3\" })'"},
+  "pontual-windows.workspace.4": {"icon":"4","label":"Workspace 4","action":"hyprctl dispatch 'hl.dsp.focus({ workspace = \"4\" })'"},
+  "pontual-windows.workspace.5": {"icon":"5","label":"Workspace 5","action":"hyprctl dispatch 'hl.dsp.focus({ workspace = \"5\" })'"},
+  "pontual-windows.workspace.6": {"icon":"6","label":"Workspace 6","action":"hyprctl dispatch 'hl.dsp.focus({ workspace = \"6\" })'"},
+  "pontual-windows.workspace.7": {"icon":"7","label":"Workspace 7","action":"hyprctl dispatch 'hl.dsp.focus({ workspace = \"7\" })'"},
+  "pontual-windows.workspace.8": {"icon":"8","label":"Workspace 8","action":"hyprctl dispatch 'hl.dsp.focus({ workspace = \"8\" })'"},
+  "pontual-windows.workspace.9": {"icon":"9","label":"Workspace 9","action":"hyprctl dispatch 'hl.dsp.focus({ workspace = \"9\" })'"},
+  "pontual-windows.workspace.10": {"icon":"0","label":"Workspace 10","action":"hyprctl dispatch 'hl.dsp.focus({ workspace = \"10\" })'"},
+  "pontual-windows.monitor": {"icon":"󰍹","label":"Monitors"},
+  "pontual-windows.monitor.focus-left": {"icon":"󰍹","label":"Focus monitor left","action":"hyprctl dispatch 'hl.dsp.focus({ monitor = \"l\" })'"},
+  "pontual-windows.monitor.focus-right": {"icon":"󰍹","label":"Focus monitor right","action":"hyprctl dispatch 'hl.dsp.focus({ monitor = \"r\" })'"},
+  "pontual-windows.monitor.move-left": {"icon":"󰍹","label":"Move window to monitor left","action":"hyprctl dispatch 'hl.dsp.window.move({ monitor = \"l\", follow = true })'"},
+  "pontual-windows.monitor.move-right": {"icon":"󰍹","label":"Move window to monitor right","action":"hyprctl dispatch 'hl.dsp.window.move({ monitor = \"r\", follow = true })'"},
+
+  "pontual-help": {"icon":"󰧑","label":"Help"},
+  "pontual-help.keybindings": {"icon":"","label":"Keybindings","action":"omarchy-menu-keybindings"},
+  "pontual-help.tmux": {"icon":"","label":"Tmux keybindings","action":"omarchy-menu-tmux-keybindings"},
+  "pontual-help.herdr": {"icon":"","label":"Herdr keybindings","action":"omarchy-menu-herdr-keybindings"},
+  "pontual-help.learn": {"icon":"󰧑","label":"Omarchy Learn menu","action":"omarchy-menu toggle learn"},
+
+  // Settings opens the native Setup tree plus direct links to the displaced
+  // frequently used panels. Quick Settings remains on the bar popup.
+  "setup.audio": {"icon":"󰕾","label":"Audio","action":"omarchy-shell shell toggle omarchy.audio '{}'"},
+  "setup.bluetooth": {"icon":"󰂯","label":"Bluetooth","action":"omarchy-shell shell toggle omarchy.bluetooth '{}'"},
+  "setup.network-panel": {"icon":"󰛳","label":"Network panel","action":"omarchy-shell shell toggle omarchy.network '{}'"},
+  "setup.display-panel": {"icon":"󰍹","label":"Display panel","action":"omarchy-shell shell toggle omarchy.monitor '{}'"},
+  "setup.hardware-menu": {"icon":"","label":"Hardware","action":"omarchy-menu toggle trigger.hardware"},
+  "setup.theme-menu": {"icon":"󰸌","label":"Theme / Style","action":"omarchy-menu toggle style.theme"},
+  "setup.toggle-menu": {"icon":"󰔎","label":"Toggles","action":"omarchy-menu toggle trigger.toggle"},
+  "setup.notifications": {"icon":"󰂚","label":"Notification history","action":"omarchy-shell shell toggle foamy.notification-center '{}'"},
+  // Keep the native Theme row and direct `summon style.theme` route, while
+  // shortening only the picker process's cache path to stay below shell IPC limits.
+  "style.theme": {"icon":"󰸌","label":"Theme","aliases":["theme","themes"],"action":"theme=$(\"$HOME/.config/omarchy/bin/omarchy-theme-switcher-compact\"); [[ -n $theme ]] && omarchy-theme-set \"$theme\""},
+  "setup.quick-settings": {"icon":"󰒓","label":"Quick Settings"},
+  "setup.quick-settings.audio": {"icon":"󰕾","label":"Audio / mixer","action":"omarchy-shell shell toggle omarchy.audio '{}'"},
+  "setup.quick-settings.network": {"icon":"󰛳","label":"Network","action":"omarchy-shell shell toggle omarchy.network '{}'"},
+  "setup.quick-settings.bluetooth": {"icon":"󰂯","label":"Bluetooth","action":"omarchy-shell shell toggle omarchy.bluetooth '{}'"},
+  "setup.quick-settings.display": {"icon":"󰍹","label":"Display / brightness","action":"omarchy-shell shell toggle omarchy.monitor '{}'"},
+  "setup.quick-settings.system-monitor": {"icon":"󰍛","label":"System monitor","action":"omarchy-shell shell toggle sys-monitor '{}'"},
+  "setup.quick-settings.nightlight": {"icon":"󰔎","label":"Toggle night light","action":"omarchy toggle nightlight"},
+
+  // Put the personal password entry under the stock Settings/Security tree.
+  "setup.security.1password": {"icon":"󰢁","label":"1Password","when":"command -v 1password >/dev/null 2>&1","action":"omarchy launch 1password"}
+}

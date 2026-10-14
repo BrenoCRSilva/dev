@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "pontual.workspaces",
+  "name": "Pontual icon workspaces",
+  "version": "1.0.0",
+  "author": "Pontual",
+  "description": "Workspace number indicators",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Workspaces",
+    "description": "Workspace number indicators",
+    "category": "Compositor",
+    "allowMultiple": false
+  }
+}

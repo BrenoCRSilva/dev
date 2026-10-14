@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<policymap>
+  <!-- Bound each archived image decode; never spill its pixel cache to disk. -->
+  <policy domain="resource" name="memory" value="128MiB"/>
+  <policy domain="resource" name="map" value="0"/>
+  <policy domain="resource" name="disk" value="0"/>
+  <policy domain="resource" name="width" value="8192"/>
+  <policy domain="resource" name="height" value="8192"/>
+  <!-- Allow working images used during resize, while bounding decoded frames. -->
+  <policy domain="resource" name="list-length" value="4"/>
+  <policy domain="resource" name="thread" value="1"/>
+  <policy domain="resource" name="time" value="4"/>
+  <policy domain="delegate" rights="none" pattern="*"/>
+  <policy domain="filter" rights="none" pattern="*"/>
+  <policy domain="path" rights="none" pattern="@*"/>
+  <policy domain="module" rights="none" pattern="*"/>
+  <policy domain="module" rights="read | write" pattern="{PNG,JPEG,GIF,WEBP,BMP,ICON,SVG}"/>
+  <policy domain="coder" rights="none" pattern="*"/>
+  <policy domain="coder" rights="read" pattern="{JPEG,GIF,WEBP,BMP,ICO,RSVG}"/>
+  <policy domain="coder" rights="read | write" pattern="PNG"/>
+</policymap>

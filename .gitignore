@@ -3,3 +3,10 @@
 .env
 .env.*
 .config/herdr/sessions/
+env/.config/herdr/sessions/
+env/.config/nvim/lua/pontuarch-palette.lua
+env/.config/omarchy/plugins/**/.git/
+env/.config/omarchy/plugins/**/node_modules/
+env/.config/omarchy/plugins/**/tests/
+.envctl-state/
+scripts/__pycache__/

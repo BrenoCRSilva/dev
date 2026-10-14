@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Omarchy has finished staging current/theme before invoking theme-set hooks.
+# Signal only existing servers; never start an editor or depend on PontuArch.
+command -v nvim >/dev/null || exit 0
+uid="$(id -u)"
+runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+nvim_exe="$(readlink -f "$(command -v nvim)")"
+if [[ -d "$runtime_dir" ]]; then
+	while IFS= read -r -d '' socket; do
+		[[ -S "$socket" ]] || continue
+		[[ "$(stat -c %u "$socket" 2>/dev/null || true)" == "$uid" ]] || continue
+		pid="$(nvim --server "$socket" --remote-expr 'getpid()' 2>/dev/null)" || continue
+		[[ "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" ]] || continue
+		[[ "$(stat -c %u "/proc/$pid" 2>/dev/null || true)" == "$uid" ]] || continue
+		[[ "$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)" == "$nvim_exe" ]] || continue
+		if ! nvim --server "$socket" --remote-send '<Cmd>lua package.loaded["pontuarch"] = nil; require("pontuarch").reload()<CR>' >/dev/null 2>&1; then
+			printf 'theme-set: Neovim reload failed for %s\n' "$socket" >&2
+		fi
+	done < <(find "$runtime_dir" -maxdepth 4 -type s -uid "$uid" -name 'nvim.*' -print0 2>/dev/null)
+fi
+
+# Re-evaluate the personal statusline against Omarchy's staged palette. This
+# theme file is a shell-driven script, so run it in tmux's shell runner rather
+# than parsing it as native tmux configuration.
+if command -v tmux >/dev/null && tmux list-sessions >/dev/null 2>&1; then
+	tmux run-shell "${HOME}/.config/tmux/themes/themes.tmux" >/dev/null 2>&1 || true
+fi

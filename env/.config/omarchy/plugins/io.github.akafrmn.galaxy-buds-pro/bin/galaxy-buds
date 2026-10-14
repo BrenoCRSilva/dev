@@ -1,0 +1,1474 @@
+#!/usr/bin/python3
+"""Galaxy Buds control daemon for the Omarchy shell.
+
+Speaks Samsung's SPP protocol over an RFCOMM socket that BlueZ hands us through
+the Profile1 API, the same path GalaxyBudsClient takes on Linux. Reads commands
+as JSON lines on stdin, writes the earbud state as JSON lines on stdout.
+
+Only one process can hold the SPP link, so opening the GalaxyBudsClient GUI
+while this runs will take the connection away from one of the two.
+
+Needs the system python: dbus-python and PyGObject live there, not in brew's.
+"""
+
+import json
+import os
+import re
+import struct
+import subprocess
+import sys
+import threading
+import time
+
+DEBUG = bool(os.environ.get("GALAXY_BUDS_DEBUG"))
+
+# Each generation answers on its own service. The 1101 one is plain SPP, which
+# plenty of unrelated devices also advertise, so a device only counts as
+# earbuds when it carries the new service or its name matches a known model.
+SPP_NEW = "2e73a4ad-332d-41fc-90e2-16bef06523f2"
+SPP_STANDARD = "00001101-0000-1000-8000-00805f9b34fb"
+SPP_LEGACY = "00001102-0000-1000-8000-00805f9b34fd"
+
+# The device id is the tail of this vendor UUID. Only models from Buds2 on
+# publish it; older ones are identified by name.
+DEVICE_ID_UUID_PREFIX = "d908aab5-7a90-4cbe-8641-86a553db"
+
+SOM, EOM = 0xFD, 0xDD
+LEGACY_SOM, LEGACY_EOM = 0xFE, 0xEE
+
+MSG_ACK = 66
+MSG_STATUS = 96
+MSG_EXTENDED_STATUS = 97
+MSG_NOISE_CONTROLS_UPDATE = 119
+MSG_NOISE_CONTROLS = 120
+MSG_SET_SPATIAL_AUDIO = 124
+MSG_SET_AMBIENT_MODE = 128
+MSG_AMBIENT_MODE_UPDATED = 129
+MSG_LOCK_TOUCHPAD = 144
+MSG_SET_NOISE_REDUCTION = 152
+MSG_NOISE_REDUCTION_MODE_UPDATE = 155
+MSG_SET_SEAMLESS_CONNECTION = 175
+MSG_VERSION_INFO_LONG = 104
+MSG_FOTA_RESULT = 185
+MSG_FOTA_OPEN = 187
+MSG_FOTA_CONTROL = 188
+MSG_FOTA_DOWNLOAD_DATA = 189
+MSG_FOTA_UPDATE = 190
+FOTA_MESSAGES = (MSG_FOTA_RESULT, MSG_FOTA_OPEN, MSG_FOTA_CONTROL, MSG_FOTA_DOWNLOAD_DATA, MSG_FOTA_UPDATE)
+
+# Header flags. The host marks its answers to the earbuds' firmware requests
+# as responses, and the data chunks as fragments too.
+FLAG_RESPONSE = 0x1000
+FLAG_FRAGMENT = 0x2000
+
+MODES = {"off": 0, "anc": 1, "ambient": 2}
+MODE_NAMES = {v: k for k, v in MODES.items()}
+
+# What actually differs between models. Everything else -- framing, CRC, the
+# commands, the battery messages -- is shared, so adding a model is a row here.
+#
+#   noise:    (kind, offset in the extended status)
+#             "controls" = one byte with three modes (Buds Pro and newer)
+#             "ambient"  = ambient sound on/off (Buds, Buds+, no ANC at all)
+#             "anc"      = noise cancelling on/off (Buds Live, no ambient mode)
+#   touch:    (shape, offset); "bits7" models send seven booleans back
+#   seamless: (offset, first firmware revision that reports it)
+#   spatial:  same, or None when the model has no 360 Audio
+#
+# Order matters: name matching walks this list, so "Buds2 Pro" has to come
+# before "Buds2".
+PROFILES = [
+    {"name": "buds", "ids": (257, 14336), "match": ("Galaxy Buds (",),
+     "uuid": SPP_LEGACY, "fw_model": "Buds", "legacy_frame": True, "wearing": "legacy", "case_battery": False,
+     "modes": ("off", "ambient"), "noise": ("ambient", 7), "touch": ("byte", 12),
+     "seamless": None, "spatial": None},
+
+    {"name": "budsplus", "ids": tuple(range(258, 267)), "match": ("Galaxy Buds+ (", "Buds+"),
+     "uuid": SPP_STANDARD, "fw_model": "BudsPlus",
+     "modes": ("off", "ambient"), "noise": ("ambient", 8), "touch": ("byte", 12),
+     "seamless": (21, 11), "spatial": None},
+
+    {"name": "budslive", "ids": tuple(range(278, 285)), "match": ("Buds Live",),
+     "uuid": SPP_STANDARD, "fw_model": "BudsLive",
+     "modes": ("off", "anc"), "noise": ("anc", 12), "touch": ("byte", 10),
+     "seamless": (19, 0), "spatial": (24, 9)},
+
+    {"name": "budspro", "ids": tuple(range(298, 302)), "match": ("Buds Pro",),
+     "uuid": SPP_STANDARD, "fw_model": "BudsPro",
+     "modes": ("off", "anc", "ambient"), "noise": ("controls", 12), "touch": ("byte", 10),
+     "seamless": (19, 0), "spatial": (28, 2)},
+
+    {"name": "buds2pro", "charging": True, "ids": tuple(range(325, 329)), "match": ("Buds2 Pro",),
+     "uuid": SPP_NEW, "fw_model": "Buds2Pro",
+     "modes": ("off", "anc", "ambient"), "noise": ("controls", 12), "touch": ("bits7", 10),
+     "seamless": (19, 0), "spatial": (35, 1)},
+
+    {"name": "buds2", "charging": True, "ids": tuple(range(313, 322)) + (14337,), "match": ("Buds2",),
+     "uuid": SPP_NEW, "fw_model": "Buds2",
+     "modes": ("off", "anc", "ambient"), "noise": ("controls", 12), "touch": ("bits7", 10),
+     "seamless": (19, 0), "spatial": (35, 8)},
+
+    {"name": "budscore", "charging": True, "ids": (322, 323), "match": ("Buds Core",),
+     "uuid": SPP_NEW, "fw_model": "BudsCore",
+     "modes": ("off", "anc", "ambient"), "noise": ("controls", 12), "touch": ("bits7", 10),
+     "seamless": (19, 0), "one_bud_noise": (28, 0), "spatial": None},
+
+    {"name": "budsfe", "charging": True, "ids": (330, 331), "match": ("Buds FE",),
+     "uuid": SPP_NEW, "fw_model": "BudsFe",
+     "modes": ("off", "anc", "ambient"), "noise": ("controls", 12), "touch": ("bits7", 10),
+     "seamless": (19, 0), "one_bud_noise": (28, 0), "spatial": (35, 0)},
+
+    {"name": "buds3pro", "charging": True, "ids": (340, 341), "match": ("Buds3 Pro",),
+     "uuid": SPP_NEW, "fw_model": "Buds3Pro",
+     "modes": ("off", "anc", "ambient"), "noise": ("controls", 12), "touch": ("bits7", 10),
+     "seamless": (19, 0), "one_bud_noise": (28, 0), "spatial": (35, 0)},
+
+    {"name": "buds3fe", "charging": True, "ids": (347, 348), "match": ("Buds3 FE",),
+     "uuid": SPP_NEW, "fw_model": "Buds3Fe",
+     "modes": ("off", "anc", "ambient"), "noise": ("controls", 12), "touch": ("bits7", 10),
+     "seamless": (19, 0), "one_bud_noise": (28, 0), "spatial": None},
+
+    # Buds4 generation (2026): same layout as Buds3 Pro per GalaxyBudsClient's
+    # decoder and live Buds4 Pro captures in hmarquez-solutions/omarchy-buds.
+    # They ack NOISE_CONTROLS with 0, a receipt rather than the applied mode.
+    {"name": "buds4pro", "charging": True, "ids": (359, 360, 361), "match": ("Buds4 Pro",),
+     "uuid": SPP_NEW, "fw_model": "Buds4Pro", "noise_ack_receipt": True,
+     "modes": ("off", "anc", "ambient"), "noise": ("controls", 12), "touch": ("bits7", 10),
+     "seamless": (19, 0), "one_bud_noise": (28, 0), "spatial": (35, 0)},
+
+    {"name": "buds4", "charging": True, "ids": (355, 356), "match": ("Buds4",),
+     "uuid": SPP_NEW, "fw_model": "Buds4", "noise_ack_receipt": True,
+     "modes": ("off", "anc", "ambient"), "noise": ("controls", 12), "touch": ("bits7", 10),
+     "seamless": (19, 0), "one_bud_noise": (28, 0), "spatial": (35, 0)},
+
+    {"name": "buds3", "charging": True, "ids": (333, 334), "match": ("Buds3",),
+     "uuid": SPP_NEW, "fw_model": "Buds3",
+     "modes": ("off", "anc", "ambient"), "noise": ("controls", 12), "touch": ("bits7", 10),
+     "seamless": (19, 0), "one_bud_noise": (28, 0), "spatial": (35, 0)},
+]
+
+# Anything newer than this file knows about: the noise byte and the touch
+# bitmask have sat still since Buds Live, so those still work. 360 Audio moved
+# around between models, so it is hidden rather than read from the wrong byte.
+UNKNOWN_PROFILE = {"name": "unknown", "ids": (), "match": (), "uuid": SPP_NEW, "charging": True,
+                   "modes": ("off", "anc", "ambient"), "noise": ("controls", 12),
+                   "touch": ("bits7", 10), "seamless": (19, 0), "spatial": None}
+
+DEFAULTS = {"legacy_frame": False, "wearing": "nibbles", "case_battery": True,
+            "charging": False, "noise_ack_receipt": False, "one_bud_noise": None,
+            "fw_model": None}
+
+
+def profile_get(profile, key):
+    return profile.get(key, DEFAULTS.get(key))
+
+
+def _crc_table():
+    table = []
+    for i in range(256):
+        value = i << 8
+        for _ in range(8):
+            value = ((value << 1) ^ 0x1021) & 0xFFFF if value & 0x8000 else (value << 1) & 0xFFFF
+        table.append(value)
+    return table
+
+
+CRC_TABLE = _crc_table()
+
+
+def crc16(data):
+    """CRC16-CCITT/XModem over msgId + payload."""
+    crc = 0
+    for byte in data:
+        crc = ((crc << 8) ^ CRC_TABLE[((crc >> 8) ^ byte) & 0xFF]) & 0xFFFF
+    return crc
+
+
+def encode(msg_id, payload=b"", legacy=False, flags=0):
+    payload = bytes(payload)
+    size = 1 + len(payload) + 2
+    body = bytes([msg_id]) + payload
+    # The original Buds put the message type and size in a byte each; everyone
+    # since packs both into one little-endian short, flags in the high bits.
+    header = bytes([0, size]) if legacy else struct.pack("<H", size | flags)
+    som, eom = (LEGACY_SOM, LEGACY_EOM) if legacy else (SOM, EOM)
+    return bytes([som]) + header + body + struct.pack("<H", crc16(body)) + bytes([eom])
+
+
+def decode(buffer, legacy=False):
+    """Pull whole frames out of buffer; returns (messages, leftover bytes)."""
+    som, eom = (LEGACY_SOM, LEGACY_EOM) if legacy else (SOM, EOM)
+    messages = []
+    while True:
+        start = buffer.find(bytes([som]))
+        if start < 0:
+            return messages, b""
+        buffer = buffer[start:]
+        if len(buffer) < 6:
+            return messages, buffer
+        size = buffer[2] if legacy else struct.unpack("<H", buffer[1:3])[0] & 0x3FF
+        total = 3 + size + 1
+        if size < 3:
+            buffer = buffer[1:]
+            continue
+        if len(buffer) < total:
+            # Wait for the rest. A stray start byte claiming a big size would
+            # stall here until enough bytes arrive, but an SPP stream stays
+            # framed: we only ever start reading at a real frame boundary.
+            return messages, buffer
+        frame, rest = buffer[:total], buffer[total:]
+        body = frame[3:3 + size - 2]
+        crc = struct.unpack("<H", frame[total - 3:total - 1])[0]
+        # A bad frame means we locked onto a start byte that was really payload,
+        # so skip one byte and resynchronise rather than dropping the buffer.
+        if frame[-1] != eom or crc16(body) != crc:
+            buffer = buffer[1:]
+            continue
+        messages.append((body[0], body[1:]))
+        buffer = rest
+
+
+def device_id_from_uuids(uuids):
+    for uuid in uuids:
+        uuid = str(uuid).lower()
+        if uuid.startswith(DEVICE_ID_UUID_PREFIX):
+            try:
+                return int(uuid[len(DEVICE_ID_UUID_PREFIX):], 16)
+            except ValueError:
+                return None
+    return None
+
+
+def profile_for(uuids, name):
+    """Device id first (exact, and survives renaming), model name second."""
+    device_id = device_id_from_uuids(uuids)
+    if device_id is not None:
+        for profile in PROFILES:
+            if device_id in profile["ids"]:
+                return profile
+    text = str(name or "")
+    for profile in PROFILES:
+        for needle in profile["match"]:
+            if needle in text:
+                return profile
+    return UNKNOWN_PROFILE
+
+
+def looks_like_earbuds(uuids, name):
+    """Plain SPP is advertised by all sorts of devices, so only trust it when
+    the name matches a model we know."""
+    lowered = [str(u).lower() for u in uuids]
+    if SPP_NEW in lowered:
+        return True
+    if SPP_STANDARD not in lowered and SPP_LEGACY not in lowered:
+        return False
+    return profile_for(uuids, name) is not UNKNOWN_PROFILE
+
+
+def pick_device(candidates, default_address=""):
+    """Which pair the panel is about, when more than one is paired.
+
+    The one you are listening through wins: with two pairs connected at once,
+    the audio output is the one you mean to control. Falling back to merely
+    connected keeps the panel useful when the earbuds are on but the sound is
+    coming out of the speakers."""
+    connected = [(path, device) for path, device in candidates
+                 if device.get("Connected", False)]
+    if default_address:
+        for path, device in connected:
+            if str(device.get("Address", "")).upper() == default_address:
+                return path, device
+    if connected:
+        return connected[0]
+    # Nothing connected: still return one so the panel can say which pair it
+    # is waiting for rather than claiming nothing is paired.
+    return candidates[0] if candidates else (None, None)
+
+
+def parse_touch(byte, shape):
+    if shape == "byte":
+        # One flag, and it reads the other way around: non-zero means locked.
+        return {"enabled": byte == 0}
+    return {
+        "enabled": bool(byte & 0x80),
+        "tap": bool(byte & 0x08),
+        "double": bool(byte & 0x04),
+        "triple": bool(byte & 0x02),
+        "hold": bool(byte & 0x01),
+        "double_call": bool(byte & 0x10),
+        "hold_call": bool(byte & 0x20),
+    }
+
+
+def parse_wearing(byte, style):
+    if style == "legacy":
+        return {"left": 1 if byte in (1, 3) else 0, "right": 1 if byte in (2, 3) else 0}
+    return {"left": byte >> 4, "right": byte & 0x0F}
+
+
+# Placement nibble per earbud. A bud in the case, or one that has dropped off
+# the link, reports battery 0 -- that is "no reading", not an empty battery.
+# 4 is the case with its lid shut, sent just before the link drops.
+PLACEMENTS = {0: "disconnected", 1: "wearing", 2: "idle", 3: "case", 4: "case"}
+
+
+def parse_placement(byte, style):
+    """Name where each earbud is. The original Buds only say worn or not."""
+    if style == "legacy":
+        worn = parse_wearing(byte, style)
+        return {side: "wearing" if worn[side] else "idle" for side in ("left", "right")}
+    return {side: PLACEMENTS.get(value, "unknown")
+            for side, value in parse_wearing(byte, style).items()}
+
+
+def read_noise(byte, kind):
+    if kind == "ambient":
+        return "ambient" if byte else "off"
+    if kind == "anc":
+        return "anc" if byte else "off"
+    return MODE_NAMES.get(byte, "unknown")
+
+
+def noise_command(kind, mode):
+    """(msg id, payload) for asking a model to change its noise mode."""
+    if kind == "ambient":
+        return MSG_SET_AMBIENT_MODE, bytes([1 if mode == "ambient" else 0])
+    if kind == "anc":
+        return MSG_SET_NOISE_REDUCTION, bytes([1 if mode == "anc" else 0])
+    return MSG_NOISE_CONTROLS, bytes([MODES.get(mode, 0)])
+
+
+def optional_field(payload, spec, revision):
+    """Read a field the model only reports from some firmware revision on."""
+    if not spec:
+        return None
+    offset, since = spec
+    if revision < since or len(payload) <= offset:
+        return None
+    return payload[offset]
+
+
+def parse_extended_status(payload, profile):
+    revision = payload[0]
+    noise_kind, noise_offset = profile["noise"]
+    touch_shape, touch_offset = profile["touch"]
+
+    battery = {"left": payload[2], "right": payload[3]}
+    if profile_get(profile, "case_battery"):
+        battery["case"] = payload[7]
+
+    state = {
+        "revision": revision,
+        "battery": battery,
+        "wearing": parse_wearing(payload[6], profile_get(profile, "wearing")),
+        "placement": parse_placement(payload[6], profile_get(profile, "wearing")),
+        "noise": read_noise(payload[noise_offset], noise_kind),
+        "touch": parse_touch(payload[touch_offset], touch_shape),
+    }
+
+    seamless = optional_field(payload, profile["seamless"], revision)
+    if seamless is not None:
+        state["seamless"] = seamless == 0
+    spatial = optional_field(payload, profile["spatial"], revision)
+    if spatial is not None:
+        state["spatial"] = spatial == 1
+    # Off by default: the firmware then refuses ANC with a single bud worn.
+    one_bud = optional_field(payload, profile_get(profile, "one_bud_noise"), revision)
+    if one_bud is not None:
+        state["one_bud_noise"] = one_bud == 1
+    return state
+
+
+def parse_status(payload, profile):
+    state = {"battery": {"left": payload[1], "right": payload[2]},
+             "wearing": parse_wearing(payload[5], profile_get(profile, "wearing")),
+             "placement": parse_placement(payload[5], profile_get(profile, "wearing"))}
+    if profile_get(profile, "case_battery") and len(payload) > 6:
+        state["battery"]["case"] = payload[6]
+    # Only Buds2 and newer report what is charging; on older models that byte
+    # is something else entirely.
+    if profile_get(profile, "charging") and len(payload) > 7:
+        charging = payload[7]
+        state["charging"] = {"left": bool(charging & 0x10), "right": bool(charging & 0x04),
+                             "case": bool(charging & 0x01)}
+        # A bud only charges in the case, whatever its placement nibble says
+        # (Buds4 Pro reports "idle" for a freshly docked bud).
+        for side in ("left", "right"):
+            if state["charging"][side]:
+                state["placement"][side] = "case"
+    return state
+
+
+# ---- firmware -----------------------------------------------------------
+# The earbuds report their build on connect (msg 104): a two-byte prefix,
+# then the left and right build as NUL-padded ASCII, e.g. R630XXU0AZD2.
+# The update check only reads the community build list GalaxyBudsClient's
+# author keeps in sync with Samsung; installing is left to Galaxy Wearable.
+FIRMWARE_RE = re.compile(rb"R[0-9]{3}[A-Z]{2}[A-Z0-9]{6}")
+FIRMWARE_URL = os.environ.get("GALAXY_BUDS_FIRMWARE_URL",
+                              "https://fw.timschneeberger.me/v3/firmware/{model}")
+FIRMWARE_RECHECK = 12 * 3600
+FIRMWARE_TIMEOUT = 10
+MONTH_NAMES = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+BASE36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def parse_version_info(payload):
+    """{"left": build, "right": build} from msg 104; a side may be missing."""
+    builds = [m.group().decode() for m in FIRMWARE_RE.finditer(bytes(payload[2:]))]
+    return dict(zip(("left", "right"), builds, strict=False))
+
+
+def decode_firmware(build):
+    """Samsung's build string: model, region, update type + bootloader,
+    major letter, then year (A=2001), month (A=Jan) and revision."""
+    if not isinstance(build, str) or not re.fullmatch(r"R[0-9]{3}[A-Z]{2}[A-Z0-9]{6}", build):
+        return None
+    year, month, revision = build[-3], build[-2], build[-1]
+    if not ("A" <= year <= "Z" and "A" <= month <= "L"):
+        return None
+    decoded = {"build": build, "model": build[:4], "region": build[4:6], "bootloader": build[6:8],
+               "major": build[8], "year": 2001 + ord(year) - ord("A"),
+               "month": ord(month) - ord("A") + 1, "revision": BASE36.index(revision)}
+    decoded["label"] = f"{MONTH_NAMES[decoded['month'] - 1]} {decoded['year']}"
+    return decoded
+
+
+def firmware_key(decoded):
+    return (decoded["bootloader"], decoded["major"], decoded["year"], decoded["month"], decoded["revision"])
+
+
+def latest_build(entries, current):
+    """The newest build in the server list for the same model, if it is newer
+    than `current`; None otherwise or when the list is unusable."""
+    mine = decode_firmware(current)
+    if not mine or not isinstance(entries, list):
+        return None
+    best = None
+    for entry in entries:
+        decoded = decode_firmware(entry.get("buildName") if isinstance(entry, dict) else None)
+        if not decoded or decoded["model"] != mine["model"]:
+            continue
+        if best is None or firmware_key(decoded) > firmware_key(best):
+            best = decoded
+    return best if best and firmware_key(best) > firmware_key(mine) else None
+
+
+def plugin_version():
+    try:
+        manifest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "manifest.json")
+        with open(manifest) as handle:
+            return json.load(handle).get("version", "dev")
+    except (OSError, ValueError):
+        return "dev"
+
+
+def fetch_firmware_list(model):
+    """Blocking GET of the build list for one model. Sends the model name and
+    nothing else; TLS is verified."""
+    import urllib.request
+    request = urllib.request.Request(FIRMWARE_URL.format(model=model), headers={
+        "User-Agent": f"omarchy-galaxy-buds-pro/{plugin_version()}",
+        "Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=FIRMWARE_TIMEOUT) as response:
+        return json.loads(response.read(512 * 1024).decode("utf-8"))
+
+
+# ---- firmware installation ----------------------------------------------
+# Samsung's FOTA transfer, written from the protocol as documented by the
+# GalaxyBudsClient project (no code taken). The host offers a table of
+# segments; the earbuds then pull every byte by offset, verify the CRCs and
+# install. Every guard below exists because a wrong flash cannot be undone.
+FIRMWARE_DOWNLOAD_HOST = "fw.timschneeberger.me"
+FIRMWARE_DOWNLOAD_URL = "https://" + FIRMWARE_DOWNLOAD_HOST + "/v3/firmware/download/{build}"
+# The only images this plugin will send to earbuds: build -> (bytes, SHA-256).
+# The download server supplies the bytes but never the trust; an image must
+# match its row here exactly, or nothing is sent. Builds are added only by a
+# new plugin release, after hashing the image and checking it with
+# verify_firmware_image. Anything else gets the update notice without an
+# Install button. The README lists where and when each row was taken.
+PINNED_FIRMWARE = {
+    "R190XXU0AVF1": (2339478, "687011b78a2667d2e7d386c5968b09273a2876a91edf71893ce138f2137d8157"),  # Buds Pro
+    "R510XXU0AZD1": (6407748, "e8085cf7d2227d4514c3020ee3bbf34d85fb868950106283e58123f89a2216b3"),  # Buds2 Pro
+    "R630XXU0AZG2": (8683104, "2e1bd0151459c21daf2d669c6ff6b548821140a6247817fce9534a12299622ce"),  # Buds3 Pro
+}
+FIRMWARE_CONNECT_TIMEOUT = 20  # seconds per socket operation
+FIRMWARE_DOWNLOAD_DEADLINE = 300  # seconds for the whole download
+FIRMWARE_MAGIC = 0xCAFECAFE
+FOTA_MTU_MAX = 650
+FLASH_MIN_BATTERY = 30
+FLASH_STEP_TIMEOUT = 30        # seconds of silence tolerated mid-transfer
+FLASH_REBOOT_TIMEOUT = 240     # install + reboot + reconnect
+FLASH_ACTIVE = ("downloading", "opening", "waiting", "transferring", "installing", "rebooting")
+FLASH_CANCELLABLE = ("downloading", "opening", "waiting", "transferring")
+FLASH_PLACEMENTS = ("wearing", "idle", "case")   # "case" here is the open case (3)
+
+
+class FirmwareError(ValueError):
+    pass
+
+
+def parse_firmware_image(data):
+    """Validate the container: magic, declared size, segment bounds and every
+    segment's CRC32. Returns {"crc", "segments": [{"id","crc","data"}]}."""
+    import zlib
+    data = bytes(data)
+    if len(data) < 16:
+        raise FirmwareError("file too small")
+    magic, total, count = struct.unpack_from("<IiI", data, 0)
+    if magic != FIRMWARE_MAGIC:
+        raise FirmwareError("not a Galaxy Buds firmware image")
+    if total != len(data):
+        raise FirmwareError("size does not match the header (truncated download?)")
+    if not 0 < count <= 32 or 12 + 16 * count > len(data) - 4:
+        raise FirmwareError("bad segment table")
+    segments = []
+    for index in range(count):
+        seg_id, crc, offset, size = struct.unpack_from("<iIii", data, 12 + 16 * index)
+        if seg_id < 0 or seg_id > 255 or size <= 0 or offset < 0 or offset + size > len(data) - 4:
+            raise FirmwareError(f"segment {index} out of bounds")
+        chunk = data[offset:offset + size]
+        if zlib.crc32(chunk) != crc:
+            raise FirmwareError(f"segment {seg_id} failed its CRC32 check")
+        segments.append({"id": seg_id, "crc": crc, "data": chunk})
+    return {"crc": struct.unpack_from("<I", data, len(data) - 4)[0], "segments": segments}
+
+
+def verify_firmware_image(data, build):
+    """The image must be the exact build asked for, for the model it names."""
+    image = parse_firmware_image(data)
+    decoded = decode_firmware(build)
+    if not decoded:
+        raise FirmwareError("unknown build name")
+    blob = bytes(data)
+    if ("SM-" + decoded["model"]).encode() not in blob:
+        raise FirmwareError(f"image is not for SM-{decoded['model']}")
+    # Sibling models share code (a Buds3 Pro image mentions SM-R530 once in a
+    # template), so the model name alone proves little. The build strings do:
+    # every one in the image must be exactly the build asked for.
+    builds = set(re.findall(rb"R[0-9]{3}[A-Z]{2}[A-Z0-9]{6}", blob))
+    if builds != {build.encode()}:
+        found = b", ".join(sorted(builds)).decode() or "none"
+        raise FirmwareError(f"image builds ({found}) do not match {build}")
+    return image
+
+
+def fota_open_payload(image):
+    out = struct.pack("<IB", image["crc"], len(image["segments"]))
+    for segment in image["segments"]:
+        out += struct.pack("<BII", segment["id"], len(segment["data"]), segment["crc"])
+    return out
+
+
+def fota_chunk(data, offset, mtu):
+    """One data response: u32 header (offset, top bit set while more of the
+    segment follows) and the bytes. None past the end of the segment."""
+    if offset >= len(data) or mtu <= 0:
+        return None
+    chunk = data[offset:offset + mtu]
+    last = offset + mtu >= len(data)
+    header = offset & 0x7FFFFFFF
+    if not last:
+        header |= 0x80000000
+    return struct.pack("<I", header) + chunk
+
+
+def flash_preflight(state, profile, target, pinned=PINNED_FIRMWARE):
+    """Reasons to refuse installing `target`; empty means safe to start."""
+    reasons = []
+    firmware = state.get("firmware") or {}
+    current = (firmware.get("build") or {}).get("build")
+    offered = (state.get("firmware_update") or {}).get("build")
+    if not state.get("connected"):
+        reasons.append("The earbuds are not connected.")
+    if not profile_get(profile, "fw_model"):
+        reasons.append("This model is not recognised.")
+    if not current:
+        reasons.append("The installed firmware is not known yet.")
+    if not target or target != offered:
+        reasons.append("Only the update the panel offers can be installed.")
+    else:
+        mine, theirs = decode_firmware(current), decode_firmware(target)
+        if not (mine and theirs) or mine["model"] != theirs["model"]:
+            reasons.append("That build is for a different model.")
+        elif firmware_key(theirs) <= firmware_key(mine):
+            reasons.append("Only upgrades are allowed; downgrades can brick the earbuds.")
+        elif target not in pinned:
+            reasons.append("This build is not reviewed for install here; use Galaxy Wearable.")
+    if firmware.get("mismatch") or not (firmware.get("left") and firmware.get("right")):
+        reasons.append("Both earbuds must be connected and on the same firmware.")
+    placement = state.get("placement") or {}
+    wearing = state.get("wearing") or {}
+    for side in ("left", "right"):
+        if placement.get(side) not in FLASH_PLACEMENTS or wearing.get(side) in (0, 4):
+            reasons.append(f"The {side} earbud must be connected and out of the closed case.")
+        level = (state.get("battery") or {}).get(side)
+        if not isinstance(level, int) or level < FLASH_MIN_BATTERY:
+            reasons.append(f"The {side} earbud needs at least {FLASH_MIN_BATTERY}% battery.")
+    return reasons
+
+
+def check_pinned(data, build, pinned=PINNED_FIRMWARE):
+    """The image must be byte for byte the one pinned for `build`."""
+    import hashlib
+    if build not in pinned:
+        raise FirmwareError(f"{build} is not reviewed for install")
+    size, digest = pinned[build]
+    if len(data) != size or hashlib.sha256(data).hexdigest() != digest:
+        raise FirmwareError(f"image does not match the reviewed {build}")
+    return data
+
+
+def fetch_firmware_image(build, progress=lambda done, total: None, pinned=PINNED_FIRMWARE,
+                         clock=time.monotonic):
+    """Download a pinned build into memory, reporting (bytes so far, total).
+    Reads at most the pinned size plus one byte, follows no redirects and
+    gives up after FIRMWARE_DOWNLOAD_DEADLINE; the result is checked against
+    its pin before anything else looks at it."""
+    import urllib.parse
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            raise FirmwareError("the download server redirected; refusing")
+
+    if build not in pinned:
+        raise FirmwareError(f"{build} is not reviewed for install")
+    size = pinned[build][0]
+    request = urllib.request.Request(FIRMWARE_DOWNLOAD_URL.format(build=build), headers={
+        "User-Agent": f"omarchy-galaxy-buds-pro/{plugin_version()}"})
+    opener = urllib.request.build_opener(NoRedirect)
+    deadline = clock() + FIRMWARE_DOWNLOAD_DEADLINE
+    with opener.open(request, timeout=FIRMWARE_CONNECT_TIMEOUT) as response:
+        if urllib.parse.urlsplit(response.geturl()).hostname != FIRMWARE_DOWNLOAD_HOST:
+            raise FirmwareError("unexpected download origin")
+        data = bytearray()
+        while True:
+            chunk = response.read(min(64 * 1024, size + 1 - len(data)) or 1)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > size:
+                raise FirmwareError("download larger than the reviewed image")
+            if clock() > deadline:
+                raise FirmwareError("download took too long")
+            progress(len(data), size)
+    return check_pinned(bytes(data), build, pinned)
+
+
+def lock_payload(shape, enabled, touch):
+    """Touch gestures on/off. Re-sends the gesture bits we last read so turning
+    the touchpad back on restores what was set, not a blank slate."""
+    if shape == "byte":
+        return bytes([0 if enabled else 1])
+    gestures = [touch.get(k, False) for k in ("tap", "double", "triple", "hold")]
+    if enabled and not any(gestures):
+        gestures = [True] * 4
+    return bytes([1 if enabled else 0] + [int(g) for g in gestures]
+                 + [int(touch.get("double_call", False)), int(touch.get("hold_call", False))])
+
+
+def pactl(*args):
+    """pactl or nothing: no PipeWire means no codec section, not a crash."""
+    try:
+        result = subprocess.run(("pactl",) + args, capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
+def address_from_sink(sink_name):
+    """bluez_output.40_35_E6_0C_B4_A1.1 -> 40:35:E6:0C:B4:A1"""
+    text = str(sink_name or "")
+    if not text.startswith("bluez_output."):
+        return ""
+    mac = text[len("bluez_output."):].split(".")[0]
+    parts = mac.split("_")
+    return ":".join(parts).upper() if len(parts) == 6 else ""
+
+
+# How each codec is written down when people talk about it. Anything not
+# listed falls back to the profile name, which is close enough to read.
+CODEC_LABELS = {
+    "sbc": "SBC", "sbc_xq": "SBC-XQ", "aac": "AAC", "ldac": "LDAC",
+    "aptx": "aptX", "aptx_hd": "aptX HD", "aptx_ll": "aptX LL",
+    "aptx_ll_duplex": "aptX LL duplex", "aptx_duplex": "aptX duplex",
+    "faststream": "FastStream", "faststream_duplex": "FastStream duplex",
+    "lc3": "LC3", "opus_05": "Opus", "opus_05_duplex": "Opus duplex",
+    "opus_05_pro": "Opus Pro",
+    # Call codecs, used while something holds the microphone.
+    "msbc": "mSBC", "cvsd": "CVSD", "lc3_swb": "LC3-SWB",
+}
+
+# The two profile families: music, and the low quality mode with a microphone
+# that PipeWire switches to when an app opens one.
+A2DP_PREFIX = "a2dp-sink"
+HEADSET_PREFIX = "headset-head-unit"
+
+
+def pretty_codec(codec):
+    codec = str(codec or "").lower()
+    return CODEC_LABELS.get(codec, codec.replace("_", "-").upper())
+
+
+def codec_label(profile_name, description=""):
+    """What to write on the button.
+
+    The codec is in the profile name for every A2DP profile and for some
+    headset ones, but plain "headset-head-unit" is mSBC and only says so in its
+    description -- which is translated, so only the codec word is read from it."""
+    for prefix in (A2DP_PREFIX + "-", HEADSET_PREFIX + "-"):
+        if profile_name.startswith(prefix):
+            return pretty_codec(profile_name[len(prefix):])
+    match = re.search(r"codec ([A-Za-z0-9_.-]+)", str(description or ""))
+    if match:
+        return pretty_codec(match.group(1).rstrip(")"))
+    # The generic A2DP profile negotiates its codec, so it has none to name.
+    return "Auto" if profile_name == A2DP_PREFIX else ""
+
+
+def active_codec(sinks_json, address):
+    """What the link is actually running on. The generic A2DP profile does not
+    say which codec it negotiated -- the sink does, in api.bluez5.codec."""
+    try:
+        sinks = json.loads(sinks_json or "[]")
+    except ValueError:
+        return ""
+    for sink in sinks:
+        properties = sink.get("properties") or {}
+        if str(properties.get("api.bluez5.address", "")).upper() != address:
+            continue
+        return str(properties.get("api.bluez5.codec") or "")
+    return ""
+
+
+def read_codecs(cards_json, sinks_json, address):
+    """Codec choices for a card, for whichever mode it is in.
+
+    "a2dp-sink" is the automatic music profile -- it has no codec in its name
+    because it picks one, usually the best both ends support; a2dp-sink-<codec>
+    pins that codec instead. Listing only the pinned ones hides the very codec
+    in use: a pair running AAC through the automatic profile has no
+    a2dp-sink-aac to show.
+
+    When an app opens the microphone, PipeWire switches the card to a headset
+    profile and the music codecs stop being choices at all -- so the row follows
+    the mode the card is in and offers the call codecs instead."""
+    card_name = "bluez_card." + address.replace(":", "_")
+    try:
+        cards = json.loads(cards_json or "[]")
+    except ValueError:
+        return None
+    for card in cards:
+        if card.get("name") != card_name:
+            continue
+        active = str(card.get("active_profile") or "")
+        profiles = card.get("profiles") or {}
+        family = HEADSET_PREFIX if active.startswith(HEADSET_PREFIX) else A2DP_PREFIX
+
+        options = []
+        for name, info in profiles.items():
+            if not name.startswith(family):
+                continue
+            if isinstance(info, dict) and info.get("available") == "no":
+                continue
+            label = codec_label(name, isinstance(info, dict) and info.get("description") or "")
+            if not label:
+                continue
+            options.append({"value": name, "label": label})
+        options.sort(key=lambda option: (option["value"] != family, option["label"]))
+
+        codec = active_codec(sinks_json, address)
+        return {"card": card_name,
+                "active": active if active.startswith(family) else "",
+                "codec": pretty_codec(codec),
+                "mode": "headset" if family == HEADSET_PREFIX else "a2dp",
+                "options": options}
+    return None
+
+
+class Daemon:
+    def __init__(self, address=""):
+        self.address = address.upper()
+        self.profile = UNKNOWN_PROFILE
+        self.state = {"connected": False, "model": "unknown", "modes": list(UNKNOWN_PROFILE["modes"])}
+        self.socket = None
+        self.buffer = b""
+        self.stdin_buffer = b""
+        self.device_path = None
+        self.connecting = False
+        self.registered = False
+        self.default_address = ""
+        self.codec_card = ""
+        # Firmware update check: off until the service passes the setting on,
+        # so a user who disabled it never touches the network.
+        self.firmware_check = False
+        self.firmware_checked = {}
+        self.firmware_results = {}
+        self.fetch_firmware = fetch_firmware_list
+        self.spawn = lambda job: threading.Thread(target=job, daemon=True).start()
+        self.defer = lambda job: job()
+        # Firmware installation in progress, or None.
+        self.flash = None
+        self.fetch_image = fetch_firmware_image
+        self.pinned = PINNED_FIRMWARE
+        self.clock = time.monotonic
+
+    # ---- output ----------------------------------------------------------
+    def emit(self):
+        sys.stdout.write(json.dumps(self.state) + "\n")
+        sys.stdout.flush()
+
+    def update(self, values):
+        self.state.update(values)
+        self.emit()
+
+    # ---- bluez -----------------------------------------------------------
+    def find_device(self, bus):
+        import dbus
+        manager = dbus.Interface(bus.get_object("org.bluez", "/"),
+                                 "org.freedesktop.DBus.ObjectManager")
+        candidates = []
+        for path, interfaces in manager.GetManagedObjects().items():
+            device = interfaces.get("org.bluez.Device1")
+            if not device:
+                continue
+            uuids = [str(u).lower() for u in device.get("UUIDs", [])]
+            name = str(device.get("Alias") or device.get("Name") or "")
+            if self.address:
+                if str(device.get("Address", "")).upper() != self.address:
+                    continue
+            elif not looks_like_earbuds(uuids, name):
+                continue
+            candidates.append((str(path), device))
+        return pick_device(candidates, self.default_address)
+
+    def connect(self):
+        """Retry tick: always returns True so the GLib timer stays alive."""
+        import dbus
+        if self.socket or self.connecting or not self.registered:
+            return True
+        bus = self.bus
+        path, device = self.find_device(bus)
+        if not path:
+            self.update({"connected": False, "reason": "not paired"})
+            return True
+        if not device.get("Connected", False):
+            # The earbuds are in the case or off: ConnectProfile here would try
+            # to wake the whole device, so wait for them to come back instead.
+            self.update({"connected": False, "reason": "device offline"})
+            return True
+
+        uuids = [str(u).lower() for u in device.get("UUIDs", [])]
+        name = str(device.get("Alias") or device.get("Name") or "")
+        profile = profile_for(uuids, name)
+        if profile is not self.profile:
+            self.profile = profile
+            self.registered = False
+            self.register_profile()
+            if not self.registered:
+                return True
+
+        if path != self.device_path:
+            # Different earbuds: drop the previous pair's battery, mode and
+            # toggles instead of showing them under the new name.
+            self.state = {"connected": False, "reason": self.state.get("reason", "")}
+            self.codec_card = ""
+        self.device_path = path
+        self.state["model"] = profile["name"]
+        self.state["modes"] = list(profile["modes"])
+        self.state["name"] = name
+        self.state["address"] = str(device.get("Address", "")).upper()
+
+        # Must be async: BlueZ calls NewConnection back on us while this call is
+        # in flight, and a blocking call would sit on the reply until it times
+        # out without ever servicing that callback.
+        self.connecting = True
+        dbus.Interface(bus.get_object("org.bluez", path), "org.bluez.Device1").ConnectProfile(
+            self.profile["uuid"],
+            reply_handler=self.on_connect_reply,
+            error_handler=self.on_connect_error)
+        return True
+
+    def refresh_audio(self):
+        """Ask PipeWire which output is default and what codecs this card has.
+        Runs on the same slow tick as reconnecting -- a card only appears or
+        changes when earbuds come and go."""
+        self.default_address = address_from_sink(pactl("get-default-sink").strip())
+        if self.should_retarget():
+            # Switching the audio output to the other pair is how you say which
+            # pair you mean. Hand the link over instead of staying on the one
+            # that happened to connect first.
+            self.disconnect()
+            self.connect()
+            return True
+        address = self.state.get("address", "")
+        if not address:
+            return True
+        codecs = read_codecs(pactl("-f", "json", "list", "cards"),
+                             pactl("-f", "json", "list", "sinks"), address)
+        is_default = bool(self.default_address) and self.default_address == address
+        changed = {}
+        if codecs != self.state.get("codec"):
+            changed["codec"] = codecs
+        if is_default != self.state.get("is_default_output"):
+            changed["is_default_output"] = is_default
+        if changed:
+            self.update(changed)
+        return True
+
+    def should_retarget(self):
+        """True when the audio output moved to a different pair that is
+        connected and ready to take the link."""
+        if not self.socket or not self.default_address:
+            return False
+        if self.default_address == self.state.get("address", ""):
+            return False
+        path, device = self.find_device(self.bus)
+        return bool(path) and str(device.get("Address", "")).upper() == self.default_address
+
+    def on_connect_reply(self):
+        self.connecting = False
+
+    def on_connect_error(self, error):
+        self.connecting = False
+        if "AlreadyConnected" in str(error) or self.socket:
+            return
+        self.update({"connected": False, "reason": "connect failed"})
+
+    def on_new_connection(self, fd):
+        import socket
+        from gi.repository import GLib
+        self.socket = socket.socket(fileno=fd)
+        self.buffer = b""
+        self.connecting = False
+        self.update({"connected": True, "reason": ""})
+        GLib.io_add_watch(self.socket.fileno(), GLib.PRIORITY_DEFAULT,
+                          GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR,
+                          self.on_readable)
+
+    def disconnect(self):
+        if self.socket:
+            try:
+                self.socket.close()
+            except OSError:
+                pass
+        self.socket = None
+        self.buffer = b""
+        self.connecting = False
+        self.update({"connected": False, "reason": "disconnected"})
+        self.flash_on_disconnect()
+
+    def on_readable(self, fd, condition):
+        from gi.repository import GLib
+        if condition & (GLib.IOCondition.HUP | GLib.IOCondition.ERR):
+            self.disconnect()
+            return False
+        try:
+            chunk = self.socket.recv(4096)
+        except OSError:
+            chunk = b""
+        if not chunk:
+            self.disconnect()
+            return False
+        messages, self.buffer = decode(self.buffer + chunk, profile_get(self.profile, "legacy_frame"))
+        for msg_id, payload in messages:
+            self.handle(msg_id, payload)
+        return True
+
+    def handle(self, msg_id, payload):
+        if DEBUG:
+            print(f"<< {msg_id} {payload.hex(' ')}", file=sys.stderr, flush=True)
+        kind = self.profile["noise"][0]
+        if msg_id in FOTA_MESSAGES:
+            try:
+                self.handle_fota(msg_id, payload)
+            except (IndexError, struct.error):
+                self.flash_fail("The earbuds sent a firmware message this plugin does not understand.")
+            return
+        try:
+            if msg_id == MSG_EXTENDED_STATUS:
+                self.update(parse_extended_status(payload, self.profile))
+            elif msg_id == MSG_STATUS:
+                self.update(parse_status(payload, self.profile))
+            elif msg_id == MSG_NOISE_CONTROLS_UPDATE:
+                self.update({"noise": read_noise(payload[0], "controls")})
+            elif msg_id == MSG_AMBIENT_MODE_UPDATED and kind == "ambient":
+                self.update({"noise": read_noise(payload[0], "ambient")})
+            elif msg_id == MSG_NOISE_REDUCTION_MODE_UPDATE and kind == "anc":
+                self.update({"noise": read_noise(payload[0], "anc")})
+            elif msg_id == MSG_ACK:
+                self.handle_ack(payload[0], payload[1:])
+            elif msg_id == MSG_VERSION_INFO_LONG:
+                self.handle_version(parse_version_info(payload))
+        except IndexError:
+            # A short payload means this firmware lays the message out
+            # differently; keep the link rather than dying on one message.
+            pass
+
+    def handle_version(self, builds):
+        if not builds:
+            return
+        decoded = [d for d in (decode_firmware(b) for b in builds.values()) if d]
+        firmware = dict(builds)
+        if decoded:
+            firmware["build"] = max(decoded, key=firmware_key)
+        # Different builds per bud is what makes Samsung's updater fail.
+        firmware["mismatch"] = len(set(builds.values())) > 1
+        self.update({"firmware": firmware})
+        self.flash_after_version()
+        self.check_firmware()
+
+    def check_firmware(self):
+        """Look up newer firmware in the background, at most every 12 hours
+        per model and build. Returns True so it can double as a GLib timer."""
+        build = ((self.state.get("firmware") or {}).get("build") or {}).get("build")
+        model = profile_get(self.profile, "fw_model")
+        if not (self.firmware_check and build and model):
+            return True
+        now = time.monotonic()
+        last = self.firmware_checked.get((model, build))
+        if last is not None and now - last < FIRMWARE_RECHECK:
+            # Checked recently: re-show that answer (the notice may have been
+            # cleared by turning the check off and on) instead of asking again.
+            if (model, build) in self.firmware_results:
+                self.show_firmware_update(self.firmware_results[(model, build)])
+            return True
+        self.firmware_checked[(model, build)] = now
+        self.update({"firmware_latest": {"status": "checking"}})
+
+        def job():
+            try:
+                entries = self.fetch_firmware(model)
+            except Exception as error:  # network, TLS, JSON: never fatal
+                if DEBUG:
+                    print(f"firmware check failed: {error!r}", file=sys.stderr, flush=True)
+                self.defer(lambda: self.firmware_check_failed(model, build))
+                return
+            self.defer(lambda: self.apply_firmware_list(entries, build))
+
+        self.spawn(job)
+        return True
+
+    def firmware_check_failed(self, model, build):
+        # Let the next connect or hourly tick try again rather than waiting 12 h.
+        self.firmware_checked.pop((model, build), None)
+        if self.firmware_check:
+            self.update({"firmware_latest": {"status": "unknown"}})
+        return False
+
+    def apply_firmware_list(self, entries, build):
+        if not isinstance(entries, list) or not any(decode_firmware(e.get("buildName"))
+                                                    for e in entries if isinstance(e, dict)):
+            return self.firmware_check_failed(profile_get(self.profile, "fw_model"), build)
+        newer = latest_build(entries, build)
+        notice = ({"build": newer["build"], "label": newer["label"],
+                   "installable": newer["build"] in self.pinned} if newer else None)
+        self.firmware_results[(profile_get(self.profile, "fw_model"), build)] = notice
+        current = ((self.state.get("firmware") or {}).get("build") or {}).get("build")
+        if current == build and self.firmware_check:
+            self.show_firmware_update(notice)
+        return False
+
+    def show_firmware_update(self, notice):
+        self.state["firmware_latest"] = {"status": "available" if notice else "latest",
+                                         "checked": int(time.time())}
+        if notice:
+            self.state["firmware_update"] = notice
+        else:
+            self.state.pop("firmware_update", None)
+        self.emit()
+
+    # ---- firmware installation -------------------------------------------
+    def flash_state(self, **values):
+        info = dict(self.state.get("firmware_install") or {})
+        info.update(values)
+        self.update({"firmware_install": info})
+
+    def flash_fail(self, message):
+        if not self.flash:
+            return
+        target = self.flash.get("target")
+        self.flash = None
+        self.flash_state(stage="failed", target=target, error=message)
+
+    def flash_deadline(self, seconds):
+        if self.flash:
+            self.flash["deadline"] = self.clock() + seconds
+
+    def install_firmware(self, target):
+        if self.flash:
+            return
+        reasons = flash_preflight(self.state, self.profile, target, self.pinned)
+        if reasons:
+            self.update({"firmware_install": {"stage": "refused", "target": target, "reasons": reasons}})
+            return
+        self.flash = {"target": target, "stage": "downloading", "image": None, "mtu": 0, "segment": None}
+        self.update({"firmware_install": {"stage": "downloading", "target": target, "percent": 0}})
+        self.flash_deadline(FLASH_REBOOT_TIMEOUT)
+
+        last = [-1]
+
+        def progress(done, total):
+            percent = int(100 * done / total) if total else 0
+            if percent != last[0]:
+                last[0] = percent
+                self.defer(lambda: self.flash_download_progress(target, done, total, percent) or False)
+
+        def job():
+            try:
+                data = check_pinned(self.fetch_image(target, progress), target, self.pinned)
+                image = verify_firmware_image(data, target)
+            except Exception as error:  # network, TLS, verification
+                message = str(error) if isinstance(error, FirmwareError) else "Download failed."
+                self.defer(lambda: self.flash_fail(f"Nothing was sent to the earbuds: {message}") or False)
+                return
+            self.defer(lambda: self.start_transfer(image, target) or False)
+
+        self.spawn(job)
+
+    def flash_download_progress(self, target, done, total, percent):
+        if self.flash and self.flash["target"] == target and self.flash["stage"] == "downloading":
+            self.flash_state(stage="downloading", percent=percent, bytes=done, total=total)
+            self.flash_deadline(FLASH_REBOOT_TIMEOUT)
+
+    def start_transfer(self, image, target):
+        if not self.flash or self.flash["target"] != target:
+            return
+        # Things may have changed during the download: check again.
+        reasons = flash_preflight(self.state, self.profile, target, self.pinned)
+        if reasons:
+            self.flash = None
+            self.update({"firmware_install": {"stage": "refused", "target": target, "reasons": reasons}})
+            return
+        self.flash.update(image=image, stage="opening")
+        self.flash_state(stage="opening", percent=0, bytes=0,
+                         total=sum(len(s["data"]) for s in image["segments"]))
+        self.flash_deadline(20)
+        self.send(MSG_FOTA_OPEN, fota_open_payload(image))
+
+    def handle_fota(self, msg_id, payload):
+        flash = self.flash
+        if not flash or not flash.get("image"):
+            # After an install the earbuds repeat the result on every connect
+            # until someone acknowledges it, as Samsung's app does.
+            if msg_id == MSG_FOTA_RESULT:
+                self.send_flagged(MSG_FOTA_RESULT, bytes([1]), FLAG_RESPONSE)
+            return
+        if msg_id == MSG_FOTA_OPEN:
+            if payload[0] != 0:
+                self.flash_fail(f"The earbuds refused the update (session error {payload[0]}). "
+                                "Their firmware is unchanged.")
+                return
+            flash["stage"] = "waiting"
+            self.flash_state(stage="waiting")
+            self.flash_deadline(20)
+        elif msg_id == MSG_FOTA_CONTROL:
+            control, value = payload[0], struct.unpack_from("<h", payload, 1)[0]
+            if control == 0:
+                flash["mtu"] = max(1, min(value, FOTA_MTU_MAX))
+                self.send_flagged(MSG_FOTA_CONTROL, struct.pack("<Bh", 0, flash["mtu"]), FLAG_RESPONSE)
+            elif control == 1:
+                flash["segment"] = value
+                self.send_flagged(MSG_FOTA_CONTROL, struct.pack("<Bh", 1, value), FLAG_RESPONSE)
+            self.flash_deadline(FLASH_STEP_TIMEOUT)
+        elif msg_id == MSG_FOTA_DOWNLOAD_DATA:
+            offset = struct.unpack_from("<I", payload, 0)[0] & 0x7FFFFFFF
+            count = payload[4]
+            segment = next((s for s in flash["image"]["segments"] if s["id"] == flash["segment"]), None)
+            if segment is None or not flash["mtu"]:
+                self.flash_fail("The earbuds asked for data before the transfer was set up.")
+                return
+            if flash["stage"] != "transferring":
+                flash["stage"] = "transferring"
+                flash["started"] = self.clock()
+            data, mtu = segment["data"], flash["mtu"]
+            for index in range(count):
+                chunk = fota_chunk(data, offset + mtu * index, mtu)
+                if chunk is None:
+                    break
+                self.send_flagged(MSG_FOTA_DOWNLOAD_DATA, chunk, FLAG_RESPONSE | FLAG_FRAGMENT, quiet=True)
+            sent = sum(len(s["data"]) for s in flash["image"]["segments"] if s["id"] < segment["id"])
+            total = sum(len(s["data"]) for s in flash["image"]["segments"])
+            done = sent + min(len(data), offset + mtu * count)
+            elapsed = self.clock() - flash["started"]
+            # Estimate from the rate so far, once there is enough of it to mean something.
+            eta = int(elapsed * (total - done) / done) if done and elapsed >= 3 else None
+            self.flash_state(stage="transferring", percent=min(99, int(100 * done / total)),
+                             bytes=done, total=total, eta=eta)
+            self.flash_deadline(FLASH_STEP_TIMEOUT)
+        elif msg_id == MSG_FOTA_UPDATE:
+            if payload[0] == 0:
+                self.flash_state(stage=flash["stage"], percent=min(99, payload[1]))
+                self.flash_deadline(FLASH_STEP_TIMEOUT)
+            elif payload[0] == 1:
+                self.send_flagged(MSG_FOTA_UPDATE, bytes([1]), FLAG_RESPONSE)
+                if payload[1] != 0:
+                    self.flash_fail(f"The earbuds could not store the update (error {payload[2]}). "
+                                    "Their firmware is unchanged.")
+                    return
+                flash["stage"] = "installing"
+                self.flash_state(stage="installing", percent=100)
+                self.flash_deadline(FLASH_REBOOT_TIMEOUT)
+        elif msg_id == MSG_FOTA_RESULT:
+            self.send_flagged(MSG_FOTA_RESULT, bytes([1]), FLAG_RESPONSE)
+            if payload[0] != 0:
+                self.flash_fail(f"The earbuds rejected the update after checking it (error {payload[1]}). "
+                                "Their firmware is unchanged.")
+                return
+            flash["stage"] = "rebooting"
+            self.flash_state(stage="rebooting", percent=100)
+            self.flash_deadline(FLASH_REBOOT_TIMEOUT)
+
+    def flash_after_version(self):
+        """Called with every version report: after an install, it is the proof."""
+        if not self.flash or self.flash["stage"] not in ("installing", "rebooting"):
+            return
+        target = self.flash["target"]
+        current = ((self.state.get("firmware") or {}).get("build") or {}).get("build")
+        if current == target:
+            self.flash = None
+            self.state.pop("firmware_update", None)
+            self.firmware_checked.clear()
+            self.update({"firmware_install": {"stage": "done", "target": target}})
+        elif self.flash.get("seen_disconnect"):
+            self.flash_fail(f"The earbuds restarted on {current}; the update did not apply.")
+
+    def flash_on_disconnect(self):
+        if not self.flash:
+            return
+        if self.flash["stage"] in ("installing", "rebooting"):
+            self.flash["seen_disconnect"] = True   # expected: they restart to install
+        elif self.flash["stage"] != "downloading":
+            self.flash_fail("The connection dropped during the transfer. "
+                            "The earbuds cancel it themselves and keep their current firmware.")
+
+    def cancel_firmware(self):
+        if not self.flash or self.flash["stage"] not in FLASH_CANCELLABLE:
+            return
+        stage = self.flash["stage"]
+        self.flash_fail("Cancelled. The earbuds keep their current firmware.")
+        # Dropping the link is how a transfer is aborted; the retry timer
+        # reconnects a few seconds later.
+        if stage != "downloading":
+            self.disconnect()
+
+    def flash_watchdog(self):
+        if self.flash and self.clock() > self.flash.get("deadline", float("inf")):
+            stage = self.flash["stage"]
+            if stage in ("installing", "rebooting"):
+                self.flash_fail("The earbuds did not come back with the new firmware. Put them in the "
+                                "case for a minute, take them out, and check the version shown here.")
+            else:
+                self.flash_fail("The earbuds stopped answering. They keep their current firmware.")
+                if stage != "downloading":
+                    self.disconnect()
+        return True
+
+    def send_flagged(self, msg_id, payload, flags, quiet=False):
+        if not self.socket:
+            return
+        if DEBUG and not quiet:
+            print(f">> {msg_id} {bytes(payload).hex(' ')} flags={flags:#x}", file=sys.stderr, flush=True)
+        try:
+            self.socket.sendall(encode(msg_id, payload, profile_get(self.profile, "legacy_frame"), flags))
+        except OSError:
+            self.disconnect()
+
+    def handle_ack(self, acked, params):
+        """The earbuds answer our commands with an ack carrying the value they
+        actually applied, so the UI reflects the device rather than our guess."""
+        if not params:
+            return
+        if acked == MSG_NOISE_CONTROLS:
+            # Some firmware acks with 0 whatever it applied; the real mode
+            # follows in NOISE_CONTROLS_UPDATE.
+            if profile_get(self.profile, "noise_ack_receipt"):
+                return
+            self.update({"noise": read_noise(params[0], "controls")})
+        elif acked == MSG_SET_AMBIENT_MODE:
+            self.update({"noise": read_noise(params[0], "ambient")})
+        elif acked == MSG_SET_NOISE_REDUCTION:
+            self.update({"noise": read_noise(params[0], "anc")})
+        elif acked == MSG_SET_SPATIAL_AUDIO:
+            self.update({"spatial": params[0] == 1})
+        elif acked == MSG_SET_SEAMLESS_CONNECTION:
+            self.update({"seamless": params[0] == 0})
+        elif acked == MSG_LOCK_TOUCHPAD:
+            touch = dict(self.state.get("touch", {}))
+            touch["enabled"] = params[0] == 1
+            self.update({"touch": touch})
+
+    def send(self, msg_id, payload=b""):
+        if not self.socket:
+            return
+        if DEBUG:
+            print(f">> {msg_id} {bytes(payload).hex(' ')}", file=sys.stderr, flush=True)
+        try:
+            self.socket.sendall(encode(msg_id, payload, profile_get(self.profile, "legacy_frame")))
+        except OSError:
+            self.disconnect()
+
+    # ---- commands --------------------------------------------------------
+    def command(self, line):
+        try:
+            request = json.loads(line)
+        except ValueError:
+            return
+        # An exception here would escape the stdin watch and GLib would drop
+        # it, silently ending every later command.
+        if not isinstance(request, dict):
+            return
+        name = request.get("cmd")
+        value = request.get("value")
+        if name == "firmware_install":
+            self.install_firmware(value if isinstance(value, str) else "")
+            return
+        if name == "firmware_cancel":
+            self.cancel_firmware()
+            return
+        if name == "firmware_dismiss":
+            if not self.flash and self.state.pop("firmware_install", None):
+                self.emit()
+            return
+        # Nothing else may talk to the earbuds while they take a firmware image.
+        if self.flash and name != "refresh":
+            return
+        modes = self.state.get("modes") or list(UNKNOWN_PROFILE["modes"])
+        kind = self.profile["noise"][0]
+
+        if name == "noise" and value in modes:
+            self.send(*noise_command(kind, value))
+        elif name == "cycle":
+            current = self.state.get("noise")
+            index = modes.index(current) + 1 if current in modes else 0
+            self.send(*noise_command(kind, modes[index % len(modes)]))
+        elif name == "spatial" and self.profile["spatial"]:
+            self.send(MSG_SET_SPATIAL_AUDIO, bytes([1 if value else 0]))
+        elif name == "touch":
+            self.send(MSG_LOCK_TOUCHPAD,
+                      lock_payload(self.profile["touch"][0], bool(value), self.state.get("touch", {})))
+        elif name == "seamless" and self.profile["seamless"]:
+            # Inverted on the wire: 0 enables it.
+            self.send(MSG_SET_SEAMLESS_CONNECTION, bytes([0 if value else 1]))
+        elif name == "codec" and value:
+            card = (self.state.get("codec") or {}).get("card")
+            if card:
+                pactl("set-card-profile", card, str(value))
+                self.refresh_audio()
+        elif name == "refresh":
+            self.emit()
+        elif name == "firmware_check":
+            self.firmware_check = value is True
+            if self.firmware_check:
+                self.check_firmware()
+            else:
+                self.state.pop("firmware_update", None)
+                self.update({"firmware_latest": {"status": "off"}})
+
+    def on_stdin(self, fd, condition):
+        # Read the fd directly rather than through sys.stdin: readline() pulls a
+        # whole block into Python's buffer, so a second command arriving in the
+        # same chunk would sit there unseen until the next write woke us up.
+        try:
+            chunk = os.read(fd, 4096)
+        except BlockingIOError:
+            return True
+        if not chunk:
+            self.loop.quit()
+            return False
+        self.stdin_buffer += chunk
+        while b"\n" in self.stdin_buffer:
+            line, self.stdin_buffer = self.stdin_buffer.split(b"\n", 1)
+            self.command(line.decode("utf-8", "replace").strip())
+        return True
+
+    def register_profile(self):
+        """BlueZ allows one registration per UUID, so a helper left over from a
+        previous shell instance makes this fail. Keep retrying instead of dying:
+        the moment the old one exits, this one takes over."""
+        import dbus
+        if self.registered:
+            return False
+        try:
+            self.manager.UnregisterProfile(self.profile_path)
+        except dbus.DBusException:
+            pass
+        uuid = self.profile["uuid"]
+        try:
+            self.manager.RegisterProfile(self.profile_path, uuid,
+                                         {"Role": "client", "Service": uuid,
+                                          "Name": "omarchy-galaxy-buds"})
+            self.registered = True
+        except dbus.DBusException:
+            self.update({"connected": False, "reason": "profile busy"})
+        return True
+
+    # ---- lifecycle -------------------------------------------------------
+    def run(self):
+        import dbus
+        import dbus.mainloop.glib
+        import dbus.service
+        from gi.repository import GLib
+
+        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+        self.bus = dbus.SystemBus()
+        self.loop = GLib.MainLoop()
+        daemon = self
+
+        class BluezProfile(dbus.service.Object):
+            @dbus.service.method("org.bluez.Profile1", in_signature="", out_signature="")
+            def Release(self):
+                pass
+
+            @dbus.service.method("org.bluez.Profile1", in_signature="oha{sv}", out_signature="")
+            def NewConnection(self, path, fd, properties):
+                daemon.on_new_connection(fd.take())
+
+            @dbus.service.method("org.bluez.Profile1", in_signature="o", out_signature="")
+            def RequestDisconnection(self, path):
+                daemon.disconnect()
+
+        self.profile_path = "/omarchy/galaxybuds"
+        BluezProfile(self.bus, self.profile_path)
+        self.manager = dbus.Interface(self.bus.get_object("org.bluez", "/org/bluez"),
+                                      "org.bluez.ProfileManager1")
+
+        # Which service to register depends on the model, and the model is only
+        # known once a device is found, so start on the newest and let connect()
+        # re-register if the paired earbuds turn out to be an older generation.
+        path, device = self.find_device(self.bus)
+        if path:
+            self.profile = profile_for([str(u).lower() for u in device.get("UUIDs", [])],
+                                       device.get("Alias") or device.get("Name") or "")
+        self.register_profile()
+
+        GLib.io_add_watch(sys.stdin.fileno(), GLib.PRIORITY_DEFAULT,
+                          GLib.IOCondition.IN | GLib.IOCondition.HUP, self.on_stdin)
+        # The lookup runs on a worker thread; its result joins the main loop.
+        self.defer = lambda job: GLib.idle_add(job)
+        GLib.timeout_add_seconds(3600, self.check_firmware)
+        GLib.timeout_add_seconds(2, self.flash_watchdog)
+        GLib.timeout_add_seconds(5, self.register_profile)
+        self.connect()
+        self.refresh_audio()
+        GLib.timeout_add_seconds(5, self.connect)
+        GLib.timeout_add_seconds(5, self.refresh_audio)
+        self.loop.run()
+
+
+def main(argv):
+    if len(argv) > 1 and argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        print("\nusage: galaxy-buds [--address AA:BB:CC:DD:EE:FF]")
+        return 0
+    address = ""
+    if "--address" in argv:
+        address = argv[argv.index("--address") + 1]
+    address = address or os.environ.get("GALAXY_BUDS_ADDRESS", "")
+    Daemon(address).run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

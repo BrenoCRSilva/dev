@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "pontual.tray",
+  "name": "Omarchy system tray placement adapter",
+  "version": "1.0.0",
+  "author": "Pontual",
+  "description": "Installed Omarchy tray widget under a movable user id",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "System tray",
+    "description": "Native Omarchy tray with user-controlled placement",
+    "category": "Status",
+    "allowMultiple": false
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "bar": {
+    "centerAnchor": "omarchy.clock",
+    "id": "omarchy.bar",
+    "layout": {
+      "center": [
+        {
+          "id": "omarchy.media"
+        },
+        {
+          "id": "pontual.tray"
+        },
+        {
+          "id": "omarchy.clock",
+          "format": "ddd HH:mm:ss",
+          "formatAlt": "d MMM yyyy HH:mm:ss"
+        },
+        {
+          "id": "foamy.notification-center"
+        }
+      ],
+      "left": [
+        {
+          "id": "omarchy.menu"
+        },
+        {
+          "id": "pontual.workspaces"
+        },
+        {
+          "id": "sys-monitor"
+        }
+      ],
+      "right": [
+        {
+          "id": "omarchy.indicators"
+        },
+        {
+          "id": "omarchy.keyboard-layout"
+        },
+        {
+          "id": "omarchy.agents"
+        },
+        {
+          "id": "omarchy.bluetooth"
+        },
+        {
+          "id": "io.github.akafrmn.galaxy-buds-pro"
+        },
+        {
+          "id": "omarchy.network"
+        },
+        {
+          "id": "omarchy.audio"
+        },
+        {
+          "id": "omarchy.monitor"
+        },
+        {
+          "id": "omarchy.system-update"
+        },
+        {
+          "id": "omarchy.power"
+        }
+      ]
+    },
+    "position": "top",
+    "transparent": false
+  },
+  "idle": {
+    "lock": 300,
+    "screensaver": 150
+  },
+  "plugins": [
+    {
+      "id": "pontual.tasks"
+    },
+    {
+      "id": "pontual.search"
+    },
+    {
+      "id": "foamy.notification-center"
+    }
+  ],
+  "version": 1
+}

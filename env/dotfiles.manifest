@@ -1,0 +1,22 @@
+# Authored user configuration, paths relative to $HOME.
+.zshrc
+.p10k.zsh
+.config/ghostty
+.config/hypr
+.config/omarchy/backgrounds
+.config/omarchy/branding
+.config/omarchy/bin
+.config/omarchy/extensions
+.config/omarchy/hooks
+.config/omarchy/plugins
+.config/omarchy/shell.json
+.config/omarchy/themes
+.config/omarchy/themed
+.config/herdr/config.toml
+.config/tmux
+.config/nvim
+.config/mimeapps.list
+.local/share/applications/io.github.lgse.Strata.desktop
+.local/share/dbus-1/services/io.github.lgse.Strata.FileManager1.service
+!.config/hypr/input.lua
+!.config/hypr/monitors.lua
