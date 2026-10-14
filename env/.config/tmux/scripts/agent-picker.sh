@@ -14,16 +14,16 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 # Providers, in display order.
 providers=(claude codex opencode)
 
-# --- styling (Rose Pine) ---------------------------------------------------
+# --- styling (terminal ANSI colors; Ghostty inherits Omarchy's palette) ---
 if [[ -t 1 ]]; then
     c_reset=$'\e[0m'; c_dim=$'\e[2m'; c_bold=$'\e[1m'
-    c_rose=$'\e[38;2;235;188;186m'    # rose      — heading
-    c_iris=$'\e[38;2;196;167;231m'    # iris      — selection
-    c_pine=$'\e[38;2;49;116;143m'     # pine      — index
-    c_muted=$'\e[38;2;110;106;134m'   # muted     — hints
-    c_text=$'\e[38;2;224;222;244m'    # text
+    c_heading=$'\e[34m'    # blue — heading
+    c_selected=$'\e[94m'   # bright blue — selection
+    c_index=$'\e[96m'      # bright cyan — index
+    c_muted=$'\e[90m'      # bright black — hints
+    c_text=$'\e[39m'       # default foreground
 else
-    c_reset=; c_dim=; c_bold=; c_rose=; c_iris=; c_pine=; c_muted=; c_text=
+    c_reset=; c_dim=; c_bold=; c_heading=; c_selected=; c_index=; c_muted=; c_text=
 fi
 
 hide_cursor() { printf '\e[?25l' >&2; }
@@ -38,7 +38,7 @@ pick_provider() {
     hide_cursor
     trap show_cursor RETURN
 
-    printf '\n  %s%spick your agentic code provider%s\n' "$c_bold" "$c_rose" "$c_reset" >&2
+    printf '\n  %s%spick your agentic code provider%s\n' "$c_bold" "$c_heading" "$c_reset" >&2
     printf '  %s↑/↓ navigate · 1-%d jump · enter confirm · q cancel%s\n\n' \
         "$c_muted" "$n" "$c_reset" >&2
 
@@ -47,10 +47,10 @@ pick_provider() {
         for ((i = 0; i < n; i++)); do
             if ((i == sel)); then
                 printf '  %s%s ❯ %s%-12s%s\e[K\n' \
-                    "$c_iris" "$c_bold" "" "${providers[i]}" "$c_reset" >&2
+                    "$c_selected" "$c_bold" "" "${providers[i]}" "$c_reset" >&2
             else
                 printf '    %s%d%s %s%-12s%s\e[K\n' \
-                    "$c_pine" "$((i + 1))" "$c_reset" "$c_text" "${providers[i]}" "$c_reset" >&2
+                    "$c_index" "$((i + 1))" "$c_reset" "$c_text" "${providers[i]}" "$c_reset" >&2
             fi
         done
 
@@ -83,7 +83,7 @@ pick_provider() {
 ask_resume() {
     local agent=$1 key
     printf '\n  %sresume last %s%s%s session? %s[y/N]%s ' \
-        "$c_text" "$c_iris" "$agent" "$c_text" "$c_muted" "$c_reset" >&2
+        "$c_text" "$c_selected" "$agent" "$c_text" "$c_muted" "$c_reset" >&2
     IFS= read -rsn1 key
     printf '\n' >&2
     [[ $key == y || $key == Y ]]

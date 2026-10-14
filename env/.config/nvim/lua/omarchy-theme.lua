@@ -4,7 +4,7 @@
 --
 -- Omarchy owns the current theme slug and generated palette. Map supported
 -- slugs to colorschemes already present in the personal Lazy catalog. Unknown
--- themes keep their palette and use Rose Pine as a compatible fallback.
+-- themes keep their Omarchy palette and use Rose Pine as a compatible fallback.
 local M = {}
 
 -- Map a theme's `nvim_colorscheme` (e.g. "tokyonight-night", "github_dark_default")
@@ -24,16 +24,6 @@ local PLUGIN_FOR = {
 	["catppuccin"] = "catppuccin",
 }
 
-local THEME_COLORSCHEMES = {
-	catppuccin = { dark = "catppuccin-mocha", light = "catppuccin-latte" },
-	["catppuccin-latte"] = { light = "catppuccin-latte" },
-	gruvbox = { dark = "gruvbox" },
-	kanagawa = { dark = "kanagawa-wave", light = "kanagawa-lotus" },
-	nord = { dark = "nord" },
-	["rose-pine"] = { dark = "rose-pine-main", light = "rose-pine-dawn" },
-	["tokyo-night"] = { dark = "tokyonight-night", light = "tokyonight-day" },
-}
-
 local function load_colorscheme_plugin(cs)
 	for prefix, plugin in pairs(PLUGIN_FOR) do
 		if cs:sub(1, #prefix) == prefix then
@@ -44,25 +34,6 @@ local function load_colorscheme_plugin(cs)
 		end
 	end
 end
-
--- Static fallback for hosts without Omarchy or before its first theme set.
-local FALLBACK = {
-	mode = "dark",
-	background = "#191724",
-	surface = "#26233a",
-	foreground = "#e0def4",
-	subtle = "#908caa",
-	muted = "#6e6a86",
-	red = "#eb6f92",
-	yellow = "#f6c177",
-	cyan = "#9ccfd8",
-	green = "#31748f",
-	blue = "#9ccfd8",
-	magenta = "#c4a7e7",
-	base = "#191724",
-	overlay = "#26233a",
-	text = "#e0def4",
-}
 
 local function hex(n)
 	return type(n) == "number" and string.format("#%06x", n) or nil
@@ -115,7 +86,7 @@ local function post_apply(p)
 	end
 
 	-- Folds always render in the active scheme's String color.
-	local sfg = group_fg("String", p.green or "#9ece6a")
+	local sfg = group_fg("String", p.green)
 	hl("Folded", { fg = sfg, bg = "NONE", bold = true })
 	hl("FoldColumn", { fg = sfg, bg = "NONE" })
 	hl("UfoFoldedFg", { fg = sfg, bold = true })
@@ -134,42 +105,16 @@ end
 -- Read the generated palette fresh (bypassing the module cache so reloads pick
 -- up the new colors).
 function M.palette()
-	local state = vim.env.XDG_STATE_HOME
-	if not state or state == "" then
-		state = vim.fn.expand("~/.local/state")
-	end
-	local path = state .. "/omarchy/current/theme/nvim-palette.lua"
-	local theme_path = state .. "/omarchy/current/theme.name"
-	local loader = loadfile(path)
-	if loader then
-		local ok, p = pcall(loader)
-		if ok and type(p) == "table" and p.schema_version == 1 then
-			local valid = true
-			for _, key in ipairs({ "background", "surface", "foreground", "subtle", "muted", "red", "yellow", "green", "cyan", "blue", "magenta" }) do
-				if type(p[key]) ~= "string" or not p[key]:match("^#%x%x%x%x%x%x$") then
-					valid = false
-					break
-				end
-			end
-			valid = valid and (p.mode == "dark" or p.mode == "light")
-			if valid then
-				local theme_name = vim.fn.readfile(theme_path)[1]
-				if type(theme_name) == "string" and theme_name:match("^[%w][%w%-]*$") then
-					p.theme_name = theme_name
-					local choices = THEME_COLORSCHEMES[theme_name]
-					p.colorscheme = choices and choices[p.mode] or nil
-				end
-				p.base, p.overlay, p.text = p.background, p.surface, p.foreground
-				return p
-			end
-		end
-	end
-	return FALLBACK
+	return require("omarchy-colors").read()
 end
 
--- Build, apply, and overlay the active palette onto rose-pine.
+-- Apply only a palette staged by Omarchy. With no staged state, keep the
+-- editor's current colorscheme/highlights instead of imposing a private one.
 function M.apply()
 	local p = M.palette()
+	if not p then
+		return false
+	end
 	vim.o.background = p.mode
 
 	-- Path 1: native colorscheme declared by the theme → load its plugin (lazy) and
@@ -179,8 +124,8 @@ function M.apply()
 		local ok = pcall(vim.cmd.colorscheme, p.colorscheme)
 		if ok then
 			post_apply(p)
-			vim.api.nvim_exec_autocmds("User", { pattern = "PontuarchThemeApplied", modeline = false })
-			return
+			vim.api.nvim_exec_autocmds("User", { pattern = "OmarchyThemeApplied", modeline = false })
+			return true
 		end
 	end
 
@@ -231,11 +176,12 @@ function M.apply()
 
 	-- Transparency + folds-as-string + grapple (shared with the native path).
 	post_apply(p)
-	vim.api.nvim_exec_autocmds("User", { pattern = "PontuarchThemeApplied", modeline = false })
+	vim.api.nvim_exec_autocmds("User", { pattern = "OmarchyThemeApplied", modeline = false })
+	return true
 end
 
 -- Re-read the staged Omarchy palette and re-apply. Called by the user
--- theme-set hook over existing nvim sockets; also exposed as :PontuarchReload.
+-- theme-set hook over existing Neovim sockets; also exposed as :OmarchyThemeReload.
 function M.reload()
 	M.apply()
 end

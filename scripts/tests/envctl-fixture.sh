@@ -17,7 +17,7 @@ cat > "$root/env/dotfiles.manifest" <<'EOF'
 EOF
 printf 'one\n' > "$root/env/.config/app/main.conf"
 printf 'ignored\n' > "$root/env/.config/app/node_modules/pkg/index.js"
-printf 'generated\n' > "$root/env/.config/nvim/lua/pontuarch-palette.lua"
+printf 'generated\n' > "$root/env/.config/nvim/lua/fixture-palette.lua"
 printf 'target\n' > "$root/env/.config/app/real.conf"
 ln -s real.conf "$root/env/.config/app/link.conf"
 run() { DOTFILES_ROOT="$root" DOTFILES_HOME="$home" DOTFILES_STATE_DIR="$state" "$root/scripts/envctl" "$@"; }
@@ -39,7 +39,7 @@ run apply > "$tmp/apply.out"
 [[ "$(cat "$home/.config/app/main.conf")" == one ]]
 [[ -L "$home/.config/app/link.conf" ]]
 [[ ! -e "$home/.config/app/node_modules/pkg/index.js" ]]
-[[ ! -e "$home/.config/nvim/lua/pontuarch-palette.lua" ]]
+[[ ! -e "$home/.config/nvim/lua/fixture-palette.lua" ]]
 apply_backup="$(sed -n 's/^Backups: //p' "$tmp/apply.out")"
 [[ "$(stat -c %a "$apply_backup")" == 700 ]]
 [[ "$(stat -c %a "$(dirname "$(dirname "$apply_backup")")")" == 700 ]]
@@ -199,5 +199,46 @@ run prune .config/app/retired.conf > "$tmp/prune.out"
 prune_backup="$(sed -n 's/^Prune backup: //p' "$tmp/prune.out")"
 run restore "$prune_backup" >/dev/null
 [[ "$(cat "$home/.config/app/retired.conf")" == retired ]]
+
+# The sync workflow is constrained to the canonical main checkout and uses a
+# fixed capture/commit/push contract. A fake Git executable keeps the fixture
+# fully local and proves it cannot publish real data.
+sync_home="$tmp/sync-home"
+sync_root="$sync_home/personal/projects/dotfiles"
+sync_live="$tmp/sync-live"
+sync_state="$tmp/sync-state"
+fake_bin="$tmp/fake-bin"
+mkdir -p "$sync_root/scripts" "$sync_root/env/.config/app" "$sync_root/env/hosts/omarchy-workstation/.config/app" "$sync_live" "$fake_bin"
+cp "$repo/scripts/envctl" "$sync_root/scripts/envctl"
+cp "$repo/scripts/sync.sh" "$sync_root/scripts/sync.sh"
+printf '.config/app\n' > "$sync_root/env/dotfiles.manifest"
+printf '.config/app/host.conf\n' > "$sync_root/env/hosts/omarchy-workstation/dotfiles.manifest"
+printf 'authored\n' > "$sync_root/env/hosts/omarchy-workstation/.config/app/host.conf"
+cat > "$fake_bin/git" <<'EOF'
+#!/usr/bin/env bash
+set -e
+shift 2
+case "$*" in
+  'rev-parse --show-toplevel') printf '%s\n' "$SYNC_ROOT" ;;
+  'rev-parse --absolute-git-dir') printf '%s/.git\n' "$SYNC_ROOT" ;;
+  'branch --show-current') printf 'main\n' ;;
+  'remote get-url origin') printf 'git@github.com:BrenoCRSilva/dev.git\n' ;;
+  'diff --cached --check') exit 0 ;;
+  'diff --cached --quiet') exit 1 ;;
+  'add -A -- env scripts README.md .gitignore docs') printf 'add\n' >> "$SYNC_GIT_LOG" ;;
+  'commit -m automated dev commit') printf 'commit automated dev commit\n' >> "$SYNC_GIT_LOG" ;;
+  'push origin main') printf 'push origin main\n' >> "$SYNC_GIT_LOG" ;;
+  *) printf 'unexpected fake git invocation: %s\n' "$*" >&2; exit 99 ;;
+esac
+EOF
+chmod +x "$fake_bin/git"
+SYNC_GIT_LOG="$tmp/git.log" SYNC_ROOT="$sync_root" HOME="$sync_home" DOTFILES_HOME="$sync_live" DOTFILES_STATE_DIR="$sync_state" PATH="$fake_bin:$PATH" \
+  "$sync_root/scripts/sync.sh" > "$tmp/sync.out"
+[[ "$(cat "$sync_root/env/hosts/omarchy-workstation/.config/app/host.conf")" == 'authored' ]]
+[[ "$(cat "$tmp/git.log")" == $'add\ncommit automated dev commit\npush origin main' ]]
+if HOME="$sync_home" "$root/scripts/envctl" sync > "$tmp/noncanonical-sync.out" 2>&1; then
+  printf 'expected sync to reject a task/noncanonical checkout\n' >&2; exit 1
+fi
+[[ "$(cat "$tmp/noncanonical-sync.out")" == *'allowed only from the canonical checkout'* ]]
 
 printf 'envctl fixture checks passed\n'

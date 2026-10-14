@@ -8,7 +8,7 @@ project_dirs=(
     "$HOME/workspace/projects"
 )
 nvim_dir=(
-    "$HOME/personal/dev/env/.config/nvim"
+    "$HOME/personal/projects/dotfiles/env/.config/nvim"
 )
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
 DIRS_FILE="$CONFIG_DIR/tmux-sessionizer/directories"
@@ -46,14 +46,14 @@ fi
 start_session_ssh_agent() {
     local name="$1"
     local safe_name="${name//[^A-Za-z0-9_-]/_}"
-    SSH_AGENT_DIR="/tmp/pontuarch-ssh-agent-${safe_name}"
+    SSH_AGENT_DIR="/tmp/dotfiles-ssh-agent-${safe_name}"
     SSH_AGENT_SOCK="$SSH_AGENT_DIR/agent.sock"
     mkdir -p "$SSH_AGENT_DIR"
     rm -f "$SSH_AGENT_SOCK"
 
     eval "$(ssh-agent -s -a "$SSH_AGENT_SOCK")"
     export SSH_AGENT_DIR
-    export SSH_ASKPASS="${SSH_ASKPASS:-$HOME/.local/bin/pontuarch-askpass}"
+    export SSH_ASKPASS="${SSH_ASKPASS:-ssh-askpass}"
     export SSH_ASKPASS_REQUIRE=force
 }
 

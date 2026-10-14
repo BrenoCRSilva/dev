@@ -9,6 +9,7 @@ cat > "$tmp/check.lua" <<'LUA'
 local repo = os.getenv("DOTFILES_REPO")
 local lspconfig = os.getenv("NVIM_LSPCONFIG")
 vim.opt.rtp:prepend(lspconfig)
+package.path = repo .. "/env/.config/nvim/lua/?.lua;" .. package.path
 
 local captured = {}
 local notices = {}

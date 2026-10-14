@@ -1,2 +1,4 @@
 #!/usr/bin/env bash
-exec "$(dirname "${BASH_SOURCE[0]}")/envctl" sync "$@"
+set -euo pipefail
+ROOT="$(realpath -e "$(dirname "${BASH_SOURCE[0]}")/..")"
+exec "$ROOT/scripts/envctl" sync "$@"

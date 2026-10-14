@@ -15,15 +15,27 @@ ACTION="${1:-help}"
 shift || true
 HOST=""
 DRY=0
-PUSH=0
 POSITIONAL=()
 say() { printf '%s\n' "$*"; }
 die() { say "$*" >&2; exit 2; }
+require_canonical_sync_checkout() {
+  local canonical top git_dir branch origin
+  canonical="$(realpath -e "$HOME/personal/projects/dotfiles" 2>/dev/null)" || die "Canonical checkout is missing: ~/personal/projects/dotfiles"
+  [[ "$ROOT" == "$canonical" ]] || die "sync is allowed only from the canonical checkout, not a task worktree"
+  top="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null)" || die "sync requires a Git checkout"
+  top="$(realpath -e "$top")"
+  [[ "$top" == "$canonical" ]] || die "sync is allowed only from the canonical checkout"
+  git_dir="$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null)" || die "Could not resolve Git metadata"
+  case "$git_dir" in */.git/worktrees/*) die "sync refuses linked task worktrees" ;; esac
+  branch="$(git -C "$ROOT" branch --show-current 2>/dev/null)"
+  [[ "$branch" == main ]] || die "sync requires branch main (current: ${branch:-detached})"
+  origin="$(git -C "$ROOT" remote get-url origin 2>/dev/null)" || die "sync requires origin git@github.com:BrenoCRSilva/dev.git"
+  [[ "$origin" == git@github.com:BrenoCRSilva/dev.git ]] || die "sync refuses unexpected origin URL"
+}
 while (($#)); do
   case "$1" in
     --host) (($# >= 2)) || { printf '%s\n' '--host needs a name' >&2; exit 2; }; HOST="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
-    --push) PUSH=1; shift ;;
     --) shift; POSITIONAL+=("$@"); break ;;
     -*) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
     *) POSITIONAL+=("$1"); shift ;;
@@ -45,7 +57,7 @@ excluded() {
     */.git/*|*/node_modules/*|*/.cache/*|*/cache/*|*/build/*|*/dist/*|*/target/*|*/tests/*|*/test/*|*/__pycache__/*) return 0 ;;
   esac
   case "$1" in
-    .config/nvim/lua/pontuarch-palette.lua|.config/nvim/lua/plugins/vectorcode.lua|.config/ghostty/themes/pontuarch|.config/tmux/themes/scripts/pontuarch-colors.sh|.config/herdr/sessions/*|.config/herdr/auth/*|.config/herdr/runtime/*|.env|.env.*|*/.env|*/.env.*|*credentials*|*secret*) return 0 ;;
+    .config/nvim/lua/*-palette.lua|.config/nvim/lua/plugins/vectorcode.lua|.config/ghostty/themes/*|.config/tmux/themes/scripts/*-colors.sh|.config/herdr/sessions/*|.config/herdr/auth/*|.config/herdr/runtime/*|.env|.env.*|*/.env|*/.env.*|*credentials*|*secret*) return 0 ;;
   esac
   return 1
 }
@@ -394,7 +406,7 @@ capture_action() {
 
 case "$ACTION" in
   help)
-    say "Usage: scripts/envctl {plan [apply|capture] [--host NAME]|diff [--host NAME]|apply|capture|restore BACKUP|prune PATH...|backup|sync [message] [--push]}"
+    say "Usage: scripts/envctl {plan [apply|capture] [--host NAME]|diff [--host NAME]|apply|capture|restore BACKUP|prune PATH...|backup|sync}"
     ;;
   plan)
     [[ ${#POSITIONAL[@]} -le 1 ]] || die "plan accepts one target: apply or capture"
@@ -466,12 +478,17 @@ case "$ACTION" in
     say "Restored $scope paths from $backup"
     ;;
   sync)
-    message="${POSITIONAL[*]:-Sync authored dotfiles}"
+    [[ ${#POSITIONAL[@]} -eq 0 ]] || die "sync takes no arguments; it captures, commits, and pushes from the canonical main checkout"
+    require_canonical_sync_checkout
+    "$ROOT/scripts/envctl" capture --host omarchy-workstation
     git -C "$ROOT" add -A -- env scripts README.md .gitignore docs || die "Could not stage authored changes"
     git -C "$ROOT" diff --cached --check || die "Staged diff has whitespace errors"
-    git -C "$ROOT" diff --cached --quiet && { say "No reviewed changes to commit"; exit 0; }
-    git -C "$ROOT" commit -m "$message" || die "Local commit failed"
-    if (( PUSH )); then git -C "$ROOT" push; else say "Committed locally; use --push to publish explicitly"; fi
+    if ! git -C "$ROOT" diff --cached --quiet; then
+      git -C "$ROOT" commit -m "automated dev commit" || die "Local commit failed"
+    else
+      say "No changes to commit"
+    fi
+    git -C "$ROOT" push origin main || die "Push to origin main failed"
     ;;
   *) die "Unknown action: $ACTION" ;;
 esac

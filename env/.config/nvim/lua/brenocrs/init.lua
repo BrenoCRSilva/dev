@@ -29,8 +29,8 @@ else
         augroup end
     ]])
 
-	-- Grapple menu colors are owned by the PontuArch theme bridge (post_apply in
-	-- lua/pontuarch.lua), driven by the active colorscheme — no hardcode here.
+	-- Grapple menu colors are owned by the Omarchy theme adapter (post_apply in
+	-- lua/omarchy-theme.lua), driven by the active colorscheme — no hardcode here.
 
 	-- Drop Neovim core's benign "Buffer (id: N) is not attached to client (id: M).
 	-- Cannot detach." notice. minuet-ai's LSP detach calls the deprecated

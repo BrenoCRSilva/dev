@@ -8,13 +8,14 @@ return {
 	},
 	config = function()
 		local function setup_notify_background()
-			require("notify").setup({
-				background_colour = require("pontuarch").palette().background,
-			})
+			local palette = require("omarchy-theme").palette()
+			if palette then
+				require("notify").setup({ background_colour = palette.background })
+			end
 		end
 		setup_notify_background()
 		vim.api.nvim_create_autocmd("User", {
-			pattern = "PontuarchThemeApplied",
+			pattern = "OmarchyThemeApplied",
 			callback = setup_notify_background,
 		})
 		vim.api.nvim_create_autocmd("ColorScheme", { callback = setup_notify_background })

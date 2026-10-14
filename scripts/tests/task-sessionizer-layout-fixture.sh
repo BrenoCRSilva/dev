@@ -55,10 +55,10 @@ expect_windows() {
 }
 
 make_repo fixture-multi dotfiles
-make_repo fixture-multi PontuArch
+make_repo fixture-multi api
 run_task fixture-multi
-expect_windows fixture-multi $'agent\nnvim-dotfiles\nnvim-PontuArch\nsrv-dotfiles\nsrv-PontuArch'
-for expected in "$TASKS_DIR/fixture-multi/dotfiles" "$TASKS_DIR/fixture-multi/PontuArch"; do
+expect_windows fixture-multi $'agent\nnvim-dotfiles\nnvim-api\nsrv-dotfiles\nsrv-api'
+for expected in "$TASKS_DIR/fixture-multi/dotfiles" "$TASKS_DIR/fixture-multi/api"; do
     grep -Fxq "$expected$(printf '\t.')" "$NVIM_LOG" || fail "nvim . did not launch in $expected"
 done
 
@@ -69,7 +69,7 @@ tmux new-window -d -t '=fixture-multi:' -n extra -c "$TASKS_DIR/fixture-multi/do
 tmux select-window -t '=fixture-multi:agent'
 active_before=$(tmux list-windows -t '=fixture-multi' -F '#W|#{window_active}' | awk -F'|' '$2 == "1" { print $1 }')
 run_task fixture-multi
-expect_windows fixture-multi $'agent\nnvim-dotfiles\nnvim-PontuArch\nsrv-dotfiles\nsrv-PontuArch\nextra'
+expect_windows fixture-multi $'agent\nnvim-dotfiles\nnvim-api\nsrv-dotfiles\nsrv-api\nextra'
 active_after=$(tmux list-windows -t '=fixture-multi' -F '#W|#{window_active}' | awk -F'|' '$2 == "1" { print $1 }')
 [[ "$active_before" == "$active_after" ]] || fail 're-entry changed the active window'
 [[ $(tmux display-message -p -t '=fixture-multi:srv-dotfiles' '#{pane_current_command}') == sleep ]] ||

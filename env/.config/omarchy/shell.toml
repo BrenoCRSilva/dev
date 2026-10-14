@@ -1,0 +1,5 @@
+# Preserve the chosen bar geometry while inheriting colors and surfaces from
+# Omarchy's generated current-theme/shell.toml.
+[bar]
+scale-with-font = false
+size-horizontal = 48

@@ -45,6 +45,12 @@ source "${ZINIT_HOME}/zinit.zsh"
 # Load powerlevel10k theme
 zinit ice depth=1; zinit light romkatv/powerlevel10k
 
+# Omarchy renders this palette from the active theme. Load before the personal
+# p10k settings so prompt colors follow the selected theme at shell startup.
+_theme_colors="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/current/theme/shell-colors.zsh"
+[[ -r "$_theme_colors" ]] && source "$_theme_colors"
+unset _theme_colors
+
 # To customize prompt, run `p10k configure` or edit ~/.p10k.zsh.
 [[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
 
@@ -86,9 +92,8 @@ alias ls='ls --color'
 alias c='clear'
 alias b='cd ..'
 alias cdwin='cd /mnt/c/Users/breno/'
-alias sync='~/personal/dev/utils/sync.sh'
-alias dev='~/personal/dev/utils/dev-env.sh'
-alias setup='~/personal/dev/runs/00-setup.sh'
+alias sync='~/personal/projects/dotfiles/scripts/sync.sh'
+alias dev='~/personal/projects/dotfiles/scripts/envctl'
 alias tsinit='~/.local/bin/ts-init.sh'
 alias reload='source ~/.zshrc'
 alias tmsource='tmux source-file ~/.config/tmux/tmux.conf'
@@ -96,38 +101,45 @@ alias agents='~/.config/tmux/scripts/agent-picker.sh'
 # One-shot reboot into Windows (Boot0000); next boot returns to Linux.
 alias windows='sudo efibootmgr --bootnext 0000 && systemctl reboot'
 
-# dev-env.sh completion
-_dev_env() {
-    local config_root="$HOME/personal/dev/env/.config"
+# envctl completion, including explicit managed-path pruning from env/.config.
+_dev_envctl() {
+    local repo="$HOME/personal/projects/dotfiles"
+    local config_root="$repo/env/.config"
+    local env_root="$repo/env"
+    local path
+    local -a actions=(plan diff apply capture backup restore prune sync)
     local -a configs
-    local dir
 
-    if [[ -d "$config_root" ]]; then
-        for dir in "$config_root"/*(/N); do
-            configs+=("${dir:t}")
-        done
+    if [[ "${words[CURRENT-1]}" == --host ]]; then
+        compadd -- omarchy-workstation
+        return
     fi
 
-    _arguments \
-        '(-c --config)'{-c,--config}'[Install only one config]:config name:->configs' \
-        '(-d --dry)'{-d,--dry}'[Dry run mode]' \
-        '(-h --help)'{-h,--help}'[Show help message]' && return
+    if (( CURRENT == 2 )); then
+        _describe 'envctl action' actions
+        return
+    fi
 
-    case $state in
-        configs)
-            _describe -t configs 'config' configs
-            ;;
-    esac
+    if [[ "${words[2]}" == plan && $CURRENT == 3 ]]; then
+        compadd -- apply capture
+        return
+    fi
+
+    if [[ "${words[2]}" == prune ]]; then
+        if [[ -d "$config_root" ]]; then
+            while IFS= read -r path; do
+                configs+=("${path#${env_root}/}")
+            done < <(find "$config_root" -mindepth 1 -not -path '*/.git/*' -not -path '*/node_modules/*' -print)
+        fi
+        compadd -Q -- "${configs[@]}"
+        return
+    fi
+
+    _arguments '--host[host profile]:host:(omarchy-workstation)' '--dry-run[preview only]'
 }
 
-compdef _dev_env dev
-compdef _dev_env dev-env.sh
+compdef _dev_envctl dev
 
-
-# Omarchy stages the active palette; non-Omarchy shells start without overrides.
-_theme_colors="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/current/theme/shell-colors.zsh"
-[[ -r "$_theme_colors" ]] && source "$_theme_colors"
-unset _theme_colors
 
 if command -v tmux &> /dev/null && [ -n "$PS1" ] && [[ ! "$TERM" =~ screen ]] && [[ ! "$TERM" =~ tmux ]] && [ -z "$TMUX" ] && [ -z "$HERDR_ENV" ]; then
   tmux a -t home || exec tmux new -s home && exit;

@@ -1,5 +1,5 @@
 -- Native colorschemes available to the Omarchy theme adapter. Declared lazy;
--- lua/pontuarch.lua loads only the matching plugin on a supported theme switch.
+-- lua/omarchy-theme.lua loads only the matching plugin on a supported theme switch.
 -- rose-pine remains the palette-driven fallback in its own spec.
 return {
 	{ "folke/tokyonight.nvim", lazy = true },

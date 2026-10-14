@@ -68,10 +68,10 @@ local function write_state(theme, mode, background, surface, foreground)
 	}, palette_file)
 end
 
-local adapter = require("pontuarch")
+local adapter = require("omarchy-theme")
 local applied_events = 0
 vim.api.nvim_create_autocmd("User", {
-	pattern = "PontuarchThemeApplied",
+	pattern = "OmarchyThemeApplied",
 	callback = function() applied_events = applied_events + 1 end,
 })
 
@@ -96,16 +96,15 @@ assert(adapter.palette().colorscheme == nil)
 assert(rose_calls[#rose_calls].variant == "dawn")
 assert(rose_calls[#rose_calls].palette.dawn.base == "#fffcf0")
 
--- Invalid and missing generated state use a complete static palette contract.
+-- Invalid and missing generated state never impose a private static palette.
 vim.fn.writefile({ "return { schema_version = 99 }" }, palette_file)
-local fallback = adapter.palette()
-assert(fallback.base == fallback.background and fallback.overlay == fallback.surface and fallback.text == fallback.foreground)
-assert(fallback.mode == "dark")
-adapter.apply()
-assert(rose_calls[#rose_calls].variant == "main")
-assert(rose_calls[#rose_calls].palette.main.base == fallback.background)
+assert(adapter.palette() == nil)
+local palettes_before_missing_state = #rose_calls
+assert(adapter.apply() == false)
+assert(#rose_calls == palettes_before_missing_state)
 vim.fn.delete(palette_file)
-assert(adapter.palette().overlay == fallback.surface)
+assert(adapter.palette() == nil)
+assert(adapter.apply() == false)
 
 -- A catalog mapping whose plugin cannot load falls back to Rose Pine.
 write_state("catppuccin", "dark", "#1e1e2e", "#313244", "#cdd6f4")
@@ -129,7 +128,7 @@ assert(#notify_calls > before_notify, "notify background did not refresh on adap
 assert(notify_calls[#notify_calls].background_colour == "#eff1f5")
 assert(lualine_calls[#lualine_calls].options.theme.normal.c.bg == "#dce0e8")
 assert(vim.api.nvim_get_hl(0, { name = "StatusLine" }).bg == tonumber("dce0e8", 16))
-assert(applied_events >= 6, "adapter did not signal theme applications")
+assert(applied_events >= 5, "adapter did not signal theme applications")
 
 print("actual Neovim adapter, native/fallback mapping, and Lualine/notify checks passed")
 LUA

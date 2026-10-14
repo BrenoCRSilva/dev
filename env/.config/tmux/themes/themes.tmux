@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-# title      Tokyo Night                                              +
-# version    1.0.0                                                    +
-# repository https://github.com/logico-dev/tokyo-night-tmux           +
-# author     Lógico                                                   +
-# email      hi@logico.com.ar                                         +
-# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# Omarchy terminal ANSI palette with personal status widgets.
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_PATH="$CURRENT_DIR/scripts"
@@ -17,13 +11,13 @@ tmux set -g status-right-length 150
 
 RESET="#[fg=${THEME[foreground]},bg=${THEME[background]},nobold,noitalics,nounderscore,nodim]"
 # Highlight colors
-tmux set -g mode-style "fg=${THEME[bgreen]},bg=${THEME[bblack]}"
+tmux set -g mode-style "fg=black,bg=blue"
 
-tmux set -g message-style "bg=${THEME[blue]},fg=${THEME[background]}"
+tmux set -g message-style "bg=blue,fg=black"
 tmux set -g message-command-style "fg=${THEME[white]},bg=${THEME[black]}"
 
 tmux set -g pane-border-style "fg=${THEME[bblack]}"
-tmux set -g pane-active-border-style "fg=${THEME[blue]}"
+tmux set -g pane-active-border-style "fg=blue"
 tmux set -g pane-border-status off
 
 tmux set -g status-style bg="${THEME[background]}"
@@ -37,12 +31,12 @@ default_zoom_id_style="hide"
 default_terminal_icon=" "
 default_active_terminal_icon=" "
 
-window_id_style="$(echo "$TMUX_VARS" | grep '@tokyo-night-tmux_window_id_style' | cut -d" " -f2)"
-pane_id_style="$(echo "$TMUX_VARS" | grep '@tokyo-night-tmux_pane_id_style' | cut -d" " -f2)"
-zoom_id_style="$(echo "$TMUX_VARS" | grep '@tokyo-night-tmux_zoom_id_style' | cut -d" " -f2)"
-terminal_icon="$(echo "$TMUX_VARS" | grep '@tokyo-night-tmux_terminal_icon' | cut -d" " -f2)"
-active_terminal_icon="$(echo "$TMUX_VARS" | grep '@tokyo-night-tmux_active_terminal_icon' | cut -d" " -f2)"
-window_tidy="$(echo "$TMUX_VARS" | grep '@tokyo-night-tmux_window_tidy_icons' | cut -d" " -f2)"
+window_id_style="$(echo "$TMUX_VARS" | grep '@dotfiles_tmux_window_id_style' | cut -d" " -f2)"
+pane_id_style="$(echo "$TMUX_VARS" | grep '@dotfiles_tmux_pane_id_style' | cut -d" " -f2)"
+zoom_id_style="$(echo "$TMUX_VARS" | grep '@dotfiles_tmux_zoom_id_style' | cut -d" " -f2)"
+terminal_icon="$(echo "$TMUX_VARS" | grep '@dotfiles_tmux_terminal_icon' | cut -d" " -f2)"
+active_terminal_icon="$(echo "$TMUX_VARS" | grep '@dotfiles_tmux_active_terminal_icon' | cut -d" " -f2)"
+window_tidy="$(echo "$TMUX_VARS" | grep '@dotfiles_tmux_window_tidy_icons' | cut -d" " -f2)"
 
 window_id_style="${window_id_style:-$default_window_id_style}"
 pane_id_style="${pane_id_style:-$default_pane_id_style}"

@@ -7,18 +7,11 @@ trap 'python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=Tr
 runtime="$tmp/runtime"
 home="$tmp/home"
 state="$tmp/state"
-mkdir -p "$runtime" "$home" "$state/omarchy/current/theme" "$tmp/new-lua" "$tmp/bin"
+mkdir -p "$runtime" "$home" "$state/omarchy/current/theme" "$tmp/new-lua"
 chmod 700 "$runtime"
 uid="$(id -u)"
 
-# Keep the hook's tmux probe away from any real user tmux server.
-cat > "$tmp/bin/tmux" <<'EOF'
-#!/usr/bin/env bash
-exit 1
-EOF
-chmod +x "$tmp/bin/tmux"
-
-cat > "$tmp/new-lua/pontuarch.lua" <<'EOF'
+cat > "$tmp/new-lua/omarchy-theme.lua" <<'EOF'
 return {
 	reload = function()
 		vim.g.new_adapter_reloads = (vim.g.new_adapter_reloads or 0) + 1
@@ -33,7 +26,7 @@ printf 'return { schema_version = 1, background = "#112233" }\n' > "$state/omarc
 start_server() {
 	local name="$1" socket="$runtime/nvim.$1"
 	LUA_PATH="$tmp/new-lua/?.lua;;" XDG_STATE_HOME="$state" nvim --headless --clean -u NONE -i NONE --listen "$socket" \
-		--cmd 'lua vim.g.old_adapter_reloads=0; package.loaded["pontuarch"]={reload=function() vim.g.old_adapter_reloads=vim.g.old_adapter_reloads+1 end}' \
+		--cmd 'lua vim.g.old_adapter_reloads=0; package.loaded["omarchy-theme"]={reload=function() vim.g.old_adapter_reloads=vim.g.old_adapter_reloads+1 end}' \
 		>/dev/null 2>&1 &
 	SERVER_PIDS+=("$!")
 	SERVER_SOCKETS+=("$socket")
@@ -55,7 +48,7 @@ start_server first
 start_server second
 
 run_hook() {
-	HOME="$home" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state" PATH="$tmp/bin:$PATH" \
+	HOME="$home" XDG_RUNTIME_DIR="$runtime" XDG_STATE_HOME="$state" \
 		"$repo/env/.config/omarchy/hooks/theme-set.d/reload-nvim"
 }
 

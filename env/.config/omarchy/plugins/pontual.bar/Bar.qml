@@ -66,8 +66,7 @@ Item {
   property bool centerHoverRevealSuppressed: false
   property int barConfigSerial: 0
   property string position: "top"
-  // Match the archived PontuArch UI family across personal and adapted native
-  // widgets; the historical Oct-10 config used JetBrainsMono Nerd Font.
+  // Share the user's font choice across personal and adapted native widgets.
   property string fontFamily: "JetBrainsMono Nerd Font"
   // Bound to the central Color singleton so the bar tracks shell.toml's
   // [bar] section. Property names kept for the rest of this file's bindings.
@@ -112,7 +111,7 @@ Item {
   property var pluginBarApis: ({})
   property var pluginObjectOwners: []
 
-  // PontuArch placed a single bar on the lowest-ID Hyprland monitor. Resolve
+  // Place one bar on the lowest-ID Hyprland monitor. Resolve
   // that monitor to Quickshell's screen object by connector name; this keeps
   // bar scope independent of left/right placement and output geometry.
   readonly property var primaryBarScreen: {
@@ -199,7 +198,7 @@ Item {
       if (!button || !("fontSize" in button) || !("labelVisible" in button)
           || !("fontFamily" in button)) continue
       // Keep Omarchy's native formatter, timezone, tooltip, calendar anchor,
-      // click target and panel; port PontuArch's split 36px icon + text look.
+      // click target and panel; retain the split icon and text layout.
       button.fontSize = Style.space(16)
       button.fontFamily = root.fontFamily
       button.horizontalMargin = Style.space(8)
@@ -1585,7 +1584,7 @@ Item {
 
       Rectangle {
         anchors.fill: parent
-        color: root.transparent ? "transparent" : "#1a1b26"
+        color: root.transparent ? "transparent" : Color.bar.background
         radius: root.railCornerRadius
         z: -1
       }
@@ -2203,12 +2202,12 @@ Item {
     HoverHandler { id: moduleHover }
 
     Rectangle {
-      // Transparency controls only the outer rail. Keep historical per-widget
-      // pills visible over the desktop in either rail mode.
+      // Keep the existing widget surface while deriving its color from the
+      // active Omarchy theme.
       visible: slot.slotHasContentOrReservation
         && slot.moduleName !== "pontual.workspaces" && slot.moduleName !== "omarchy.tray"
       anchors.fill: parent
-      color: "#24283b"
+      color: Color.bar.background
       radius: root.widgetCornerRadius
       z: -1
     }

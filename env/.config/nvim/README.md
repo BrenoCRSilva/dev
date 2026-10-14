@@ -14,16 +14,17 @@ Modern Neovim configuration built with Lua, focused on development productivity.
 
 ## Installation
 
+From the root of this repository, preview and deploy the Neovim configuration
+using the host profile:
+
 ```bash
-# Backup existing config
-mv ~/.config/nvim ~/.config/nvim.backup
-
-# Clone configuration
-git clone https://github.com/BrenoCRSilva/neovimrc ~/.config/nvim
-
-# Start Neovim (plugins will auto-install)
-nvim
+scripts/envctl plan apply --host omarchy-workstation
+scripts/envctl apply --host omarchy-workstation
 ```
+
+`envctl apply` creates a timestamped backup of managed files before deployment.
+The canonical configuration source is `env/.config/nvim` in this repository;
+the separate `neovimrc` repository is retired.
 
 ## Tmux Integration
 

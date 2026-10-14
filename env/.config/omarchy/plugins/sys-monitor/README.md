@@ -16,7 +16,7 @@ Shows live CPU utilization, RAM usage, and Network speed directly on your topbar
   - **Network Download Speed**: `↓ <speed>` (e.g., `↓ 1.2 MB/s`).
   - **Network Upload Speed**: `↑ <speed>` (optional, e.g., `↑ 45 KB/s`).
   - **Dynamic Theme Palette**: Inherits active Omarchy theme foreground, accent, and font colors.
-  - **High Load Alert**: Changes metric color to `urgent` (#ef4444) when CPU ≥ 85% or RAM ≥ 90%.
+  - **High Load Alert**: Uses Omarchy's theme `urgent` token when CPU ≥ 85% or RAM ≥ 90%.
   - **Orientation-Aware**: Responsive layout for horizontal and vertical status bars.
 - **Interactive Configuration & Diagnostic Popup**:
   - **System Overview**: Displays CPU model name, system uptime, and a one-click button to open `btop`.

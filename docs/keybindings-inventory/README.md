@@ -10,6 +10,9 @@ Read-only snapshots collected on 2026-10-13 from the running Omarchy desktop and
 - `nvim-live-rpc.json`: read-only keymap metadata queried over all five active Neovim sockets. It contains global mappings for modes `n,v,x,s,o,i,c,t,l`, plus buffer-local mappings for every valid loaded buffer. It stores buffer number and filetype, never buffer names or contents. Key and RHS strings are display-sanitized; callbacks are represented as booleans. Lazy plugin specs not loaded in a server are inventoried separately from source.
 - `nvim-authored-maps.md`: full authored/core, LazyLoad and plugin-spec map inventory, with scope, mode, action and source notes.
 
-The authored binding sources live in `../..` under `env/.config/`. Runtime/default snapshots may include package defaults and plugin-generated maps, not just authored mappings. The inactive standalone `env/.config/hypr/pontuarch/binds.conf` is intentionally excluded from the effective Hyprland inventory.
+The authored binding sources live in `../..` under `env/.config/`. Runtime/default snapshots may include package defaults and plugin-generated maps, not just authored mappings. Inactive standalone binding fragments are excluded from the effective Hyprland inventory.
+
+The captured tmux `prefix+C` entry was replaced with the stock `new-window`
+binding after removing the unavailable external command it previously invoked.
 
 The audit and applied desktop map is [../keybindings-audit.md](../keybindings-audit.md).

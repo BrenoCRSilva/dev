@@ -4,7 +4,7 @@
   "name": "Pontual floating bar",
   "version": "1.0.0",
   "author": "Omarchy",
-  "description": "Tokyo Night floating pill rail with Omarchy native widgets",
+  "description": "Theme-aware floating bar with Omarchy native widgets",
   "kinds": [
     "bar"
   ],

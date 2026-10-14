@@ -13,7 +13,7 @@
 - **tmux prefix Ctrl-F also captures Neovim Ctrl-F page-down.** The configured prefix is `C-f` (`tmux.conf:4-10`). Double-prefix `C-f C-f` sends a literal Ctrl-F to the application; it costs an extra chord. Existing `C-d/C-u` centered paging is an alternative in Neovim.
 - **Herdr's direct Alt shortcuts collide with Ghostty defaults.** Herdr maps `Alt+1..9` to tab selection and `Ctrl+Alt+Arrow` to pane focus (`env/.config/herdr/config.toml:37-68`). Ghostty defaults already bind `Alt+1..9` to Ghostty tabs and `Ctrl+Alt+Arrow` to Ghostty split navigation (`ghostty-default-keybinds.txt`). When a Herdr client is focused in Ghostty, the terminal consumes those keys first. This is a real terminal-to-app interception; keep it in mind when choosing which layer should own a particular action, without assuming a navigation redesign.
 - **Hyprland's Alt-Tab pair is a composed stock action, not a conflict to remove.** The current runtime has 263 entries; the Omarchy binding menu shows `Alt+Tab` as both “Focus on next window” and “Reveal active window on top”, with the analogous pair for `Shift+Alt+Tab`. Both declarations come from the installed default `.../bindings/tiling.lua:44-47`; cycling then raising the active window is the intended composition. There is no evidence of a runtime problem, so preserve it. F9's start-on-press/stop-on-release pair is also intentional.
-- **The effective Hyprland map has one submap (`default`).** The active `hyprland.lua` loads Omarchy defaults, then `hypr.bindings`; the personal bindings layer deliberately unbinds/reassigns many stock application keys. The separate `env/.config/hypr/pontuarch/binds.conf` is inactive standalone material, not a live binding source.
+- **The effective Hyprland map has one submap (`default`).** The active `hyprland.lua` loads Omarchy defaults, then `hypr.bindings`; the personal bindings layer deliberately unbinds/reassigns many stock application keys. The inactive standalone `hypr/binds.conf` fragment is not a live binding source.
 - **Super-F is fullscreen again; Super-Shift-F maximizes.** `Super+E` opens Strata; the older `Super+Alt+F` Strata alias and `Super+Alt+Shift+F` terminal-cwd route remain. The alias occupies stock `Super+Alt+F` full-width, while the newly requested `Super+E` is the primary file-manager chord.
 
 ## Priority and accepted tradeoffs
@@ -52,7 +52,7 @@ tmux 3.7c has 280 active key-table rows in the complete snapshot. The custom pre
 
 - `prefix+d` currently kills the whole server; `prefix+k` kills a pane without a confirmation prompt.
 - `prefix+c/n/p` currently mean copy-mode/new-window/clipboard-paste. Previous window is no longer bound to `p`; last-window remains a separate tmux action.
-- `prefix+F` invokes the older sessionizer while lowercase `prefix+f` opens the task sessionizer. `prefix+C` invokes `pontuarch ipc cursor`; no installed `pontuarch` command was found, so this route appears unavailable on this host. The separate PontuArch repo sessionizer is not the task sessionizer and is not a binding source here.
+- `prefix+F` invokes the older sessionizer while lowercase `prefix+f` opens the task sessionizer. The old `prefix+C` integration was removed because its external command was unavailable.
 - Herdr 0.8.2 uses Ctrl-Space as prefix, with `c/r/k` new/rename/close tab, `n/p` next/previous tab, `1..9` tab selection, workspace actions on shifted prefix keys and pane focus/resize on Ctrl-Alt arrows. Herdr's direct Alt-number and Ctrl-Alt-arrow alternatives are shadowed by Ghostty's built-in tab/split bindings while inside Ghostty. Prefix versions avoid that.
 - Ghostty 1.3.1 has 72 default keybind rows and the current resolved output has 74. `Shift+Insert` now resolves to `paste_from_clipboard` instead of the default `paste_from_selection` (PRIMARY); `Ctrl+Shift+V` also uses `paste_from_clipboard`. This makes Hyprland's terminal-aware `Super+V` use the regular clipboard. Ghostty's Ctrl-Alt arrows remain terminal split navigation and Ctrl-Shift arrows/page keys navigate tabs. Font-size Ctrl-plus/minus/zero keys remain terminal-scoped; custom `Shift+Enter` sends a newline.
 
@@ -81,7 +81,7 @@ There is useful cleanup without dropping plugins or editing behavior:
 - Keep Oil as the easy/default explorer if that is current muscle memory; Neo-tree can remain available for its alternate tree view. The current two-explorer setup need not be removed to make the map clearer.
 - `<leader>q` is now `:wq!` as requested. It writes the current buffer and quits; the forced-write behavior is an explicit user choice, not a remaining `:q!` mapping.
 
-The personal map remains authored in `env/.config/nvim`; `/home/pontual/.config/nvim` is the deployed canonical tree. The inactive PontuArch env copy is not the owner.
+The personal map remains authored in `env/.config/nvim`; `/home/pontual/.config/nvim` is the deployed canonical tree.
 
 ## Recommended order for any later changes
 

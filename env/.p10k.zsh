@@ -38,13 +38,13 @@
   [[ $ZSH_VERSION == (5.<1->*|<6->.*) ]] || return
 
   # Prompt colors.
-  local grey='242'
-  local red='#FF5C57'
-  local yellow='#F3F99D'
-  local blue='#57C7FF'
-  local magenta='#FF6AC1'
-  local cyan='#9AEDFE'
-  local white='#F1F1F0'
+  local grey="${OMARCHY_THEME_MUTED:-brightblack}"
+  local red="${OMARCHY_THEME_RED:-red}"
+  local yellow="${OMARCHY_THEME_YELLOW:-yellow}"
+  local blue="${OMARCHY_THEME_BLUE:-blue}"
+  local magenta="${OMARCHY_THEME_MAGENTA:-magenta}"
+  local cyan="${OMARCHY_THEME_CYAN:-cyan}"
+  local white="${OMARCHY_THEME_TEXT:-white}"
 
   # Left prompt segments.
   typeset -g POWERLEVEL9K_LEFT_PROMPT_ELEMENTS=(

@@ -4,11 +4,16 @@ return {
 	config = function()
 		-- Read the same staged Omarchy palette used by the colorscheme adapter.
 		local function pal()
-			return require("pontuarch").palette()
+			return require("omarchy-theme").palette()
 		end
-		-- Statusline center bg, theme-derived (was a hardcoded rose-pine surface).
+		-- Use the staged Omarchy surface, or preserve the current colorscheme's
+		-- statusline background when no Omarchy palette exists.
 		local function statusline_base()
-			return pal().overlay or "#232136"
+			local palette = pal()
+			if palette then
+				return palette.overlay
+			end
+			return vim.api.nvim_get_hl(0, { name = "StatusLine", link = false }).bg or "NONE"
 		end
 
 		local function apply_statusline_bg()
@@ -140,7 +145,7 @@ return {
 		vim.defer_fn(apply_statusline_bg, 100)
 
 		-- Theme switch: rebuild section colors from the new palette, then repaint
-		-- the statusline bg. (The base colorscheme is re-applied by pontuarch.lua,
+		-- the statusline bg. (The base colorscheme is re-applied by omarchy-theme.lua,
 		-- which fires ColorScheme.)
 		vim.api.nvim_create_autocmd("ColorScheme", {
 			callback = function()
@@ -150,7 +155,7 @@ return {
 			end,
 		})
 		vim.api.nvim_create_autocmd("User", {
-			pattern = "PontuarchThemeApplied",
+			pattern = "OmarchyThemeApplied",
 			callback = function()
 				setup_lualine()
 				apply_statusline_bg()

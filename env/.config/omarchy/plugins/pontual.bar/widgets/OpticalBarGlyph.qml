@@ -1,6 +1,6 @@
 import QtQuick
 
-// User-clone port of PontuArch's centered 36px icon tile. Keep one historical
+// User-clone centered 36px icon tile. Keep one historical
 // nominal size and font; only shrink a glyph if its measured ink exceeds the
 // tile, then center the painted bounds on both axes (TextMetrics alone does
 // not center JetBrains Mono's asymmetric line box).

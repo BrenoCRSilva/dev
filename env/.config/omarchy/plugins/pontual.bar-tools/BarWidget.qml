@@ -197,7 +197,7 @@ Ui.BarWidget {
       text: root.iconText
       fontFamily: root.iconFontFamily
       fontSize: 20
-      foreground: root.role === "notifications" ? "#24283b" : (root.bar ? root.bar.foreground : "white")
+      foreground: root.bar ? root.bar.barForeground : Color.bar.text
       slotSize: Style.space(36)
       opticalSize: Style.space(36)
       tooltipText: root.role === "menu" ? "Omarchy menu · right click: terminal"

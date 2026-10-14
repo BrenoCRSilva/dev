@@ -10,6 +10,7 @@
 .config/omarchy/hooks
 .config/omarchy/plugins
 .config/omarchy/shell.json
+.config/omarchy/shell.toml
 .config/omarchy/themes
 .config/omarchy/themed
 .config/herdr/config.toml

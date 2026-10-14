@@ -274,7 +274,7 @@ Item {
                     : root.controller.resultsModel.count > 0 ? ""
                     : root.controller.busy ? "Searching…" : "No results"
                 textFormat: Text.PlainText
-                color: root.controller.lastError ? "#f7768e" : Color.menu.text
+                color: root.controller.lastError ? Color.urgent : Color.menu.text
                 opacity: root.controller.lastError ? 1 : 0.62
                 font.family: "sans-serif"
                 font.pixelSize: 13
