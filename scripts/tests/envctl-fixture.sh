@@ -10,6 +10,7 @@ state="$tmp/state"
 mkdir -p "$root/scripts" "$root/env/.config/app" "$root/env/.config/nvim/lua" "$home"
 mkdir -p "$root/env/.config/app/node_modules/pkg" "$root/env/.config/app/lua"
 cp "$repo/scripts/envctl" "$root/scripts/envctl"
+cp "$repo/scripts/omarchy-theme-install-list.tsv" "$root/scripts/omarchy-theme-install-list.tsv"
 cat > "$root/env/dotfiles.manifest" <<'EOF'
 .config/app
 .config/nvim
@@ -51,20 +52,38 @@ apply_backup="$(sed -n 's/^Backups: //p' "$tmp/apply.out")"
 # External Omarchy theme collection links are discoverable runtime data, not
 # authored mirror content. The top-level link and files globbed beneath it are
 # excluded, while authored theme files remain eligible for apply/capture.
-mkdir -p "$root/env/.config/omarchy/themes/authored" "$home/.config/omarchy/themes" "$tmp/external/collection"
+mkdir -p "$root/env/.config/omarchy/themes/authored" \
+  "$root/env/.config/omarchy/themes/unlisted-clone/.git" \
+  "$home/.config/omarchy/themes" \
+  "$home/.config/omarchy/themes/unlisted-clone/.git" \
+  "$tmp/external/collection"
 printf 'authored palette\n' > "$root/env/.config/omarchy/themes/authored/colors.toml"
+printf 'unlisted authored checkout\n' > "$root/env/.config/omarchy/themes/unlisted-clone/colors.toml"
+printf 'external checkout\n' > "$home/.config/omarchy/themes/unlisted-clone/colors.toml"
+while IFS=$'\t' read -r kind name rest; do
+  [[ "$kind" == theme ]] || continue
+  mkdir -p "$home/.config/omarchy/themes/$name"
+  printf 'pinned installed theme\n' > "$home/.config/omarchy/themes/$name/colors.toml"
+done < "$root/scripts/omarchy-theme-install-list.tsv"
 printf 'third-party palette\n' > "$tmp/external/collection/colors.toml"
 ln -s "$tmp/external/collection" "$home/.config/omarchy/themes/collection"
 printf '.config/omarchy/themes\n' >> "$root/env/dotfiles.manifest"
 theme_apply_preview="$(run plan apply)"
 [[ "$theme_apply_preview" == *".config/omarchy/themes/authored/colors.toml"* ]]
+[[ "$theme_apply_preview" != *"unlisted-clone"* ]]
 [[ "$theme_apply_preview" != *"collection"* && "$theme_apply_preview" != *"third-party palette"* ]]
 run apply > "$tmp/theme-apply.out"
 [[ "$(cat "$home/.config/omarchy/themes/authored/colors.toml")" == 'authored palette' ]]
+[[ "$(cat "$home/.config/omarchy/themes/unlisted-clone/colors.toml")" == 'external checkout' ]]
 [[ -L "$home/.config/omarchy/themes/collection" ]]
 printf 'live authored edit\n' > "$home/.config/omarchy/themes/authored/colors.toml"
 theme_capture_preview="$(run capture --dry-run)"
 [[ "$theme_capture_preview" == *"would-capture: .config/omarchy/themes/authored/colors.toml"* ]]
+[[ "$theme_capture_preview" != *"unlisted-clone"* ]]
+while IFS=$'\t' read -r kind name rest; do
+  [[ "$kind" == theme ]] || continue
+  [[ "$theme_capture_preview" != *"would-capture: .config/omarchy/themes/$name/"* ]]
+done < "$root/scripts/omarchy-theme-install-list.tsv"
 [[ "$theme_capture_preview" != *"collection"* && "$theme_capture_preview" != *"third-party palette"* ]]
 # The same containment guard still rejects arbitrary outward links outside the
 # explicitly external-theme boundary.
@@ -77,21 +96,27 @@ unlink "$home/.config/app/outward.conf"
 sed -i '$d' "$root/env/dotfiles.manifest"
 rm -rf "$root/env/.config/omarchy/themes" "$home/.config/omarchy/themes"
 
-# The separately installed Spotlight checkout is external plugin code. It is
+# Separately installed Spotlight and voxhud checkouts are external plugin code. They are
 # excluded as a whole, including globbed descendants, while authored plugins
 # in the same manifest root remain deployable.
 mkdir -p "$root/env/.config/omarchy/plugins/pontual.tasks" \
   "$root/env/.config/omarchy/plugins/io.github.maajix.spotlight" \
-  "$home/.config/omarchy/plugins/io.github.maajix.spotlight/bin"
+  "$root/env/.config/omarchy/plugins/io.github.aashbury.voxhud" \
+  "$home/.config/omarchy/plugins/io.github.maajix.spotlight/bin" \
+  "$home/.config/omarchy/plugins/io.github.aashbury.voxhud/bin"
 printf 'authored plugin\n' > "$root/env/.config/omarchy/plugins/pontual.tasks/Tasks.qml"
 printf 'external mirror candidate\n' > "$root/env/.config/omarchy/plugins/io.github.maajix.spotlight/README.md"
 printf 'external live helper\n' > "$home/.config/omarchy/plugins/io.github.maajix.spotlight/bin/spotlight-helper"
+printf 'external mirror candidate\n' > "$root/env/.config/omarchy/plugins/io.github.aashbury.voxhud/README.md"
+printf 'external live helper\n' > "$home/.config/omarchy/plugins/io.github.aashbury.voxhud/bin/voxhud"
 printf '.config/omarchy/plugins\n' >> "$root/env/dotfiles.manifest"
 plugin_plan="$(run plan apply)"
 [[ "$plugin_plan" == *".config/omarchy/plugins/pontual.tasks/Tasks.qml"* ]]
 [[ "$plugin_plan" != *"io.github.maajix.spotlight"* ]]
+[[ "$plugin_plan" != *"io.github.aashbury.voxhud"* ]]
 plugin_capture="$(run capture --dry-run)"
 [[ "$plugin_capture" != *"io.github.maajix.spotlight"* ]]
+[[ "$plugin_capture" != *"io.github.aashbury.voxhud"* ]]
 sed -i '$d' "$root/env/dotfiles.manifest"
 rm -rf "$root/env/.config/omarchy/plugins" "$home/.config/omarchy/plugins"
 

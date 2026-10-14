@@ -72,66 +72,26 @@ Reproducibility sources: [100-themes](https://github.com/bjarneo/100-themes),
 
 ## B. Voxtype
 
-Prepared `env/.config/voxtype/config.toml` for multilingual Whisper `base` with
-`language = "auto"`. `base` is the low-latency starting choice because the
-installed runtime currently reports CPU AVX2 as the next-launch backend and
-does not detect a GPU. The machine has the AMD Vulkan driver and Voxtype reports
-its Vulkan backend installed, but `voxtype setup gpu --status` says `GPU: not
-detected`; therefore no local GPU speed claim is justified. No multilingual
-model was downloaded, so an actual model comparison/latency benchmark was not
-possible without fetching models and changing user state. `small` is the next
-quality candidate if Portuguese recognition needs improvement and CPU latency
-is acceptable; `medium` is not recommended as the first test on this detected
-CPU-only path.
+The live-authoritative `env/.config/voxtype/config.toml` now uses Whisper
+`large-v3-turbo` on Vulkan with `language = "pt,en"`. The constrained language
+list avoids the prior unrestricted auto-detection result (Turkish at
+probability 0.45). Typed output and clipboard fallback remain enabled. The
+Quickshell OSD is disabled because voxhud now supplies the dictation HUD.
 
-Omarchy already binds F9 down/up to `voxtype record start/stop` for push-to-talk.
-The config keeps compositor-owned hotkeys disabled, preserving that binding.
-Typed insertion and clipboard fallback remain enabled. The existing stock
-`omarchy.indicators` widget includes the Dictation indicator, and remains in
-the bar configuration. The user reports Voxtype's service is active, but this
-session's metadata check showed no running daemon; no service was changed.
+External plugin `io.github.aashbury.voxhud` is installed at
+`7f25cf97752a11411725fb9fa6b3a02a41499992`; its setup installed the
+`~/.local/bin/voxhud` symlink. It displays its widget in the bar center and
+replaces the Omarchy Dictation indicator, which is hidden in the live
+configuration. The checkout is listed by source and commit, and excluded from
+the authored mirror. No plugin source is vendored here.
 
-After deploying the config, the orchestrator can fetch the selected model with
-`voxtype setup --download --model base --no-post-install`; model download is
-separate from activation. No further user choice is needed for the selected
-starting configuration. An optional later comparison is multilingual `small`
-versus `base`, using real Portuguese and English dictation only when the user
-is ready to test.
+## C. Stock Omarchy bar
 
-## C. Stock bar on both monitors
-
-Installed Omarchy exposes one `bar.layout` in `shell.json`, shared by the
-Quickshell bar instance on each screen. Neither the installed schema nor the
-stock `Bar.qml` has a per-monitor widget-list override. `shell.toml` sets shared
-bar geometry/typography, not monitor-specific widgets. There is no supported
-JSON setting to hide the bar or different widgets on HDMI-A-1 alone without
-replacing/forking the bar.
-
-The prepared shared layout keeps the stock `omarchy.bar` base, placement, and
-the same widgets on both monitors. The island-shaped workspace group is painted
-by the user-owned `pontual.workspaces` widget selected through the supported
-`shell.json` plugin/layout configuration; it is not a theme or global bar
-shape option. That widget and its island styling stay unchanged. The layout
-makes two small width reductions:
-
-- `sys-monitor.showNet = false`: the separate `omarchy.network` widget already
-  displays network state, so this removes duplicate live-rate text while
-  retaining CPU/RAM, their icons, and the system-monitor details/popout.
-- Clock `format = "HH:mm"` and `formatAlt = "d MMM yyyy"`: drops seconds from
-  the always-visible center label.
-
-The largest fixed left-side width contributor is `pontual.workspaces`: each
-real workspace reserves 28 scaled pixels plus group insets. The right side
-also has several independent indicators; the center has media, tray, clock,
-and notification-history controls. On a 1080-logical-pixel monitor all three
-regions compete for width. Static source/config inspection identifies those
-width contributors, but no per-widget runtime geometry or post-deployment
-portrait screenshot was available in this worktree-only pass. The two prepared
-reductions preserve the custom workspace appearance and avoid hiding unrelated
-controls. Validate on HDMI-A-1 after deployment. If overlap remains, the next
-supported tradeoff is a shared compact workspace widget (with simpler numeric
-workspace labels) or globally moving/removing a lower-priority widget; Omarchy
-does not currently offer a per-output list to keep that change on HDMI only.
+The live and mirrored configuration now selects stock `omarchy.bar`, with
+`shell.json bar.transparent = false` and `shell.toml [bar]
+background-alpha = 0.8`. The background uses Omarchy's generated theme color at
+80% opacity. The shared shell settings and the user's existing widget/layout
+choices are captured from live config; no third-party bar checkout is required.
 
 ## D. Live-authoritative Spotlight and disabled plugin cleanup
 
@@ -146,10 +106,12 @@ Captured the orchestrator's live-authoritative configuration into `env/`:
   `.config/omarchy/extensions/omarchy-menu.jsonc` (tasks route), and
   `.config/omarchy/spotlight.json`.
 
-Spotlight is an external plugin checkout, not authored mirror content. Its
-reproducible source pin is in the install list:
+Spotlight and voxhud are external plugin checkouts, not authored mirror
+content. Their reproducible source pins are in the install list; envctl and
+`.gitignore` exclude both plugin trees, so capture/apply does not vendor their
+files. Spotlight's pin is:
 `maajix/omarchy-spotlight@a0f7fa746169a933e498037863e3353ede126413`. envctl now
-excludes that plugin subtree so capture/apply does not vendor its files.
+also excludes `aashbury/voxhud@7f25cf97752a11411725fb9fa6b3a02a41499992`.
 
 `pontual.search` stays disabled as requested. After user confirmation, proposed
 prune targets are `env/.config/omarchy/plugins/pontual.search/` and

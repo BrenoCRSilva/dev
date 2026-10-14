@@ -49,6 +49,22 @@ valid_rel() {
   IFS=/ read -r -a parts <<< "$path"
   for part in "${parts[@]}"; do [[ -n "$part" && "$part" != . && "$part" != .. ]] || return 1; done
 }
+external_theme_path() {
+  local rel theme base
+  case "$1" in .config/omarchy/themes/*) rel="${1#.config/omarchy/themes/}" ;; *) return 1 ;; esac
+  theme="${rel%%/*}"
+  [[ -n "$theme" ]] || return 1
+
+  # Installed themes are source checkouts outside the authored mirror. Exclude
+  # any checkout by its .git marker and pinned theme names from the install
+  # inventory (some Omarchy theme directories are copied rather than cloned).
+  for base in "$ENV_DIR" "$HOME_DIR"; do
+    [[ -e "$base/.config/omarchy/themes/$theme/.git" || -L "$base/.config/omarchy/themes/$theme/.git" ]] && return 0
+  done
+  [[ -f "$ROOT/scripts/omarchy-theme-install-list.tsv" ]] || return 1
+  awk -F '\t' -v theme="$theme" '$1 == "theme" && $2 == theme { found = 1 } END { exit !found }' \
+    "$ROOT/scripts/omarchy-theme-install-list.tsv"
+}
 excluded() {
   # Backups are never authored mirror content, even when a capture manifest
   # names the containing tree. Keep this aligned with the repository ignore.
@@ -58,10 +74,12 @@ excluded() {
   esac
   case "$1" in
     .config/nvim/lua/*-palette.lua|.config/nvim/lua/plugins/vectorcode.lua|.config/ghostty/themes/*|.config/tmux/themes/scripts/*-colors.sh|.config/herdr/sessions/*|.config/herdr/auth/*|.config/herdr/runtime/*|.env|.env.*|*/.env|*/.env.*|*credentials*|*secret*) return 0 ;;
-    # Spotlight is a separately installed upstream plugin. Record its source
-    # and commit, but do not vendor its checkout into the authored mirror.
+    # These are separately installed upstream plugins. Record source and
+    # commit in the install list, but never vendor either checkout.
     .config/omarchy/plugins/io.github.maajix.spotlight|.config/omarchy/plugins/io.github.maajix.spotlight/*) return 0 ;;
+    .config/omarchy/plugins/io.github.aashbury.voxhud|.config/omarchy/plugins/io.github.aashbury.voxhud/*) return 0 ;;
   esac
+  external_theme_path "$1" && return 0
   return 1
 }
 

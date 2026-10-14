@@ -10,3 +10,4 @@ theme	ayu-light	https://github.com/fdidron/omarchy-ayu-light-theme	main	fca0566c
 theme	ayu-mirage	https://github.com/fdidron/omarchy-ayu-mirage-theme	main	8f686210ab1fd78ac0416694307bb79b9438264e	alacritty.toml; converted correctly in scratch
 theme	night-owl	https://github.com/janhesters/omarchy-night-owl-theme	master	f9d5f90ae8406a87abef5714e8073bbacbc4e79a	colors.toml; correct Night Owl repo
 plugin	spotlight	https://github.com/maajix/omarchy-spotlight	commit	a0f7fa746169a933e498037863e3353ede126413	external checkout; never vendor under env
+plugin	voxhud	https://github.com/aashbury/voxhud	commit	7f25cf97752a11411725fb9fa6b3a02a41499992	external checkout; setup installs ~/.local/bin/voxhud symlink

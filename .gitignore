@@ -7,7 +7,8 @@ env/.config/herdr/sessions/
 env/.config/omarchy/plugins/**/.git/
 env/.config/omarchy/plugins/**/node_modules/
 env/.config/omarchy/plugins/**/tests/
-# Separately installed upstream plugin; source and revision live in scripts/.
+# Separately installed upstream plugins; source and revision live in scripts/.
 env/.config/omarchy/plugins/io.github.maajix.spotlight/
+env/.config/omarchy/plugins/io.github.aashbury.voxhud/
 .envctl-state/
 scripts/__pycache__/

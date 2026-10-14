@@ -17,6 +17,9 @@
         },
         {
           "id": "foamy.notification-center"
+        },
+        {
+          "id": "io.github.aashbury.voxhud"
         }
       ],
       "left": [
@@ -33,7 +36,14 @@
       ],
       "right": [
         {
-          "id": "omarchy.indicators"
+          "id": "omarchy.indicators",
+          "items": [
+            "ScreenRecording",
+            "Reminder",
+            "NightLight",
+            "Dnd",
+            "StayAwake"
+          ]
         },
         {
           "id": "omarchy.keyboard-layout"
@@ -65,7 +75,7 @@
       ]
     },
     "position": "top",
-    "transparent": true
+    "transparent": false
   },
   "idle": {
     "lock": 300,

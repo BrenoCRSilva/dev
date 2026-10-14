@@ -8,3 +8,4 @@ hl.config({
 -- background-blur-radius both rely on it, so enable it and frost Spotlight.
 hl.config({ decoration = { blur = { enabled = true } } })
 hl.layer_rule({ match = { namespace = "^omarchy-spotlight$" }, blur = true, ignore_alpha = 0.2 })
+hl.layer_rule({ match = { namespace = "^omarchy-bar$" }, blur = true, ignore_alpha = 0.2 })
