@@ -627,7 +627,7 @@ printf 'edited by the user\n' > "$agents_task/.claude/agents/status-reader.md"
 grep -Fxq 'edited by the user' "$agents_task/.claude/agents/status-reader.md" || fail 'a later write replaced an edited subagent'
 for rule in 'Bash(herdr agent wait:*)' 'task-sessionizer.sh refresh:*' 'task-sessionizer.sh promote:*' 'task-sessionizer.sh demote:*' \
     'Bash(~/.config/tmux/scripts/task-decide.py:*)' 'Bash(python3 ~/.config/tmux/scripts/task-decide.py:*)' \
-    "Bash(python3 $HOME/.config/tmux/scripts/task-decide.py:*)"; do
+    "Bash(python3 $HOME/.config/tmux/scripts/task-decide.py:*)" 'Bash(~/.config/tmux/scripts/task-gates.sh:*)'; do
     grep -Fq "$rule" "$agents_task/.claude/settings.json" || fail "orchestrator allowlist lacks $rule"
 done
 if out=$("$SESSIONIZER" close fixture-agents 2>&1); then fail 'close accepted an edited subagent'; fi

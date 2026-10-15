@@ -847,7 +847,9 @@ CLAUDE_TASK_SETTINGS="{
       \"Bash(python3 ~/.config/tmux/scripts/task-decide.py:*)\",
       \"Bash(python3 $HOME/.config/tmux/scripts/task-decide.py:*)\",
       \"Bash(~/.config/tmux/scripts/task-sessionizer.sh sync:*)\",
-      \"Bash($HOME/.config/tmux/scripts/task-sessionizer.sh sync:*)\"
+      \"Bash($HOME/.config/tmux/scripts/task-sessionizer.sh sync:*)\",
+      \"Bash(~/.config/tmux/scripts/task-gates.sh:*)\",
+      \"Bash($HOME/.config/tmux/scripts/task-gates.sh:*)\"
     ]
   }
 }"
