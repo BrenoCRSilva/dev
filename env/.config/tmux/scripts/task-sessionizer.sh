@@ -1750,22 +1750,31 @@ menu_task_repos() {
         Remove) verb=remove ;;
         *) return 0 ;;
     esac
+    local reason="" run_label="Run" title
     if ! dry_out=$("$SELF" "$verb" "$task" "$name" --dry-run 2>&1); then
+        reason=$dry_out
         if dry_out=$("$SELF" "$verb" "$task" "$name" --dry-run --force 2>&1); then
             forcearg=(--force)
+            run_label="Run (force: discards uncommitted work)"
         else
-            notify-send "Task sessionizer" "$(head -n1 <<< "$dry_out")"
+            notify-send "Task sessionizer" "$(head -n1 <<< "$reason")"
             return 0
         fi
+    fi
+    # A forced run shows the refusal it overrides as the first plan row.
+    if [[ -n "$reason" ]]; then
+        plan+=$(printf '%s\tplan\t%s\n' "$ICON_CONTEXT" "$(head -n1 <<< "$reason")")$'\n'
     fi
     while IFS= read -r line; do
         plan+=$(printf '%s\tplan\t%s\n' "$ICON_CONTEXT" "$line")$'\n'
     done <<< "$dry_out"
-    rows="$plan$(printf '%s\tRun\t%s %s in %s' "$ICON_DONE" "$verb" "$name" "$task")"$'\n'
+    rows="$plan$(printf '%s\t%s\t%s %s in %s' "$ICON_DONE" "$run_label" "$verb" "$name" "$task")"$'\n'
     rows+=$(printf '%s\tCancel\tkeep everything as it is' "$ICON_CONTEXT")
-    sel=$(menu_choose "${verb^} $name in $task? Plan shown above" "$rows") || return 0
+    title="${verb^} $name in $task? Plan shown above"
+    [[ ${#forcearg[@]} -gt 0 ]] && title="Force ${verb} $name in $task? Discards uncommitted work; plan shown above"
+    sel=$(menu_choose "$title" "$rows") || return 0
     IFS=$'\t' read -r action _ <<< "$sel"
-    [[ "$action" == Run ]] || return 0
+    [[ "$action" == "$run_label" ]] || return 0
     "$SELF" "$verb" "$task" "$name" "${forcearg[@]}"
 }
 

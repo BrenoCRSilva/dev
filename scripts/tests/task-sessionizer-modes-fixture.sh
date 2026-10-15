@@ -68,6 +68,7 @@ cat > "$BIN/omarchy-menu-select" <<'EOF'
 #!/bin/sh
 prompt=$1
 rows=$(cat)
+[ -n "${MENU_ROWS_LOG:-}" ] && printf '%s\n' "$rows" >> "$MENU_ROWS_LOG"
 printf '%s\n' "$prompt" >> "$MENU_SELECT_LOG"
 choice=$(head -n 1 "$MENU_SELECT_CHOICES")
 awk -F '\t' 'NF >= 2 { if (NF >= 3) print $2 "\t" $3; else print $2 }' <<EOF2 | grep -Fxq -- "$choice" || {
@@ -378,3 +379,25 @@ git -C "$repo_added" show-ref --verify --quiet refs/heads/fixture-demote || fail
 grep -Fxq 'Repos in fixture-demote' "$MENU_SELECT_LOG" || fail 'popup did not open the task repos list'
 grep -Fxq 'Demote added in fixture-demote? Plan shown above' "$MENU_SELECT_LOG" || fail 'popup demote did not show its plan before Run'
 printf 'PASS: popup Task repos flow demotes a worker after a dry run and Run\n'
+
+# Popup demote of a dirty worktree: the forced run's Run row and title say
+# force, and the refusal it overrides is the first plan row.
+"$SESSIONIZER" promote fixture-demote worker >/dev/null || fail 'promote for dirty popup test failed'
+printf 'dirty popup\n' >> "$dtask/worker/README.md"
+detail=$("$SESSIONIZER" rows | awk -F '\t' '$1 == "task" && $2 == "fixture-demote" { print $3 }')
+MENU_ROWS_LOG="$TMP_ROOT/menu-rows.log"; export MENU_ROWS_LOG
+: > "$MENU_ROWS_LOG"; : > "$MENU_SELECT_LOG"
+queue_file "$MENU_SELECT_CHOICES" \
+    $'Task repos\taction:repos' \
+    $'fixture-demote\ttask: '"$detail" \
+    $'worker\tworker  worker' \
+    $'Demote\tremove the worktree; keep the branch' \
+    $'Run (force: discards uncommitted work)\tdemote worker in fixture-demote'
+run_menu
+grep -Fxq 'Force demote worker in fixture-demote? Discards uncommitted work; plan shown above' "$MENU_SELECT_LOG" ||
+    fail 'forced popup demote title does not say force'
+grep -Fq 'has uncommitted or untracked changes' "$MENU_ROWS_LOG" || fail 'forced popup demote lacks the refusal plan row'
+grep -Fq 'Run (force: discards uncommitted work)' "$MENU_ROWS_LOG" || fail 'forced popup demote Run row lacks the force label'
+[[ ! -e "$dtask/worker" ]] || fail 'forced popup demote left the worktree'
+git -C "$repo_worker" show-ref --verify --quiet refs/heads/fixture-demote || fail 'forced popup demote deleted the branch'
+printf 'PASS: popup forced demote warns about discarded work in its title, plan and Run row\n'
