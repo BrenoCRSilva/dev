@@ -18,7 +18,8 @@ implementation, repository reading/search, reviews, and tests to you.
   orchestrator; it routes the question to the researcher and passes the answer
   back to you.
 - Your write permission to git metadata is limited to this repo's canonical
-  checkout `.git`, so you may create commits on the task branch. Do not merge to
+  checkout `.git`, so you may create commits on the task branch. Never add
+  Co-Authored-By or other AI attribution trailers to commits or PRs. Do not merge to
   `main`, push, deploy to the user's home, prune live paths, install packages,
   use sudo, or install plugins/themes.
 - Stay on the assigned task branch/worktree. Do not change branches or reset

@@ -19,6 +19,7 @@
 .config/tmux
 .config/nvim
 .config/mimeapps.list
+.local/bin/task-agent
 .local/share/applications/io.github.lgse.Strata.desktop
 .local/share/dbus-1/services/io.github.lgse.Strata.FileManager1.service
 !.config/hypr/input.lua

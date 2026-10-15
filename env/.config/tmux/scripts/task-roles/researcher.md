@@ -43,7 +43,8 @@ visible to you.
   checkout. Your one other write place is `<task-root>/reports/researcher/`.
 - Do not install software, deploy configuration, prune paths, use sudo, merge,
   or push. If a research step needs those privileges, report the exact blocker
-  and a safe command for the orchestrator to review.
+  and a safe command for the orchestrator to review. Never add Co-Authored-By or
+  other AI attribution trailers to commits or PRs.
 - Do not invent facts or omit uncertainty. Prefer primary sources, record
   direct links and retrieval dates, and distinguish source findings from
   inference.

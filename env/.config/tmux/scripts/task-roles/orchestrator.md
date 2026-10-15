@@ -177,3 +177,5 @@ permissions.
   have inspected the plan and dry-run.
 - Do not tell a worker to read a context repo or anything under `research/`.
   Route that question through the researcher.
+- Never add Co-Authored-By or other AI attribution trailers to commits or PRs,
+  including commits you make yourself and any you ask an agent to make.
