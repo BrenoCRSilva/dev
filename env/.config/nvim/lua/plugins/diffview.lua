@@ -46,11 +46,25 @@ local close = { "n", "q", "<cmd>DiffviewClose<cr>", { desc = "Close diffview" } 
 return {
 	"sindrets/diffview.nvim",
 	cmd = { "DiffviewOpen", "DiffviewClose", "DiffviewFileHistory", "DiffviewToggleFiles", "DiffviewRefresh" },
+	-- :DiffCommit is defined at startup, so it exists before diffview loads.
+	init = function()
+		vim.api.nvim_create_user_command("DiffCommit", function(opts)
+			require("brenocrs.commit-diff").diff_rev(opts.args)
+		end, {
+			nargs = 1,
+			desc = "Diff a commit against its parent in diffview",
+			complete = function(arglead)
+				return require("brenocrs.commit-diff").complete_revs(arglead)
+			end,
+		})
+	end,
 	keys = {
 		{ "<leader>gd", review_changes, desc = "Review uncommitted changes" },
 		{ "<leader>gr", review_branch, desc = "Review branch (vs main/master)" },
 		{ "<leader>gh", "<cmd>DiffviewFileHistory %<cr>", desc = "File history" },
 		{ "<leader>gH", repo_history, desc = "Repository history" },
+		{ "<leader>gc", function() require("brenocrs.commit-diff").pick_commit() end, desc = "Diff a commit (pick)" },
+		{ "<leader>gC", function() require("brenocrs.commit-diff").pick_range() end, desc = "Diff between two commits" },
 		{ "<leader>gq", "<cmd>DiffviewClose<cr>", desc = "Close diffview" },
 	},
 	opts = {
