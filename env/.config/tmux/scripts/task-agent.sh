@@ -39,6 +39,16 @@ EOF
 }
 
 # --- stop ---------------------------------------------------------------------
+# TASK_SESSION names the herdr session that holds the agent; task-sessionizer
+# sets it. Unset, herdr uses its current session.
+herdr_cmd() {
+    if [[ -n "${TASK_SESSION:-}" ]]; then
+        herdr --session "$TASK_SESSION" "$@"
+    else
+        herdr "$@"
+    fi
+}
+
 # Ends a worker or researcher agent by sending it /exit, as if typed. An agent
 # that is working is left alone unless --force is given. Nothing is killed: if
 # the agent is still there after the wait, that is reported.
@@ -50,7 +60,7 @@ stop_agent() {
         force=yes
     done
     command -v jq >/dev/null || { echo "task-agent: jq is required to stop an agent" >&2; exit 1; }
-    info=$(herdr agent get "$name" 2>/dev/null) || { echo "task-agent: no agent named $name" >&2; exit 1; }
+    info=$(herdr_cmd agent get "$name" 2>/dev/null) || { echo "task-agent: no agent named $name" >&2; exit 1; }
     state=$(jq -r '.result.agent.agent_status' <<< "$info")
     pane=$(jq -r '.result.agent.pane_id' <<< "$info")
     if [[ "$state" == working && "$force" != yes ]]; then
@@ -61,9 +71,9 @@ stop_agent() {
         printf 'would send /exit to %s (pane %s, status %s)\n' "$name" "$pane" "$state"
         return 0
     fi
-    herdr agent prompt "$name" /exit >/dev/null
+    herdr_cmd agent prompt "$name" /exit >/dev/null
     for _ in $(seq 1 40); do
-        herdr agent get "$name" >/dev/null 2>&1 || { printf 'stopped %s\n' "$name"; return 0; }
+        herdr_cmd agent get "$name" >/dev/null 2>&1 || { printf 'stopped %s\n' "$name"; return 0; }
         sleep 0.5
     done
     echo "task-agent: $name is still running after /exit; left as it is" >&2
