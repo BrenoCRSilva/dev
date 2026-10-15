@@ -567,6 +567,32 @@ if "$SESSIONIZER" close clone-notes --dry-run >/dev/null 2>&1; then fail 'close 
 printf 'PASS: close dry runs list and remove nothing, a dirty clone or research notes block a normal close, and clean clones go with the task\n'
 printf 'PASS: --dry-run plans for create, promote, demote and close name the context clone\n'
 
+# --- step reports and assignment files ----------------------------------------
+# reports/ and hooks/ come with a task. Empty, they do not block close; with
+# files they block it like research notes, and --force removes them.
+"$SESSIONIZER" create report-task --worker "$repo_worker" --dry-run | grep -Fq 'reports/ and hooks/ folders' ||
+    fail 'create dry run does not name the reports and hooks folders'
+"$SESSIONIZER" create report-task --worker "$repo_worker" >/dev/null || fail 'report fixture create failed'
+report_task="$TASKS_DIR/report-task"
+[[ -d "$report_task/reports" && -d "$report_task/hooks" && ! -L "$report_task/hooks" ]] ||
+    fail 'create did not make the reports and hooks folders'
+"$SESSIONIZER" close report-task >/dev/null || fail 'close blocked on empty reports and hooks folders'
+[[ ! -e "$report_task" ]] || fail 'clean close left the report task folder'
+
+"$SESSIONIZER" create report-task --worker "$repo_worker" >/dev/null || fail 'report fixture create failed'
+mkdir -p "$report_task/reports/dotfiles"
+printf '{}\n' > "$report_task/reports/dotfiles/9.json"
+if out=$("$SESSIONIZER" close report-task 2>&1); then fail 'close accepted a step report'; fi
+grep -Fq 'reports/ has files (force close removes them)' <<< "$out" || fail "close did not report the step reports: $out"
+rm -f "$report_task/reports/dotfiles/9.json"
+printf 'Step 9\n' > "$report_task/hooks/dotfiles.md"
+if out=$("$SESSIONIZER" close report-task 2>&1); then fail 'close accepted an assignment file'; fi
+grep -Fq 'hooks/ has files (force close removes them)' <<< "$out" || fail "close did not report the assignment file: $out"
+"$SESSIONIZER" close report-task --force >/dev/null || fail 'forced close failed'
+[[ ! -e "$report_task" ]] || fail 'forced close left the report task folder'
+git -C "$repo_worker" show-ref --verify --quiet refs/heads/report-task || fail 'close deleted the report task branch'
+printf 'PASS: reports/ and hooks/ are created with a task, do not block a clean close, block with files, and --force removes them\n'
+
 # --- orchestrator subagents, allowlist and generated files --------------------
 # Subagents are copied into .claude/agents on create when absent; a later write
 # keeps a file the user edited. Close treats them as generated only while they

@@ -1,5 +1,19 @@
 {
   "env": {
     "CODEGRAPH_TELEMETRY": "0"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.config/tmux/scripts/task-assignment.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }

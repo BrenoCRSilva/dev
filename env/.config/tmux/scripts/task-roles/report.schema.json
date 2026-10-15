@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "report.schema.json",
+  "title": "Task step report (C4)",
+  "description": "Written by a repo agent or the researcher to <task-root>/reports/<agent>/<step>.json at each checkpoint and when the step is done. The orchestrator reads it instead of the pane; task-decide (research/jev-decisions.md 7.3) takes it as --report. Paths in files_changed are relative to the agent's folder: the worktree for a repo agent, research/ for the researcher. Check it with task-report.py check before reporting.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["step", "agent", "branch", "head_sha", "files_changed", "checks", "risks", "needs_decision", "context_estimate_k", "summary"],
+  "properties": {
+    "step": {
+      "description": "Step id from the task's AGENTS.md plan.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "maxLength": 64
+    },
+    "agent": {
+      "description": "The repo name, or researcher.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "maxLength": 64
+    },
+    "branch": {
+      "description": "Task branch of a repo agent. null for the researcher.",
+      "type": ["string", "null"],
+      "maxLength": 200
+    },
+    "head_sha": {
+      "description": "Short or full commit at HEAD when the report is written. null for the researcher.",
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "files_changed": {
+      "description": "Files this step has changed, uncommitted or committed.",
+      "type": "array",
+      "maxItems": 200,
+      "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+    },
+    "checks": {
+      "description": "Commands run for this step and their exit codes. Empty when none ran.",
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cmd", "exit"],
+        "properties": {
+          "cmd": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "exit": { "type": "integer", "minimum": 0, "maximum": 255 }
+        }
+      }
+    },
+    "risks": {
+      "description": "Known risks, one line each. Empty when none.",
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string", "minLength": 1, "maxLength": 300 }
+    },
+    "needs_decision": {
+      "description": "The question the orchestrator or user must answer before the next step, or null.",
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "context_estimate_k": {
+      "description": "Estimated context size in thousands of tokens.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+    },
+    "summary": {
+      "description": "One line on what this report covers.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[^\\r\\n]*$"
+    }
+  }
+}
