@@ -1,0 +1,6 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.config/tmux/scripts/task-statusline.sh"
+  }
+}

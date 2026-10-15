@@ -566,3 +566,49 @@ if "$SESSIONIZER" close clone-notes --dry-run >/dev/null 2>&1; then fail 'close 
 [[ ! -e "$TASKS_DIR/clone-notes" ]] || fail 'forced close left the notes task'
 printf 'PASS: close dry runs list and remove nothing, a dirty clone or research notes block a normal close, and clean clones go with the task\n'
 printf 'PASS: --dry-run plans for create, promote, demote and close name the context clone\n'
+
+# --- orchestrator subagents, allowlist and generated files --------------------
+# Subagents are copied into .claude/agents on create when absent; a later write
+# keeps a file the user edited. Close treats them as generated only while they
+# match the templates, and removes prompts/ with the task.
+agents_task="$TASKS_DIR/fixture-agents"
+"$SESSIONIZER" create fixture-agents --worker "$repo_worker" >/dev/null || fail 'agents fixture create failed'
+for name in status-reader diff-reviewer; do
+    cmp -s "$agents_task/.claude/agents/$name.md" "$ROOT/env/.config/tmux/scripts/task-roles/subagents/$name.md" ||
+        fail "create did not copy the $name subagent"
+done
+printf 'edited by the user\n' > "$agents_task/.claude/agents/status-reader.md"
+"$SESSIONIZER" add fixture-agents --worker "$repo_added" >/dev/null || fail 'agents fixture add failed'
+grep -Fxq 'edited by the user' "$agents_task/.claude/agents/status-reader.md" || fail 'a later write replaced an edited subagent'
+for rule in 'Bash(herdr agent wait:*)' 'task-sessionizer.sh refresh:*' 'task-sessionizer.sh promote:*' 'task-sessionizer.sh demote:*'; do
+    grep -Fq "$rule" "$agents_task/.claude/settings.json" || fail "orchestrator allowlist lacks $rule"
+done
+if out=$("$SESSIONIZER" close fixture-agents 2>&1); then fail 'close accepted an edited subagent'; fi
+grep -Fq 'custom task-root data in .claude' <<< "$out" || fail "close did not report the edited subagent: $out"
+cp "$ROOT/env/.config/tmux/scripts/task-roles/subagents/status-reader.md" "$agents_task/.claude/agents/status-reader.md"
+mkdir -p "$agents_task/prompts"
+printf 'Read this and follow it.\n' > "$agents_task/prompts/worker-1.md"
+"$SESSIONIZER" close fixture-agents >/dev/null 2>&1 || fail 'close blocked by generated subagents or prompts'
+[[ ! -e "$agents_task" ]] || fail 'close left the subagent or prompt files behind'
+printf 'PASS: subagents are copied on create, kept when edited, and close removes them and prompts/ when generated\n'
+
+# A task made with the previous allowlist is still generated: its close is clean.
+legacy_task="$TASKS_DIR/fixture-v1"
+"$SESSIONIZER" create fixture-v1 --worker "$repo_worker" >/dev/null || fail 'v1 fixture create failed'
+cat > "$legacy_task/.claude/settings.json" <<EOF
+{
+  "permissions": {
+    "allow": [
+      "Bash(herdr:*)",
+      "Bash(~/.config/tmux/scripts/task-agent.sh:*)",
+      "Bash($HOME/.config/tmux/scripts/task-agent.sh:*)"
+    ]
+  }
+}
+EOF
+if "$SESSIONIZER" close fixture-v1 >/dev/null 2>&1; then
+    [[ ! -e "$legacy_task" ]] || fail 'close left the previous-allowlist task behind'
+else
+    fail 'close flagged a task made with the previous allowlist'
+fi
+printf 'PASS: a task made with the previous allowlist closes without a custom-data block\n'

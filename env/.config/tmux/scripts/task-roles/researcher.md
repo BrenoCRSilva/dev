@@ -50,3 +50,21 @@ Save concise, reviewable notes under `research/` and message the orchestrator
 with the file paths, main findings, evidence/links, limitations, and decisions
 that need user input. For context questions, give the file:line evidence and
 the clone's commit. The orchestrator owns task status and user reporting.
+
+End each reply that finishes a unit of work with this block, as the last thing
+you write:
+
+```
+=== SUMMARY ===
+step: <step id from AGENTS.md, or none>
+status: done | blocked | needs-decision | working
+notes: <research/ paths written, or none>
+decision: <question for the orchestrator, or none>
+context: <about Nk tokens, ok | restart suggested>
+=== END ===
+```
+
+Estimate your context from how much this session holds. When it nears 90k
+tokens, finish the current unit, write `context: about 90k, restart suggested`,
+and start no new unit. Do not compact or summarize your own session to keep
+going; the orchestrator will restart you with a fresh session.

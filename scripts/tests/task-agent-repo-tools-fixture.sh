@@ -143,11 +143,24 @@ printf 'PASS: tracked global ignore hides a symlinked .codegraph index\n'
 for launch in "orchestrator" "--provider codex orchestrator"; do
     # shellcheck disable=SC2086
     out=$(FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --dry-run $launch 2> "$ERR")
-    if grep -Eq 'codegraph|ponytail|mcp|plugin-dir|--settings|hooks\.|dangerously|projects=' <<< "$out"; then
+    if grep -Eq 'codegraph|ponytail|mcp|plugin-dir|repo-agent|hooks\.|dangerously|projects=' <<< "$out"; then
         fail "'$launch' picked up repo-only tools: $out"
     fi
 done
 printf 'PASS: orchestrator launches carry no codegraph, ponytail or trust override\n'
+
+# Only the claude orchestrator gets the status line, through its own settings
+# file. Repo and researcher launches never see it, so their prompt prefix holds.
+claude_orch=$("$TASK_AGENT" --dry-run orchestrator 2> "$ERR")
+[[ "$claude_orch" == *"--settings $ROOT/env/.config/tmux/scripts/task-roles/orchestrator.claude-settings.json"* ]] ||
+    fail 'claude orchestrator lacks its status line settings'
+codex_orch=$("$TASK_AGENT" --dry-run --provider codex orchestrator 2> "$ERR")
+[[ "$codex_orch" != *--settings* ]] || fail 'codex orchestrator got claude settings'
+for out in "$claude_out" "$research_claude" "$codex_out" "$research_codex"; do
+    [[ "$out" != *orchestrator.claude-settings* && "$out" != *statusLine* ]] ||
+        fail 'a repo or researcher launch got the orchestrator status line'
+done
+printf 'PASS: only the claude orchestrator gets the status line settings\n'
 
 # Dry runs must not write state under the home directory.
 [[ ! -e "$HOME/.local/state/ponytail" && ! -e "$HOME/.claude.json" ]] || fail 'dry run wrote state under HOME'
