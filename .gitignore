@@ -11,4 +11,4 @@ env/.config/omarchy/plugins/**/tests/
 env/.config/omarchy/plugins/io.github.maajix.spotlight/
 env/.config/omarchy/plugins/io.github.aashbury.voxhud/
 .envctl-state/
-scripts/__pycache__/
+__pycache__/

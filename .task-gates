@@ -1,0 +1,23 @@
+# Gates for the task scripts, run by task-gates.sh from the worktree root before a merge.
+# Format: `name: command`, one per line.
+#
+# shellcheck at warning level (-S warning): warnings fail, info hints do not. The
+# known findings in task-sessionizer.sh are 13 warnings with codes SC2034, SC2128,
+# SC2178, SC2179 and SC2190. They are excluded for that one file only, which keeps
+# every other code, and every finding in the other scripts, failing. Severity cannot
+# do this: it would hide new warnings in all the scripts.
+shellcheck-task: shellcheck -x -S warning env/.config/tmux/scripts/task-agent.sh env/.config/tmux/scripts/task-assignment.sh env/.config/tmux/scripts/task-gates.sh env/.config/tmux/scripts/task-guard.sh env/.config/tmux/scripts/task-statusline.sh scripts/tests/task-*.sh
+shellcheck-sessionizer: shellcheck -x -S warning -e SC2034,SC2128,SC2178,SC2179,SC2190 env/.config/tmux/scripts/task-sessionizer.sh
+fixture-task-agent-alias: bash scripts/tests/task-agent-alias-fixture.sh
+fixture-task-agent-dry-runs: bash scripts/tests/task-agent-dry-runs.sh
+fixture-task-agent-repo-tools: bash scripts/tests/task-agent-repo-tools-fixture.sh
+fixture-task-assignment: bash scripts/tests/task-assignment-fixture.sh
+fixture-task-codegraph-index: bash scripts/tests/task-codegraph-index-fixture.sh
+fixture-task-gates: bash scripts/tests/task-gates-fixture.sh
+fixture-task-guard: bash scripts/tests/task-guard-fixture.sh
+fixture-task-report: bash scripts/tests/task-report-fixture.sh
+fixture-task-decide: python3 -I scripts/tests/task-decide-fixture.py
+fixture-task-sessionizer-layout: bash scripts/tests/task-sessionizer-layout-fixture.sh
+fixture-task-sessionizer-modes: bash scripts/tests/task-sessionizer-modes-fixture.sh
+fixture-task-sessionizer-sync: bash scripts/tests/task-sessionizer-sync-fixture.sh
+fixture-task-statusline: bash scripts/tests/task-statusline-fixture.sh

@@ -106,6 +106,20 @@ permissions.
 - Exit 2 is a refusal or a flag error. The live gate refuses unless TASK_ROLE is orchestrator, TASK_DECIDE_LIVE=1 is set, and the key file is mode 600. Tell the user what refused it; do not retry blindly. Do not open the key file or pass a key yourself.
 - Use it only on a worker report, never with `--dry-run`. Workers never run it. It never merges, pushes, deploys or installs: those stay with you after the user's OK.
 
+## Before a merge: task-gates
+
+- Run the branch's checks before you ask the user to merge, in one Bash call:
+  `~/.config/tmux/scripts/task-gates.sh <task-root>/<repo> --json`. The `--json`
+  flag writes `<task-root>/reports/orchestrator/gates-<repo>-<sha>.json`, the
+  record to cite. Run it again after every new commit on the branch.
+- Exit 0: every check passed. Carry on with the review and the user's OK.
+- Exit 1: a check failed. That is a blocker: send the failing check's name and
+  its output lines to the worker, and do not merge until a new run passes.
+- Exit 3: the repo declares no gates and none were detected. Ask the worker to add
+  a `.task-gates` file; treat it as a blocker until then.
+- Exit 2: a usage or `.task-gates` error. Fix the call or the file first.
+- The script never merges, pushes or deploys. The merge still needs the user's OK.
+
 ## Subagents for verbose work
 
 - `status-reader` (Haiku, `.claude/agents/`): reads a pane or report and returns
@@ -169,7 +183,8 @@ permissions.
 
 - Do not edit repository files, run repo builds/tests, or commit on behalf of a
   worker. Your task-root files are `AGENTS.md`, `prompts/` and `hooks/`.
-  Never write `reports/`: that is the agents' folder.
+  Never write `reports/` by hand: that is the agents' folder. The one exception is
+  `task-gates.sh --json`, which writes `reports/orchestrator/`.
 - Do not broaden an agent's permissions to the home directory. Worker git
   metadata access is restricted to that worker's canonical repo `.git` path.
 - Do not run deployment, package/theme/plugin installation, sudo, merge, or
