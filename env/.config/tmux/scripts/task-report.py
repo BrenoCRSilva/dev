@@ -73,6 +73,19 @@ def check(value, schema, where, errors):
                 errors.append(f"{where}: unknown field {key}")
 
 
+def problems(report, path=None):
+    """Schema problems, and path problems when a path is given."""
+    errors = []
+    check(report, json.loads(SCHEMA.read_text(encoding="utf-8")), "report", errors)
+    if path is not None and isinstance(report, dict):
+        # The path must name the same agent and step as the contents.
+        if path.parent.parent.name != "reports":
+            errors.append("path: report is not under reports/<agent>/")
+        if path.parent.name != report.get("agent") or path.name != f"{report.get('step')}.json":
+            errors.append("path: file must be reports/<agent>/<step>.json for its agent and step")
+    return errors
+
+
 def main(argv):
     if len(argv) != 2 or argv[0] != "check":
         print("usage: task-report.py check <task-root>/reports/<agent>/<step>.json", file=sys.stderr)
@@ -83,14 +96,7 @@ def main(argv):
     except (OSError, ValueError) as error:
         print(f"{path}: cannot read as JSON: {error}")
         return 1
-    errors = []
-    check(report, json.loads(SCHEMA.read_text(encoding="utf-8")), "report", errors)
-    if isinstance(report, dict):
-        # The path must name the same agent and step as the contents.
-        if path.parent.parent.name != "reports":
-            errors.append("path: report is not under reports/<agent>/")
-        if path.parent.name != report.get("agent") or path.name != f"{report.get('step')}.json":
-            errors.append("path: file must be reports/<agent>/<step>.json for its agent and step")
+    errors = problems(report, path)
     for error in errors:
         print(f"{path}: {error}")
     if errors:

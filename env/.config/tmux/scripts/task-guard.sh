@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # PreToolUse guard for Claude agents: task-guard.sh worker|researcher, wired in
 # task-roles/worker.claude-settings.json and researcher.claude-settings.json.
+# A Read may not reach the agent key folder, ~/.config/task-agents/, in any mode.
+# Other reads are not limited here. Bash is not covered, so a `cat` of that
+# folder still gets through: a residual risk.
 # A Write, Edit, MultiEdit or NotebookEdit may change only:
 #   worker      a file in the worker's worktree, or in its own reports folder,
 #               <task-root>/reports/worker-<repo>/.
@@ -20,8 +23,19 @@ block() {
     exit 2
 }
 
+# check_read <absolute path>: blocks a path that resolves inside the key folder.
+check_read() {
+    local keys resolved
+    [[ -n "${HOME:-}" ]] || block 'HOME is not set, so the key folder is unknown'
+    keys=$(realpath -m -- "$HOME/.config/task-agents") || block 'cannot resolve the key folder'
+    resolved=$(realpath -m -- "$1" 2>/dev/null) || block "cannot resolve $1"
+    case "$resolved/" in
+        "$keys"/*) block "$resolved is in the agent key folder; agents may not read it" ;;
+    esac
+}
+
 main() {
-    local mode=${1:-} input path project resolved wt name folder d a
+    local mode=${1:-} input path project resolved wt name folder d a tool
     local -a allow=() deny=()
     case "$mode" in
         worker | researcher) ;;
@@ -32,6 +46,11 @@ main() {
     path=$(jq -r '(.tool_input.file_path // .tool_input.notebook_path) // empty' <<< "$input" 2>/dev/null) || path=
     [[ -n "$path" ]] || block 'the call names no file path'
     [[ "$path" == /* ]] || block "file path must be absolute: $path"
+    tool=$(jq -r '.tool_name // empty' <<< "$input" 2>/dev/null) || tool=
+    if [[ $tool == Read ]]; then
+        check_read "$path"
+        return 0
+    fi
     project=${CLAUDE_PROJECT_DIR:-}
     [[ -n "$project" ]] || block 'CLAUDE_PROJECT_DIR is not set, so the agent folder is unknown'
 
