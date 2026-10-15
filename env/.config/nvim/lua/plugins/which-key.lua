@@ -82,6 +82,8 @@ return {
 			{ "<leader>gr", desc = "Review branch (vs main/master)" },
 			{ "<leader>gh", desc = "File history" },
 			{ "<leader>gH", desc = "Repository history" },
+			{ "<leader>gc", desc = "Diff a commit (pick)" },
+			{ "<leader>gC", desc = "Diff between two commits" },
 			{ "<leader>gq", desc = "Close diffview" },
 			{ "<leader>gb", desc = "Branches (picker)" },
 			{ "<leader>gB", desc = "Branches (Neogit popup)" },
