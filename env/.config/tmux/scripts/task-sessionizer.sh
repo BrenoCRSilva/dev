@@ -10,6 +10,10 @@
 #   task-sessionizer.sh create <task> [--worker repo|--context repo]...
 #   task-sessionizer.sh add <task> [--worker repo|--context repo]...
 #   task-sessionizer.sh promote <task> <repo> context -> worker
+#   task-sessionizer.sh demote <task> <repo> [--dry-run] [--force]
+#                                            worker -> context; worktree removed, branch kept
+#   task-sessionizer.sh remove <task> <repo> [--dry-run] [--force]
+#                                            drop a repo from the task; branch kept
 #   task-sessionizer.sh close <task> [--force] close a task; branches remain
 #   task-sessionizer.sh rm <task> [--force]  remove worktrees, dir and session
 #   task-sessionizer.sh stop <task> [--dry-run] [--force]
@@ -34,6 +38,7 @@ ICON_CONTEXT=$'󰈙'
 CREATE_LABEL="Create new task"
 ADD_LABEL="Add repo to task"
 CLOSE_LABEL="Close task"
+REPOS_LABEL="Task repos"
 
 # Worktrees created in this run whose post-create hook still has to run.
 PENDING=()
@@ -757,6 +762,240 @@ promote_context() {
     echo "$name promoted to worker in $task"
 }
 
+# --- demote and remove -------------------------------------------------------
+# demote turns a worker back into a read-only context: its agent stops, its
+# herdr workspace and tmux windows close, and its worktree is removed. The
+# branch is always kept. remove drops a repo from the task entirely (demoting
+# it first when it is a worker) and refuses to empty a task.
+
+# Default branch of a worktree's repo, found the same way task close looks for it.
+worktree_base() {
+    local wt=$1 branch base ref
+    branch=$(git -C "$wt" branch --show-current 2>/dev/null)
+    base=$(git -C "$wt" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    for ref in "$base" origin/main origin/master main master trunk; do
+        [[ -n "$ref" && "$ref" != "$branch" ]] || continue
+        git -C "$wt" rev-parse --verify --quiet "$ref^{commit}" >/dev/null || continue
+        base=$ref
+        break
+    done
+    printf '%s\n' "$base"
+}
+
+# "kind name worktree canonical" for a repo in a task, found by folder name or
+# canonical path. Context repos have an empty worktree field.
+task_repo_lookup() {
+    local task=$1 selector=$2 wt name origin path
+    while IFS= read -r wt; do
+        name=$(basename "$wt")
+        origin=$(origin_repo "$wt")
+        if [[ "$selector" == "$name" || "$selector" == "$origin" ]]; then
+            printf 'worker\t%s\t%s\t%s\n' "$name" "$wt" "$origin"
+            return 0
+        fi
+    done < <(task_worktrees "$task")
+    while IFS=$'\t' read -r name path; do
+        if [[ -n "$name" && ( "$selector" == "$name" || "$selector" == "$path" ) ]]; then
+            printf 'context\t%s\t\t%s\n' "$name" "$path"
+            return 0
+        fi
+    done < <(task_contexts "$task")
+    return 1
+}
+
+task_repo_total() {
+    local n
+    n=$(task_worktrees "$1" | awk 'NF' | wc -l)
+    n=$((n + $(task_contexts "$1" | awk 'NF' | wc -l)))
+    echo "$n"
+}
+
+# Drops a repo's folder name from .task-worker-order (the worktree is gone).
+drop_worker_order() {
+    local task=$1 name=$2 file="$TASKS_DIR/$1/.task-worker-order" tmp
+    [[ -f "$file" ]] || return 0
+    tmp=$(mktemp "$TASKS_DIR/$task/.task-worker-order.XXXXXX") || return 1
+    grep -Fxv -- "$name" "$file" > "$tmp"
+    chmod 600 "$tmp" && mv -f "$tmp" "$file"
+}
+
+# Agent name, pane and status for a running agent of a task's herdr session.
+task_agent_line() {
+    local s=$1 name=$2 info
+    command -v herdr >/dev/null && command -v jq >/dev/null || return 1
+    herdr_running "$s" || return 1
+    info=$(herdr --session "$s" agent get "$name" 2>/dev/null) && [[ -n "$info" ]] || return 1
+    jq -r '.result.agent | "\(.pane_id) \(.agent_status)"' <<< "$info"
+}
+
+task_workspace_id() {
+    local s=$1 label=$2
+    herdr_running "$s" || return 1
+    herdr --session "$s" workspace list 2>/dev/null |
+        jq -r --arg l "$label" '.result.workspaces[] | select(.label == $l) | .workspace_id' | head -n1
+}
+
+task_window_exists() {
+    tmux list-windows -t "=$1" -F '#W' 2>/dev/null | grep -Fxq -- "$2"
+}
+
+# nvim in a task window quits with :qa, so unsaved buffers keep it open.
+quit_nvim_window() {
+    local s=$1 name=$2 i
+    [[ "$(tmux display-message -p -t "=$s:nvim-$name" '#{pane_current_command}' 2>/dev/null)" == nvim ]] || return 0
+    tmux send-keys -t "=$s:nvim-$name" Escape ':qa' Enter
+    for i in $(seq 1 20); do
+        [[ "$(tmux display-message -p -t "=$s:nvim-$name" '#{pane_current_command}' 2>/dev/null)" == nvim ]] || return 0
+        sleep 0.25
+    done
+    return 1
+}
+
+# demote_repo <task> <repo> <dry-run yes|no> <force yes|no>
+demote_repo() {
+    local task=$1 selector=$2 dry=$3 force=$4 kind name wt origin s branch base ahead status
+    local agent_pane agent_status ws wtforce=() stopforce=()
+    IFS=$'\t' read -r kind name wt origin < <(task_repo_lookup "$task" "$selector") ||
+        die "no repo $selector in $task"
+    [[ "$kind" == worker ]] || die "$name is already context in $task"
+    s=$(session_name "$task")
+    branch=$(git -C "$wt" branch --show-current 2>/dev/null)
+    status=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) ||
+        die "$name: unable to read git status"
+    if [[ -n "$status" && "$force" != yes ]]; then
+        if [[ "$dry" == yes ]]; then
+            printf 'refused:   %s has uncommitted or untracked changes; commit, stash or use --force\n' "$name"
+            return 1
+        fi
+        die "$name has uncommitted or untracked changes; commit or stash them, or use --force"
+    fi
+    base=$(worktree_base "$wt")
+    if [[ -n "$base" && "$base" != "$branch" ]]; then
+        ahead=$(git -C "$wt" rev-list --count "$base..HEAD" 2>/dev/null || echo 0)
+        if [[ "$ahead" =~ ^[0-9]+$ ]] && ((ahead > 0)); then
+            printf 'warning:   %s has %s commit(s) not merged into %s; the branch is kept either way\n' "$name" "$ahead" "$base"
+        fi
+    fi
+    [[ "$force" == yes ]] && wtforce=(--force) && stopforce=(--force)
+
+    # Agent: stopped first, since a working agent refuses without --force.
+    if agent=$(task_agent_line "$s" "$name"); then
+        read -r agent_pane agent_status <<< "$agent"
+        if [[ "$agent_status" == working && "$force" != yes ]]; then
+            if [[ "$dry" == yes ]]; then
+                printf 'refused:   agent %s is working; wait for it or use --force\n' "$name"
+                return 1
+            fi
+            die "agent $name is working; wait for it or use demote $task $name --force"
+        fi
+        if [[ "$dry" == yes ]]; then
+            printf 'agent:     stop %s (pane %s, %s) with /exit\n' "$name" "$agent_pane" "$agent_status"
+        else
+            TASK_SESSION=$s "$(dirname "$SELF")/task-agent.sh" stop "$name" "${stopforce[@]}" ||
+                die "could not stop agent $name; the worktree was not touched"
+        fi
+    elif [[ "$dry" == yes ]]; then
+        printf 'agent:     none running\n'
+    fi
+
+    # Window and workspace: nvim must quit cleanly; the server window and the herdr workspace close.
+    if task_window_exists "$s" "nvim-$name"; then
+        if [[ "$dry" == yes ]]; then
+            printf 'window:    quit nvim-%s (:qa; refused if it has unsaved buffers)\n' "$name"
+        elif ! quit_nvim_window "$s" "$name"; then
+            die "nvim-$name still has unsaved buffers; save or quit it, then retry"
+        fi
+    fi
+    if task_window_exists "$s" "srv-$name"; then
+        if [[ "$dry" == yes ]]; then
+            printf 'window:    close srv-%s (its processes stop)\n' "$name"
+        else
+            tmux kill-window -t "=$s:srv-$name" 2>/dev/null || true
+        fi
+    fi
+    ws=$(task_workspace_id "$s" "$name" || true)
+    if [[ -n "$ws" ]]; then
+        if [[ "$dry" == yes ]]; then
+            printf 'workspace: close herdr workspace %s (%s) in session %s\n' "$name" "$ws" "$s"
+        else
+            herdr --session "$s" workspace close "$ws" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    # Worktree removal keeps the branch; the record moves the repo to context.
+    if [[ "$dry" == yes ]]; then
+        printf 'worktree:  remove %s (git worktree remove%s); branch %s kept\n' "$wt" "${wtforce:+ --force}" "${branch:-?}"
+        printf 'record:    drop %s from .task-worker-order; add %s as read-only context in .task-context.tsv\n' "$name" "$origin"
+        printf 'agents-md: regenerate the Repo modes block\n'
+        return 0
+    fi
+    git -C "$origin" worktree remove "${wtforce[@]}" "$wt" || die "could not remove worktree $wt"
+    git -C "$origin" worktree prune
+    drop_worker_order "$task" "$name"
+    add_context "$task" "$origin" >/dev/null
+    write_agents_md "$task" "$(task_branch "$task")"
+    herdr_running "$s" && herdr_announce "$task"
+    echo "$name demoted to context in $task; branch ${branch:-?} kept"
+}
+
+# repo_remove <task> <repo> <dry-run yes|no> <force yes|no>
+repo_remove() {
+    local task=$1 selector=$2 dry=$3 force=$4 kind name wt origin
+    IFS=$'\t' read -r kind name wt origin < <(task_repo_lookup "$task" "$selector") ||
+        die "no repo $selector in $task"
+    if (( $(task_repo_total "$task") <= 1 )); then
+        if [[ "$dry" == yes ]]; then
+            printf 'refused:   %s is the last repo in %s; use close or rm to end the task\n' "$name" "$task"
+            return 1
+        fi
+        die "$name is the last repo in $task; use close or rm to end the task"
+    fi
+    if [[ "$kind" == worker ]]; then
+        demote_repo "$task" "$name" "$dry" "$force" || return 1
+    fi
+    if [[ "$dry" == yes ]]; then
+        printf 'record:    remove %s from .task-context.tsv\n' "$name"
+        printf 'agents-md: regenerate the Repo modes block\n'
+        printf 'branch:    kept\n'
+        return 0
+    fi
+    remove_context "$task" "$name"
+    write_agents_md "$task" "$(task_branch "$task")"
+    herdr_running "$(session_name "$task")" && herdr_announce "$task"
+    echo "$name removed from $task; its branch is kept"
+}
+
+# repo_command <demote|remove> <task> <repo> [--dry-run] [--force]
+repo_command() {
+    local verb=$1 task=${2:-} selector=${3:-} dry=no force=no arg
+    [[ -n "$task" && -n "$selector" ]] || die "usage: $verb <task> <repo> [--dry-run] [--force]"
+    valid_name "$task" || die "invalid task name: $task"
+    [[ -d "$TASKS_DIR/$task" ]] || die "no such task: $task"
+    for arg in "${@:4}"; do
+        case "$arg" in
+            --dry-run) dry=yes ;;
+            --force) force=yes ;;
+            *) die "usage: $verb <task> <repo> [--dry-run] [--force]" ;;
+        esac
+    done
+    case "$verb" in
+        demote) demote_repo "$task" "$selector" "$dry" "$force" ;;
+        remove) repo_remove "$task" "$selector" "$dry" "$force" ;;
+    esac
+}
+
+# Repo rows for the menus: "icon<TAB>name<TAB>name  worker|context".
+task_repo_rows() {
+    local task=$1 wt name path
+    while IFS= read -r wt; do
+        name=$(basename "$wt")
+        printf '%s\t%s\t%s  worker\n' "$ICON_REPO" "$name" "$name"
+    done < <(task_worktrees "$task")
+    while IFS=$'\t' read -r name path; do
+        [[ -n "$name" ]] && printf '%s\t%s\t%s  context\n' "$ICON_CONTEXT" "$name" "$name"
+    done < <(task_contexts "$task")
+}
+
 # --- session -----------------------------------------------------------------
 
 preserve_window_name() {
@@ -1295,8 +1534,8 @@ pick() {
         while IFS= read -r r; do
             printf 'repo\t%s\t%s %s  %s\n' "$r" "$ICON_REPO" "$(basename "$r")" "$(dirname "${r/#$HOME/\~}")"
         done < <(list_repos)
-    } | fzf -m --delimiter '\t' --with-nth 3 --print-query --expect=ctrl-a,ctrl-d --prompt 'task or repo> ' \
-        --header $'enter: open task, or start a task from marked repos\ntab: mark repos · ctrl-a: add to task · ctrl-d: close selected task · or type a new task name')
+    } | fzf -m --delimiter '\t' --with-nth 3 --print-query --expect=ctrl-a,ctrl-d,ctrl-r --prompt 'task or repo> ' \
+        --header $'enter: open task, or start a task from marked repos\ntab: mark repos · ctrl-a: add to task · ctrl-r: repos of selected task · ctrl-d: close selected task · or type a new task name')
     query=$(sed -n 1p <<< "$out")
     key=$(sed -n 2p <<< "$out")
     while IFS=$'\t' read -r kind value _; do
@@ -1310,6 +1549,13 @@ pick() {
         [[ -n "$task" && $task_count -eq 1 && ${#repos[@]} -eq 0 ]] ||
             die "Ctrl-D closes one selected task; select exactly one task and no repos"
         close_task_terminal "$task"
+        return
+    fi
+
+    if [[ "$key" == ctrl-r ]]; then
+        [[ -n "$task" && $task_count -eq 1 && ${#repos[@]} -eq 0 ]] ||
+            die "Ctrl-R works on one selected task; select exactly one task and no repos"
+        repos_terminal "$task"
         return
     fi
 
@@ -1337,6 +1583,38 @@ pick() {
     open_session "$task"
 }
 
+# Terminal flow for one task's repos: pick a repo, then an action. Demote and
+# remove show the --dry-run plan and ask before running.
+repos_terminal() {
+    local task=$1 rows sel name kind action dry_out
+    local -a forcearg=()
+    rows=$(task_repo_rows "$task")
+    [[ -n "$rows" ]] || { echo "task $task has no repos"; return 0; }
+    sel=$(awk -F '\t' '{ print $2 "\t" $3 }' <<< "$rows" |
+        fzf --delimiter '\t' --with-nth 2 --prompt "repos in $task> ") || return 0
+    name=${sel%%$'\t'*}
+    kind=$(task_repo_lookup "$task" "$name" | cut -f1) || return 0
+    if [[ "$kind" == context ]]; then
+        action=$(printf 'promote\nremove\n' | fzf --prompt "$name (context)> ") || return 0
+    else
+        action=$(printf 'demote\nremove\n' | fzf --prompt "$name (worker)> ") || return 0
+    fi
+    if [[ "$action" == promote ]]; then
+        "$SELF" promote "$task" "$name"
+        return
+    fi
+    if dry_out=$("$SELF" "$action" "$task" "$name" --dry-run 2>&1); then
+        printf '%s\n' "$dry_out"
+    else
+        printf '%s\n' "$dry_out"
+        dry_out=$("$SELF" "$action" "$task" "$name" --dry-run --force 2>&1) || { printf '%s\n' "$dry_out" >&2; return 1; }
+        forcearg=(--force)
+        printf 'Forcing discards the uncommitted work shown above:\n%s\n' "$dry_out"
+    fi
+    confirm "Run $action $name in $task?" || return 0
+    "$SELF" "$action" "$task" "$name" "${forcearg[@]}"
+}
+
 # --- Omarchy menu picker (desktop keybind) -----------------------------------
 
 menu_task_rows() {
@@ -1344,6 +1622,7 @@ menu_task_rows() {
     while IFS= read -r t; do
         printf '%s\t%s\ttask: %s\n' "$ICON_TASK" "$t" "$(task_detail "$t")"
     done < <(list_tasks)
+    printf '%s\t%s\taction:repos\n' "$ICON_REPO" "$REPOS_LABEL"
     printf '%s\t%s\taction:add\n' "$ICON_ADD" "$ADD_LABEL"
     printf '%s\t%s\taction:create\n' "$ICON_REPO" "$CREATE_LABEL"
     printf '%s\t%s\taction:close\n' "$ICON_CONTEXT" "$CLOSE_LABEL"
@@ -1446,6 +1725,50 @@ close_task_menu() {
     fi
 }
 
+# Popup flow for one task's repo: pick it, then promote, demote or remove. Demote
+# and remove show the dry-run plan as rows and run only after Run is chosen.
+menu_task_repos() {
+    local task=$1 rows sel name kind action verb dry_out line plan=""
+    local -a forcearg=()
+    rows=$(task_repo_rows "$task")
+    [[ -n "$rows" ]] || return 0
+    sel=$(menu_choose "Repos in $task" "$rows") || return 0
+    IFS=$'\t' read -r name _ <<< "$sel"
+    kind=$(task_repo_lookup "$task" "$name" | cut -f1) || return 0
+    if [[ "$kind" == context ]]; then
+        rows=$(printf '%s\tPromote\tmake a worker worktree and agent\n%s\tRemove\tdrop it from the task\n%s\tCancel\tdo nothing' \
+            "$ICON_REPO" "$ICON_CONTEXT" "$ICON_DONE")
+    else
+        rows=$(printf '%s\tDemote\tremove the worktree; keep the branch\n%s\tRemove\tdemote, then drop it from the task\n%s\tCancel\tdo nothing' \
+            "$ICON_REPO" "$ICON_CONTEXT" "$ICON_DONE")
+    fi
+    sel=$(menu_choose "$name in $task" "$rows") || return 0
+    IFS=$'\t' read -r action _ <<< "$sel"
+    case "$action" in
+        Promote) "$SELF" promote "$task" "$name"; return ;;
+        Demote) verb=demote ;;
+        Remove) verb=remove ;;
+        *) return 0 ;;
+    esac
+    if ! dry_out=$("$SELF" "$verb" "$task" "$name" --dry-run 2>&1); then
+        if dry_out=$("$SELF" "$verb" "$task" "$name" --dry-run --force 2>&1); then
+            forcearg=(--force)
+        else
+            notify-send "Task sessionizer" "$(head -n1 <<< "$dry_out")"
+            return 0
+        fi
+    fi
+    while IFS= read -r line; do
+        plan+=$(printf '%s\tplan\t%s\n' "$ICON_CONTEXT" "$line")$'\n'
+    done <<< "$dry_out"
+    rows="$plan$(printf '%s\tRun\t%s %s in %s' "$ICON_DONE" "$verb" "$name" "$task")"$'\n'
+    rows+=$(printf '%s\tCancel\tkeep everything as it is' "$ICON_CONTEXT")
+    sel=$(menu_choose "${verb^} $name in $task? Plan shown above" "$rows") || return 0
+    IFS=$'\t' read -r action _ <<< "$sel"
+    [[ "$action" == Run ]] || return 0
+    "$SELF" "$verb" "$task" "$name" "${forcearg[@]}"
+}
+
 # Repeated single-select steps provide multi-select behavior with an explicit
 # mode per repo. A repo remains selected after its Worker/Context choice.
 menu_repo_picker() {
@@ -1507,6 +1830,13 @@ pick_menu() {
             for mode in "${MENU_CONTEXTS[@]}"; do selection+=(--context "$mode"); done
             add_task_repos "$task" "${selection[@]}"
             ;;
+        action:repos)
+            sel=$(menu_choose "Task for repos" "$(menu_existing_task_rows)") || return 0
+            IFS=$'\t' read -r task detail <<< "$sel"
+            [[ "$detail" == task:* ]] || return 0
+            menu_task_repos "$task"
+            return
+            ;;
         action:close)
             sel=$(menu_choose "Task to close" "$(menu_existing_task_rows)") || return 0
             IFS=$'\t' read -r task detail <<< "$sel"
@@ -1567,6 +1897,8 @@ case "$(basename "$0"):${1:-}" in
         [[ $# -eq 3 ]] || die "usage: promote <task> <repo>"
         promote_context "$2" "$3"
         ;;
+    *:demote) shift; repo_command demote "$@" ;;
+    *:remove) shift; repo_command remove "$@" ;;
     *:close)
         [[ $# -ge 2 && $# -le 3 ]] || die "usage: close <task> [--force]"
         close_task "$2" "${3:-}"

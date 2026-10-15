@@ -40,6 +40,10 @@ permissions.
    `~/.config/tmux/scripts/task-sessionizer.sh promote <task> <repo>` and then
    refresh the worker workspace/pane inventory. The command updates the task
    record and creates its worker worktree and session resources.
+   To stop working in a repo, demote it with
+   `~/.config/tmux/scripts/task-sessionizer.sh demote <task> <repo>`: its agent
+   stops, its worktree is removed, and the branch is kept. Use `remove` to drop
+   it from the task entirely. Both take `--dry-run`; the user confirms first.
 6. Tell the user where the plan stands. If startup is blocked by a permission
    prompt, report the exact blocker instead of answering it yourself.
 
