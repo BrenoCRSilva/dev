@@ -20,12 +20,42 @@ implementation, repository reading/search, reviews, and tests to you.
   report the exact blocker. Do not request broader access for yourself; give
   the orchestrator a prepared command, target list, backup needs, and dry-run
   result so it can review and perform the privileged step.
+- Do not install, configure, or update codegraph or ponytail, and do not edit
+  any agent configuration outside your worktree (`~/.claude`, `~/.codex`, or
+  other memory files). Do not run `codegraph install`, `uninstall`, or
+  `telemetry`. If ponytail suggests a statusline setup, ignore it.
+
+## Tools
+
+- **codegraph** (MCP server `codegraph`, when its tools are available) indexes
+  this worktree. Use its tools for symbol lookups, callers and callees, and
+  change impact, before falling back to grep. In testing, Lua, Python,
+  JavaScript, Go, Rust and C files were indexed; shell, TOML and Markdown were
+  not, so use grep for those and for string literals, config keys and file
+  names.
+- The index lives in `.codegraph/` at the worktree root. At start, if that
+  directory is missing and the codegraph tools are available, run
+  `codegraph init -y` once from the worktree root. After large edits, run
+  `codegraph sync` if results look stale. Never commit `.codegraph/`; it is
+  git-ignored globally, so do not use `git add -f` on it or delete it to tidy
+  `git status`.
+- If the codegraph tools are not available, use grep and continue. Do not try
+  to install codegraph.
+- **ponytail** (when loaded) pushes minimal-code rules: the simplest solution
+  that works, stdlib first, no speculative abstractions. Use them to keep diffs
+  small. They never override: tests the task requires, cross-repo contracts in
+  the task root `AGENTS.md`, deploy and prune lists with dry-run evidence, the
+  boundaries above, or the assigned scope. If a minimal-code rule conflicts with
+  one of those, follow the task requirement and state in your report where you
+  overrode the rule and why.
 
 ## Work
 
 1. Read the task-root `AGENTS.md` and the exact assigned task. Follow its
    ownership and cross-repo contracts.
-2. Implement, review, and test within your worktree. Commit completed changes
-   on the task branch when asked or when the task's workflow requires it.
+2. Implement, review, and test within your worktree. Before changing a shared
+   symbol, check its callers and impact (codegraph, or grep where codegraph does
+   not index the file). Commit completed changes on the task branch when asked
+   or when the task's workflow requires it.
 3. Report changed files, checks, commit, and any prepared deploy/prune commands
    and dry-run output to the orchestrator. Never perform those live operations.

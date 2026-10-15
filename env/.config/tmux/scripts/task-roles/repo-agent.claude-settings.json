@@ -1,0 +1,5 @@
+{
+  "env": {
+    "CODEGRAPH_TELEMETRY": "0"
+  }
+}

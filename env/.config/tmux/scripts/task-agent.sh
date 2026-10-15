@@ -8,7 +8,9 @@
 #   task-agent.sh [--dry-run] stop <name> [--force]
 #
 # The researcher is started on demand, not at task creation. stop sends /exit
-# to a finished worker or researcher; a working agent needs --force.
+# to a finished worker or researcher; a working agent needs --force. Repo agents
+# also get codegraph (MCP code index) and ponytail (minimal-code rules); each is
+# skipped with a warning when it is missing, and no other role gets them.
 # The provider defaults to $TASK_PROVIDER, else claude. Launching the
 # orchestrator exports TASK_PROVIDER so the agents it starts follow it.
 # --dry-run prints the command instead of running it. --resume must be the
@@ -26,6 +28,15 @@ declare -A EFFORT=(
     [codex:orchestrator]=medium  [codex:repo]=high  [codex:researcher]=medium
 )
 declare -A PROMPT=([orchestrator]=orchestrator.md [repo]=repo-agent.md [researcher]=researcher.md)
+
+# ponytail is pinned to a tag and checked out outside any repo. Its Claude
+# plugin loads with --plugin-dir; its hooks are passed to codex with -c. For
+# codex, PLUGIN_DATA keeps ponytail's state out of ~/.claude. Claude's own
+# ponytail state still goes to ~/.claude: its config dir cannot move without
+# moving Claude's credentials and settings too.
+PONYTAIL_VERSION=5.2.0
+PONYTAIL_DIR="$HOME/.local/share/ponytail/v$PONYTAIL_VERSION"
+PONYTAIL_STATE="$HOME/.local/state/ponytail/codex"
 
 # --- arguments -------------------------------------------------------------
 usage() {
@@ -130,6 +141,50 @@ case "${1:-}" in
 esac
 
 # --- command ---------------------------------------------------------------
+# Adds the repo-only tools to ARGS for the provider. A missing tool is reported
+# on stderr and left out, so the agent still starts. Paths that go into the
+# codex hook command or TOML are limited to safe characters, since they are not
+# quoted for the shell or TOML.
+safe_path() { [[ "$1" =~ ^[A-Za-z0-9_./-]+$ ]]; }
+
+repo_tool_args() {
+    local provider=$1 codegraph=no ponytail=no cmd
+    if command -v codegraph >/dev/null 2>&1; then
+        codegraph=yes
+    else
+        echo "task-agent: codegraph is not on PATH; repo agent starts without it" >&2
+    fi
+    if [[ -f "$PONYTAIL_DIR/.claude-plugin/plugin.json" && -f "$PONYTAIL_DIR/hooks/ponytail-activate.js" ]] &&
+        safe_path "$PONYTAIL_DIR" && safe_path "$PONYTAIL_STATE" && command -v node >/dev/null 2>&1; then
+        ponytail=yes
+    else
+        echo "task-agent: ponytail $PONYTAIL_VERSION is not usable at $PONYTAIL_DIR (missing checkout, unsafe path or no node); repo agent starts without it" >&2
+    fi
+
+    if [[ $provider == claude ]]; then
+        ARGS+=(--settings "$ROLES_DIR/repo-agent.claude-settings.json")
+        if [[ $codegraph == yes ]]; then
+            ARGS+=(--mcp-config "$ROLES_DIR/repo-agent.mcp.json" --allowedTools 'mcp__codegraph__*')
+        fi
+        if [[ $ponytail == yes ]]; then ARGS+=(--plugin-dir "$PONYTAIL_DIR"); fi
+        return
+    fi
+
+    if [[ $codegraph == yes ]]; then
+        ARGS+=(-c 'mcp_servers.codegraph.command="codegraph"'
+               -c 'mcp_servers.codegraph.args=["serve","--mcp"]'
+               -c 'mcp_servers.codegraph.env={CODEGRAPH_TELEMETRY="0"}')
+    fi
+    if [[ $ponytail == yes ]]; then
+        cmd="env PLUGIN_DATA=$PONYTAIL_STATE node $PONYTAIL_DIR/hooks"
+        ARGS+=(
+            -c "hooks.SessionStart=[{matcher=\"startup|resume|clear|compact\",hooks=[{type=\"command\",command=\"$cmd/ponytail-activate.js\",timeout=5}]}]"
+            -c "hooks.SubagentStart=[{hooks=[{type=\"command\",command=\"$cmd/ponytail-subagent.js\",timeout=5}]}]"
+            -c "hooks.UserPromptSubmit=[{hooks=[{type=\"command\",command=\"$cmd/ponytail-mode-tracker.js\",timeout=5}]}]"
+        )
+    fi
+}
+
 # Fills ARGS with the role's model, effort and prompt for the provider. A dry
 # run shows codex's prompt as a placeholder instead of its contents.
 # herdr refuses agent arguments containing newlines, so no argument may be multi-line: claude reads the prompt from its file, codex gets it JSON-escaped on one line.
@@ -141,6 +196,7 @@ agent_args() {
     if [[ $provider == claude ]]; then
         ARGS=(--model "${MODEL[claude:$role]}" --effort "${EFFORT[claude:$role]}" --append-system-prompt-file "$file")
         if [[ $role == repo ]]; then
+            repo_tool_args claude
             ARGS+=(--permission-mode auto --add-dir "$canonical_repo/.git")
         elif [[ $role == researcher ]]; then
             ARGS+=(--permission-mode auto)
@@ -157,7 +213,10 @@ agent_args() {
         ARGS+=(-m "${MODEL[codex:$role]}" -c "model_reasoning_effort=\"${EFFORT[codex:$role]}\"" -c "developer_instructions=$prompt")
         # Codex's closest match to Claude's auto mode: the model decides when to
         # ask (on-request), inside the same workspace-write sandbox as before.
-        if [[ $role == repo ]]; then ARGS+=(-a on-request -s workspace-write --add-dir "$canonical_repo/.git"); fi
+        if [[ $role == repo ]]; then
+            repo_tool_args codex
+            ARGS+=(-a on-request -s workspace-write --add-dir "$canonical_repo/.git")
+        fi
         if [[ $role == researcher ]]; then ARGS+=(-a on-request -s workspace-write); fi
     fi
 }
