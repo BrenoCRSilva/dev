@@ -5,7 +5,10 @@
 #   task-agent.sh [--dry-run] [--provider claude|codex] orchestrator [--resume]
 #   task-agent.sh [--dry-run] [--provider claude|codex] start repo <name> <pane_id> <canonical_repo> [--resume]
 #   task-agent.sh [--dry-run] [--provider claude|codex] start researcher <pane_id> [--resume]
+#   task-agent.sh [--dry-run] stop <name> [--force]
 #
+# The researcher is started on demand, not at task creation. stop sends /exit
+# to a finished worker or researcher; a working agent needs --force.
 # The provider defaults to $TASK_PROVIDER, else claude. Launching the
 # orchestrator exports TASK_PROVIDER so the agents it starts follow it.
 # --dry-run prints the command instead of running it. --resume must be the
@@ -30,12 +33,60 @@ usage() {
 usage: task-agent.sh [--dry-run] [--provider claude|codex] orchestrator [--resume]
        task-agent.sh [--dry-run] [--provider claude|codex] start repo <name> <pane_id> <canonical_repo> [--resume]
        task-agent.sh [--dry-run] [--provider claude|codex] start researcher <pane_id> [--resume]
+       task-agent.sh [--dry-run] stop <name> [--force]
 EOF
     exit 2
 }
 
+# --- stop ---------------------------------------------------------------------
+# TASK_SESSION names the herdr session that holds the agent; task-sessionizer
+# sets it. Unset, herdr uses its current session.
+herdr_cmd() {
+    if [[ -n "${TASK_SESSION:-}" ]]; then
+        herdr --session "$TASK_SESSION" "$@"
+    else
+        herdr "$@"
+    fi
+}
+
+# Ends a worker or researcher agent by sending it /exit, as if typed. An agent
+# that is working is left alone unless --force is given. Nothing is killed: if
+# the agent is still there after the wait, that is reported.
+stop_agent() {
+    local dry=$1 name=${2:-} arg info state pane force=no
+    [[ -n "$name" ]] || usage
+    for arg in "${@:3}"; do
+        [[ "$arg" == --force ]] || usage
+        force=yes
+    done
+    command -v jq >/dev/null || { echo "task-agent: jq is required to stop an agent" >&2; exit 1; }
+    info=$(herdr_cmd agent get "$name" 2>/dev/null) || { echo "task-agent: no agent named $name" >&2; exit 1; }
+    state=$(jq -r '.result.agent.agent_status' <<< "$info")
+    pane=$(jq -r '.result.agent.pane_id' <<< "$info")
+    if [[ "$state" == working && "$force" != yes ]]; then
+        echo "task-agent: $name is working; wait for it, or stop $name --force" >&2
+        exit 1
+    fi
+    if [[ "$dry" == yes ]]; then
+        printf 'would send /exit to %s (pane %s, status %s)\n' "$name" "$pane" "$state"
+        return 0
+    fi
+    herdr_cmd agent prompt "$name" /exit >/dev/null
+    for _ in $(seq 1 40); do
+        herdr_cmd agent get "$name" >/dev/null 2>&1 || { printf 'stopped %s\n' "$name"; return 0; }
+        sleep 0.5
+    done
+    echo "task-agent: $name is still running after /exit; left as it is" >&2
+    return 1
+}
+
 dry_run=no
 if [[ "${1:-}" == --dry-run ]]; then dry_run=yes; shift; fi
+
+if [[ "${1:-}" == stop ]]; then
+    stop_agent "$dry_run" "${@:2}"
+    exit
+fi
 
 provider=${TASK_PROVIDER:-claude}
 if [[ "${1:-}" == --provider ]]; then

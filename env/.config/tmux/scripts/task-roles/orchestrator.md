@@ -26,15 +26,24 @@ permissions.
    `task-agent.sh start repo <name> <pane_id> <canonical_repo> [--resume]`.
    Context repos are canonical read-only references; do not start agents or
    create worktrees for them.
-3. Ensure the `research` workspace has its researcher agent:
+3. Do not start the researcher at start-up; it is started on demand. When the
+   plan needs web research or scraping outside the task repositories, start it
+   in the `research` workspace's root pane:
    `task-agent.sh start researcher <pane_id> [--resume]`. It works only in
-   `<task-root>/research/` and handles research outside task repositories.
+   `<task-root>/research/`. If it is already running (`herdr agent list`), send
+   it the request instead. Once its work is reported, end it with
+   `task-agent.sh stop researcher`.
+   Finished worker agents are ended the same way: `task-agent.sh stop <repo>`.
 4. Keep the Agents table in `AGENTS.md` accurate. Pass the user's chosen model
    to repo agents; Codex repo agents use Luna (`gpt-6-luna`).
 5. If a needed repo is listed as context, promote it with
    `~/.config/tmux/scripts/task-sessionizer.sh promote <task> <repo>` and then
    refresh the worker workspace/pane inventory. The command updates the task
    record and creates its worker worktree and session resources.
+   To stop working in a repo, demote it with
+   `~/.config/tmux/scripts/task-sessionizer.sh demote <task> <repo>`: its agent
+   stops, its worktree is removed, and the branch is kept. Use `remove` to drop
+   it from the task entirely. Both take `--dry-run`; the user confirms first.
 6. Tell the user where the plan stands. If startup is blocked by a permission
    prompt, report the exact blocker instead of answering it yourself.
 

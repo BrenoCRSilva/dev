@@ -89,6 +89,10 @@ return {
 				},
 			},
 			filetypes = { "typescript", "javascript", "javascriptreact", "typescriptreact", "vue" },
+			-- Cap the tsserver heap (MB); large monorepos otherwise grow it without limit.
+			settings = {
+				typescript = { tsserver = { maxTsServerMemory = 3072 } },
+			},
 		})
 
 		vim.lsp.config("vue_ls", {
@@ -189,5 +193,8 @@ return {
 				"rust_analyzer",
 			},
 		})
+
+		-- Stop servers idle for 10 minutes; they restart when a buffer is entered.
+		require("brenocrs.lsp-idle").setup()
 	end,
 }

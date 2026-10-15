@@ -49,7 +49,8 @@ case "$1" in
         [[ -n "${TMUX_HAS_SESSION:-}" && "${3:-}" == "=$TMUX_HAS_SESSION" ]] && exit 0
         exit 1
         ;;
-    list-windows|list-clients) exit 0 ;;
+    list-windows) [ -n "${TMUX_WINDOWS:-}" ] && printf '%s\n' $TMUX_WINDOWS; exit 0 ;;
+    list-clients) exit 0 ;;
     display-message) exit 0 ;;
     *) exit 0 ;;
 esac
@@ -67,6 +68,7 @@ cat > "$BIN/omarchy-menu-select" <<'EOF'
 #!/bin/sh
 prompt=$1
 rows=$(cat)
+[ -n "${MENU_ROWS_LOG:-}" ] && printf '%s\n' "$rows" >> "$MENU_ROWS_LOG"
 printf '%s\n' "$prompt" >> "$MENU_SELECT_LOG"
 choice=$(head -n 1 "$MENU_SELECT_CHOICES")
 awk -F '\t' 'NF >= 2 { if (NF >= 3) print $2 "\t" $3; else print $2 }' <<EOF2 | grep -Fxq -- "$choice" || {
@@ -298,3 +300,104 @@ grep -Fq 'session stop fixture-menu' "$HERDR_LOG" || fail 'popup close did not s
 grep -Fq 'session delete fixture-menu' "$HERDR_LOG" || fail 'popup close did not delete the Herdr session record'
 grep -Fq 'kill-session -t =fixture-menu' "$TMUX_LOG" || fail 'popup close did not request tmux session removal'
 printf 'PASS: confirmed popup close removes task/worktrees and sessions while retaining branches\n'
+
+# --- demote and remove -------------------------------------------------------
+# Round trip, refusals, --force, context removal, the last-repo refusal, and the
+# Task repos popup flow. Dry runs print every planned action.
+dtask="$TASKS_DIR/fixture-demote"
+"$SESSIONIZER" create fixture-demote --worker "$repo_worker" --worker "$repo_added" >/dev/null
+[[ -e "$dtask/worker/.git" && -e "$dtask/added/.git" ]] || fail 'demote fixture: create failed'
+
+dry=$("$SESSIONIZER" demote fixture-demote worker --dry-run) || fail 'demote dry run failed'
+printf 'DRY-RUN demote fixture-demote worker:\n%s\n' "$dry"
+[[ -e "$dtask/worker/.git" ]] || fail 'demote dry run removed the worktree'
+grep -Fq "branch fixture-demote kept" <<< "$dry" || fail 'demote dry run does not say the branch is kept'
+
+committed=$(git -C "$dtask/worker" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m local && echo ok)
+[[ "$committed" == ok ]] || fail 'could not commit in worker worktree'
+out=$("$SESSIONIZER" demote fixture-demote worker 2>&1) || fail "demote failed: $out"
+grep -Fq 'not merged into' <<< "$out" || fail 'demote did not warn about unmerged commits'
+[[ ! -e "$dtask/worker" ]] || fail 'demote left the worktree behind'
+git -C "$repo_worker" show-ref --verify --quiet refs/heads/fixture-demote || fail 'demote deleted the branch'
+grep -Fxq $'worker\t'"$repo_worker" "$dtask/.task-context.tsv" || fail 'demote did not record worker as context'
+grep -Fq "canonical checkout \`$repo_worker\`" "$dtask/AGENTS.md" || fail 'AGENTS.md lacks demoted context entry'
+! grep -Fq '**worker** — worktree' "$dtask/AGENTS.md" || fail 'AGENTS.md still lists worker as a worktree'
+! grep -Fxq worker "$dtask/.task-worker-order" || fail 'worker order still names demoted repo'
+
+"$SESSIONIZER" promote fixture-demote worker >/dev/null || fail 'promote after demote failed'
+[[ -e "$dtask/worker/.git" ]] || fail 'promote did not recreate the worktree'
+! grep -Fq $'worker\t' "$dtask/.task-context.tsv" 2>/dev/null || fail 'promote left worker as context'
+grep -Fq '**worker** — worktree' "$dtask/AGENTS.md" || fail 'AGENTS.md lacks promoted worker'
+printf 'PASS: demote -> promote round trip keeps the branch and both records\n'
+
+# A dirty worktree is refused, and --force discards it.
+printf 'dirty\n' >> "$dtask/worker/README.md"
+if out=$("$SESSIONIZER" demote fixture-demote worker 2>&1); then fail 'dirty demote was not refused'; fi
+grep -Fq 'uncommitted or untracked' <<< "$out" || fail 'dirty refusal does not name the reason'
+[[ -e "$dtask/worker/.git" ]] || fail 'refused demote removed the worktree'
+if "$SESSIONIZER" demote fixture-demote worker --dry-run >/dev/null 2>&1; then fail 'dirty dry run was not refused'; fi
+"$SESSIONIZER" demote fixture-demote worker --force >/dev/null || fail 'forced demote failed'
+[[ ! -e "$dtask/worker" ]] || fail 'forced demote left the worktree'
+git -C "$repo_worker" show-ref --verify --quiet refs/heads/fixture-demote || fail 'forced demote deleted the branch'
+printf 'PASS: dirty worktree is refused; --force removes it and keeps the branch\n'
+
+# Context repo removal: record and AGENTS.md entry go, branch stays.
+dry=$("$SESSIONIZER" remove fixture-demote worker --dry-run) || fail 'remove dry run failed'
+printf 'DRY-RUN remove fixture-demote worker (context):\n%s\n' "$dry"
+"$SESSIONIZER" remove fixture-demote worker >/dev/null || fail 'remove of context repo failed'
+! grep -Fq $'worker\t' "$dtask/.task-context.tsv" 2>/dev/null || fail 'remove left the context record'
+! grep -Fq 'canonical checkout `'"$repo_worker"'`' "$dtask/AGENTS.md" || fail 'remove left the AGENTS.md entry'
+git -C "$repo_worker" show-ref --verify --quiet refs/heads/fixture-demote || fail 'remove deleted the branch'
+printf 'PASS: remove of a context repo drops its record and keeps the branch\n'
+
+# The last repo of a task cannot be removed.
+if out=$("$SESSIONIZER" remove fixture-demote added 2>&1); then fail 'last repo was removed'; fi
+grep -Fq 'last repo' <<< "$out" || fail 'last-repo refusal does not explain itself'
+if "$SESSIONIZER" remove fixture-demote added --dry-run >/dev/null 2>&1; then fail 'last-repo dry run was not refused'; fi
+[[ -e "$dtask/added/.git" ]] || fail 'last-repo refusal touched the worktree'
+printf 'PASS: last repo of a task is refused\n'
+
+# Window and workspace: the server window closes before the worktree goes.
+"$SESSIONIZER" add fixture-demote --worker "$repo_worker" >/dev/null || fail 'add for window test failed'
+: > "$TMUX_LOG"
+TMUX_WINDOWS="agent nvim-worker srv-worker" "$SESSIONIZER" demote fixture-demote worker >/dev/null || fail 'demote with windows failed'
+grep -Fq 'kill-window -t =fixture-demote:srv-worker' "$TMUX_LOG" || fail 'demote did not close the server window'
+printf 'PASS: demote closes the repo server window\n'
+
+# Popup: Task repos -> repo -> Demote -> Run (the plan rows precede Run).
+detail=$("$SESSIONIZER" rows | awk -F '\t' '$1 == "task" && $2 == "fixture-demote" { print $3 }')
+queue_file "$MENU_SELECT_CHOICES" \
+    $'Task repos\taction:repos' \
+    $'fixture-demote\ttask: '"$detail" \
+    $'added\tadded  worker' \
+    $'Demote\tremove the worktree; keep the branch' \
+    $'Run\tdemote added in fixture-demote'
+run_menu
+[[ ! -e "$dtask/added" ]] || fail 'popup demote did not remove the worktree'
+grep -Fq $'added\t' "$dtask/.task-context.tsv" || fail 'popup demote did not record context'
+git -C "$repo_added" show-ref --verify --quiet refs/heads/fixture-demote || fail 'popup demote deleted the branch'
+grep -Fxq 'Repos in fixture-demote' "$MENU_SELECT_LOG" || fail 'popup did not open the task repos list'
+grep -Fxq 'Demote added in fixture-demote? Plan shown above' "$MENU_SELECT_LOG" || fail 'popup demote did not show its plan before Run'
+printf 'PASS: popup Task repos flow demotes a worker after a dry run and Run\n'
+
+# Popup demote of a dirty worktree: the forced run's Run row and title say
+# force, and the refusal it overrides is the first plan row.
+"$SESSIONIZER" promote fixture-demote worker >/dev/null || fail 'promote for dirty popup test failed'
+printf 'dirty popup\n' >> "$dtask/worker/README.md"
+detail=$("$SESSIONIZER" rows | awk -F '\t' '$1 == "task" && $2 == "fixture-demote" { print $3 }')
+MENU_ROWS_LOG="$TMP_ROOT/menu-rows.log"; export MENU_ROWS_LOG
+: > "$MENU_ROWS_LOG"; : > "$MENU_SELECT_LOG"
+queue_file "$MENU_SELECT_CHOICES" \
+    $'Task repos\taction:repos' \
+    $'fixture-demote\ttask: '"$detail" \
+    $'worker\tworker  worker' \
+    $'Demote\tremove the worktree; keep the branch' \
+    $'Run (force: discards uncommitted work)\tdemote worker in fixture-demote'
+run_menu
+grep -Fxq 'Force demote worker in fixture-demote? Discards uncommitted work; plan shown above' "$MENU_SELECT_LOG" ||
+    fail 'forced popup demote title does not say force'
+grep -Fq 'has uncommitted or untracked changes' "$MENU_ROWS_LOG" || fail 'forced popup demote lacks the refusal plan row'
+grep -Fq 'Run (force: discards uncommitted work)' "$MENU_ROWS_LOG" || fail 'forced popup demote Run row lacks the force label'
+[[ ! -e "$dtask/worker" ]] || fail 'forced popup demote left the worktree'
+git -C "$repo_worker" show-ref --verify --quiet refs/heads/fixture-demote || fail 'forced popup demote deleted the branch'
+printf 'PASS: popup forced demote warns about discarded work in its title, plan and Run row\n'
