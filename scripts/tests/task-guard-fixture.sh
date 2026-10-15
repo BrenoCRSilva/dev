@@ -60,6 +60,15 @@ block() {
     printf 'PASS: %s\n' "$1"
 }
 
+# The agent key folder is closed to reads in every mode. Its own HOME keeps the
+# fixture away from the real key file.
+export HOME="$TMP_ROOT/home"
+mkdir -p "$HOME/.config/task-agents" "$HOME/.config/tmux"
+HOME=$(realpath "$HOME")
+KEY_DIR="$HOME/.config/task-agents"
+printf 'OPENROUTER_API_KEY=fixture\n' > "$KEY_DIR/openrouter.env"
+ln -s "$KEY_DIR" "$WT/keys-link"
+
 # Inside the worktree and its own reports folder.
 allow 'Write inside the worktree' "$WT" Write "$WT/env/deep/new.txt"
 allow 'Edit of a worktree file' "$WT" Edit "$WT/README.md"
@@ -84,6 +93,17 @@ block 'a lookalike folder that starts with the own name' "$WT" Write "$TASK/repo
 block 'a symlink in the worktree that points outside it' "$WT" Write "$WT/escape/passwd"
 block 'a relative path' "$WT" Write "env/deep/x.txt"
 block 'a call with no file path' "$WT" Write ''
+
+# Reads: the key folder is blocked; other reads are not limited here.
+allow 'a worker reads a file in its worktree' "$WT" Read "$WT/README.md"
+allow 'a worker reads a file outside its worktree' "$WT" Read "$HOME/.config/tmux/x.conf"
+allow 'a lookalike folder is not the key folder' "$WT" Read "$HOME/.config/task-agents-old/openrouter.env"
+block 'a worker reads the key file' "$WT" Read "$KEY_DIR/openrouter.env"
+block 'a worker reads the key folder itself' "$WT" Read "$KEY_DIR"
+block 'a worker reads the key file through a traversal' "$WT" Read "$HOME/.config/tmux/../task-agents/openrouter.env"
+block 'a worker reads the key file through a symlink in its worktree' "$WT" Read "$WT/keys-link/openrouter.env"
+block 'a relative path to the key file' "$WT" Read "openrouter.env"
+block 'a read with no file path' "$WT" Read ''
 
 # A cd into a sibling does not move the guard: the worker is the launch folder.
 block 'a cd into a sibling does not widen the guard' "$WT" Write "$SIBLING/file.txt" "$SIBLING"
@@ -132,6 +152,8 @@ block "researcher writes another agent's reports" "$RESEARCH" Write "$TASK/repor
 block 'researcher traverses into a worker worktree' "$RESEARCH" Write "$RESEARCH/../dotfiles/x.txt"
 block 'researcher traverses to the task root' "$RESEARCH" Write "$RESEARCH/../AGENTS.md"
 block 'researcher writes the canonical checkout' "$RESEARCH" Write "$CANON/env/x"
+allow 'researcher reads a context clone (reads are not limited to research/)' "$RESEARCH" Read "$RESEARCH/context/clone/src/main.py"
+block 'researcher reads the key file' "$RESEARCH" Read "$KEY_DIR/openrouter.env"
 block 'a launch folder that is not research/' "$TASK" Write "$RESEARCH/notes/x.md"
 block 'a researcher folder that does not exist' "$TASK/research-missing" Write "$RESEARCH/notes/x.md"
 run_guard '' "$(call Write "$RESEARCH/notes/x.md" "$RESEARCH")"
@@ -148,8 +170,21 @@ printf '%s' "$(call Write "$WT/x.txt" "$WT")" | CLAUDE_PROJECT_DIR="$WT" "$GUARD
 [[ $STATUS -eq 2 ]] || fail "an unknown mode was not blocked: $STATUS"
 printf 'PASS: a guard run with no mode, or an unknown one, blocks\n'
 
-# Each role's settings run the guard in its own mode.
+# Each role's settings run the guard in its own mode, for writes and for reads,
+# and deny the key folder to Read, Edit and Write.
 for role in worker researcher; do
+    # shellcheck disable=SC2088
+    jq -e --arg c "~/.config/tmux/scripts/task-guard.sh $role" '.hooks.PreToolUse[] | select(.matcher == "Read") | .hooks[] | select(.command == $c)' \
+        "$ROLES/$role.claude-settings.json" > /dev/null || fail "$role settings lack the read guard in mode $role"
+    for rule in Read Edit Write; do
+        # The settings hold literal ~/ and //home paths, so nothing may expand them here.
+        # shellcheck disable=SC2088
+        for root in '~/.config/task-agents/**' '//home/pontual/.config/task-agents/**'; do
+            # shellcheck disable=SC2088
+            jq -e --arg r "$rule($root)" '.permissions.deny | index($r)' "$ROLES/$role.claude-settings.json" > /dev/null \
+                || fail "$role settings do not deny $rule($root)"
+        done
+    done
     # The settings file holds the literal ~/ path, so the tilde must not expand here.
     # shellcheck disable=SC2088
     jq -e --arg c "~/.config/tmux/scripts/task-guard.sh $role" '.hooks.PreToolUse[] | select(.matcher == "Write|Edit|MultiEdit|NotebookEdit") | .hooks[] | select(.command == $c)' \

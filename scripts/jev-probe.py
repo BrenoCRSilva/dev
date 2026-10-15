@@ -7,7 +7,8 @@ The default is a dry run: it builds every request and checks each code route
 against the case, with no network and no key. --live sends each non-code case
 --runs times through task-decide's decide() and reports agreement per question
 (strict 0.5 threshold, and band-aware), ambiguous cases apart, unstable cases,
-latency and cost. Nothing is written. Stdlib only.
+latency and cost. Live requests pass task-decide's gate: TASK_ROLE=orchestrator and
+a mode 600 key file. Nothing is written. Stdlib only.
 """
 import argparse
 import importlib.util
@@ -86,7 +87,7 @@ def dry_run(formula, cases):
     return 1 if mismatches else 0
 
 
-def live_calls(formula, cases, runs):
+def live_calls(formula, cases, runs, opt_in):
     calls, mismatches = [], []
     for case in cases:
         mismatch = check_code_route(formula, case)
@@ -97,7 +98,7 @@ def live_calls(formula, cases, runs):
             continue
         for run in range(runs):
             start = time.perf_counter()
-            record, _ = DD.decide(formula, case["report"], model=formula["decision"]["model"], key_loader=DD.load_key, url=DD.endpoint())
+            record, _ = DD.decide(formula, case["report"], model=formula["decision"]["model"], opt_in=opt_in, key_loader=DD.load_key, url=DD.endpoint())
             calls.append((case, run, record, time.perf_counter() - start))
     return calls, mismatches
 
@@ -215,7 +216,7 @@ def main(argv=None):
         cases = load_cases(args.cases, formula)
         if not args.live:
             return dry_run(formula, cases)
-        calls, mismatches = live_calls(formula, cases, args.runs)
+        calls, mismatches = live_calls(formula, cases, args.runs, opt_in=args.live)
         print_summary(formula, cases, calls, mismatches)
         return 1 if mismatches else 0
     except DD.Usage as error:

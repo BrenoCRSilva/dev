@@ -1,4 +1,14 @@
 {
+  "permissions": {
+    "deny": [
+      "Read(~/.config/task-agents/**)",
+      "Read(//home/pontual/.config/task-agents/**)",
+      "Edit(~/.config/task-agents/**)",
+      "Edit(//home/pontual/.config/task-agents/**)",
+      "Write(~/.config/task-agents/**)",
+      "Write(//home/pontual/.config/task-agents/**)"
+    ]
+  },
   "env": {
     "CODEGRAPH_TELEMETRY": "0"
   },
@@ -16,6 +26,16 @@
       }
     ],
     "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.config/tmux/scripts/task-guard.sh researcher",
+            "timeout": 5
+          }
+        ]
+      },
       {
         "matcher": "Write|Edit|MultiEdit|NotebookEdit",
         "hooks": [

@@ -101,9 +101,9 @@ permissions.
 ## Routing a finished step: task-decide
 
 - After a worker's report passes `task-report.py check`, run this once, in one Bash call:
-  `python3 ~/.config/tmux/scripts/task-decide.py --formula ~/.config/tmux/scripts/task-roles/formulas/worker-step.toml --report <task-root>/reports/<agent>/<step>.json --step <step>`
+  `TASK_DECIDE_LIVE=1 python3 ~/.config/tmux/scripts/task-decide.py --formula ~/.config/tmux/scripts/task-roles/formulas/worker-step.toml --report <task-root>/reports/<agent>/<step>.json --step <step>`
 - Read only its exit code and its one-line stdout. Exit 0 (continue): record the step in `AGENTS.md` and carry on with the plan, without an Opus turn. Exit 10 (escalate), 11 (ask_user), 20 (service failed; treat as escalate) or 3 (invalid formula or report): wake up and decide from the report and `<task-root>/decisions/<agent>/<step>.json`. Exit 11 needs the user: ask at a checkpoint.
-- Exit 2 is a problem on your side (flags or key). Fix it; do not retry blindly. Do not open the key file or pass a key yourself.
+- Exit 2 is a refusal or a flag error. The live gate refuses unless TASK_ROLE is orchestrator, TASK_DECIDE_LIVE=1 is set, and the key file is mode 600. Tell the user what refused it; do not retry blindly. Do not open the key file or pass a key yourself.
 - Use it only on a worker report, never with `--dry-run`. Workers never run it. It never merges, pushes, deploys or installs: those stay with you after the user's OK.
 
 ## Subagents for verbose work

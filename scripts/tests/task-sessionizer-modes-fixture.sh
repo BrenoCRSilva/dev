@@ -625,7 +625,9 @@ done
 printf 'edited by the user\n' > "$agents_task/.claude/agents/status-reader.md"
 "$SESSIONIZER" add fixture-agents --worker "$repo_added" >/dev/null || fail 'agents fixture add failed'
 grep -Fxq 'edited by the user' "$agents_task/.claude/agents/status-reader.md" || fail 'a later write replaced an edited subagent'
-for rule in 'Bash(herdr agent wait:*)' 'task-sessionizer.sh refresh:*' 'task-sessionizer.sh promote:*' 'task-sessionizer.sh demote:*'; do
+for rule in 'Bash(herdr agent wait:*)' 'task-sessionizer.sh refresh:*' 'task-sessionizer.sh promote:*' 'task-sessionizer.sh demote:*' \
+    'Bash(~/.config/tmux/scripts/task-decide.py:*)' 'Bash(python3 ~/.config/tmux/scripts/task-decide.py:*)' \
+    "Bash(python3 $HOME/.config/tmux/scripts/task-decide.py:*)"; do
     grep -Fq "$rule" "$agents_task/.claude/settings.json" || fail "orchestrator allowlist lacks $rule"
 done
 if out=$("$SESSIONIZER" close fixture-agents 2>&1); then fail 'close accepted an edited subagent'; fi
@@ -657,3 +659,31 @@ else
     fail 'close flagged a task made with the previous allowlist'
 fi
 printf 'PASS: a task made with the previous allowlist closes without a custom-data block\n'
+
+# The allowlist before task-decide was allowed is still generated too.
+v2_task="$TASKS_DIR/fixture-v2"
+"$SESSIONIZER" create fixture-v2 --worker "$repo_worker" >/dev/null || fail 'v2 fixture create failed'
+cat > "$v2_task/.claude/settings.json" <<JSONEOF
+{
+  "permissions": {
+    "allow": [
+      "Bash(herdr:*)",
+      "Bash(herdr agent wait:*)",
+      "Bash(~/.config/tmux/scripts/task-agent.sh:*)",
+      "Bash($HOME/.config/tmux/scripts/task-agent.sh:*)",
+      "Bash(~/.config/tmux/scripts/task-sessionizer.sh refresh:*)",
+      "Bash($HOME/.config/tmux/scripts/task-sessionizer.sh refresh:*)",
+      "Bash(~/.config/tmux/scripts/task-sessionizer.sh promote:*)",
+      "Bash($HOME/.config/tmux/scripts/task-sessionizer.sh promote:*)",
+      "Bash(~/.config/tmux/scripts/task-sessionizer.sh demote:*)",
+      "Bash($HOME/.config/tmux/scripts/task-sessionizer.sh demote:*)"
+    ]
+  }
+}
+JSONEOF
+if "$SESSIONIZER" close fixture-v2 >/dev/null 2>&1; then
+    [[ ! -e "$v2_task" ]] || fail 'close left the pre-task-decide task behind'
+else
+    fail 'close flagged a task made before task-decide was allowed'
+fi
+printf 'PASS: a task made before task-decide was allowed closes without a custom-data block\n'

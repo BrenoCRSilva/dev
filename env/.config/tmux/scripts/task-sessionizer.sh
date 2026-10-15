@@ -778,7 +778,8 @@ task_close_issues() {
     context_clone_issues "$task"
 }
 
-CLAUDE_TASK_SETTINGS="{
+# Written by the version before task-decide was allowed; still generated.
+CLAUDE_TASK_SETTINGS_V2="{
   \"permissions\": {
     \"allow\": [
       \"Bash(herdr:*)\",
@@ -791,6 +792,27 @@ CLAUDE_TASK_SETTINGS="{
       \"Bash($HOME/.config/tmux/scripts/task-sessionizer.sh promote:*)\",
       \"Bash(~/.config/tmux/scripts/task-sessionizer.sh demote:*)\",
       \"Bash($HOME/.config/tmux/scripts/task-sessionizer.sh demote:*)\"
+    ]
+  }
+}"
+
+CLAUDE_TASK_SETTINGS="{
+  \"permissions\": {
+    \"allow\": [
+      \"Bash(herdr:*)\",
+      \"Bash(herdr agent wait:*)\",
+      \"Bash(~/.config/tmux/scripts/task-agent.sh:*)\",
+      \"Bash($HOME/.config/tmux/scripts/task-agent.sh:*)\",
+      \"Bash(~/.config/tmux/scripts/task-sessionizer.sh refresh:*)\",
+      \"Bash($HOME/.config/tmux/scripts/task-sessionizer.sh refresh:*)\",
+      \"Bash(~/.config/tmux/scripts/task-sessionizer.sh promote:*)\",
+      \"Bash($HOME/.config/tmux/scripts/task-sessionizer.sh promote:*)\",
+      \"Bash(~/.config/tmux/scripts/task-sessionizer.sh demote:*)\",
+      \"Bash($HOME/.config/tmux/scripts/task-sessionizer.sh demote:*)\",
+      \"Bash(~/.config/tmux/scripts/task-decide.py:*)\",
+      \"Bash($HOME/.config/tmux/scripts/task-decide.py:*)\",
+      \"Bash(python3 ~/.config/tmux/scripts/task-decide.py:*)\",
+      \"Bash(python3 $HOME/.config/tmux/scripts/task-decide.py:*)\"
     ]
   }
 }"
@@ -815,7 +837,7 @@ CLAUDE_TASK_SETTINGS_OLD='{
 
 # True when a task's .claude/settings.json is one this script wrote.
 generated_task_settings() {
-    [[ "$1" == "$CLAUDE_TASK_SETTINGS" || "$1" == "$CLAUDE_TASK_SETTINGS_V1" || "$1" == "$CLAUDE_TASK_SETTINGS_OLD" ]]
+    [[ "$1" == "$CLAUDE_TASK_SETTINGS" || "$1" == "$CLAUDE_TASK_SETTINGS_V2" || "$1" == "$CLAUDE_TASK_SETTINGS_V1" || "$1" == "$CLAUDE_TASK_SETTINGS_OLD" ]]
 }
 
 # True when a task's .claude/agents holds only the subagent files this script

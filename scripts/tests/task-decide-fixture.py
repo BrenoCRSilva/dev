@@ -116,19 +116,49 @@ def write_report(root, step="12c", agent="worker-dotfiles", checks=None, needs=N
     return path
 
 
-def run_cli(args, home, key=True):
-    environ = {k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"}
+LIVE = {"TASK_ROLE": "orchestrator", "TASK_DECIDE_LIVE": "1"}
+KEY_LINE = f'OPENROUTER_API_KEY="{KEY}"\n'
+
+
+def run_cli(args, home, env=None, timeout=120):
+    """Runs a script with an isolated HOME and only the given live-gate variables."""
+    environ = {k: v for k, v in os.environ.items() if k not in ("OPENROUTER_API_KEY", "TASK_ROLE", "TASK_DECIDE_LIVE")}
     environ.update({"HOME": str(home), "TASK_DECIDE_ENDPOINT": URL})
-    if key:
-        environ["OPENROUTER_API_KEY"] = KEY
-    proc = subprocess.run([sys.executable, "-I", *args], env=environ, capture_output=True, text=True, timeout=120)
+    environ.update(env or {})
+    try:
+        proc = subprocess.run([sys.executable, "-I", *args], env=environ, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        fail(f"{Path(args[0]).name} did not return: it opened the key file, which a refusal must not do")
     if KEY in proc.stdout + proc.stderr:
         fail(f"the key was printed by {Path(args[0]).name}")
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def decide_cli(report, home, *extra, key=True, step="12c"):
-    return run_cli([str(CLI), "--formula", str(FORMULA), "--report", str(report), "--step", step, *extra], home, key)
+def decide_cli(report, home, *extra, env=LIVE, step="12c"):
+    return run_cli([str(CLI), "--formula", str(FORMULA), "--report", str(report), "--step", step, *extra], home, env)
+
+
+def key_path(home):
+    return home / ".config/task-agents/openrouter.env"
+
+
+def write_key(home, text, mode=0o600):
+    path = key_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        path.unlink()
+    path.write_text(text, encoding="utf-8")
+    os.chmod(path, mode)
+
+
+def sentinel_key(home, mode):
+    """A FIFO where the key file goes: opening it for reading blocks, so a refusal that returns never opened it."""
+    path = key_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        path.unlink()
+    os.mkfifo(path)
+    os.chmod(path, mode)
 
 
 def read_record(task, agent="worker-dotfiles", step="12c"):
@@ -211,7 +241,7 @@ def check_routes(home, task):
 
     report = write_report(task, checks=[{"cmd": "shellcheck task-decide.py", "exit": 1}])
     mock(answer())
-    code, _, _ = decide_cli(report, home, key=False)
+    code, _, _ = decide_cli(report, home, env={})
     expect("a failing check escalates with no key and no request", (code, len(Mock.seen)), (10, 0))
     expect("the failing-check record says why", read_record(task)["reason"].startswith("checks failed: shellcheck task-decide.py exit 1"), True)
 
@@ -271,30 +301,37 @@ def check_refusals(home, task):
 
 def check_keys(home, task):
     report = write_report(task)
-    key_file = home / ".config/task-agents/openrouter.env"
-    key_file.parent.mkdir(parents=True, exist_ok=True)
 
+    sentinel_key(home, 0o600)
     mock(answer())
-    code, _, err = decide_cli(report, home, key=False)
-    expect("no key anywhere is exit 2, with no request", (code, len(Mock.seen)), (2, 0))
+    code, _, err = decide_cli(report, home, env={"TASK_DECIDE_LIVE": "1"})
+    expect("no TASK_ROLE is exit 2 and the key file is not opened", (code, len(Mock.seen), "TASK_ROLE" in err), (2, 0, True))
+    code, _, err = decide_cli(report, home, env={"TASK_ROLE": "worker", "TASK_DECIDE_LIVE": "1"})
+    expect("TASK_ROLE=worker is exit 2 and the key file is not opened", (code, len(Mock.seen), "orchestrator only" in err), (2, 0, True))
+    code, _, err = decide_cli(report, home, env={"TASK_ROLE": "orchestrator"})
+    expect("a missing opt-in is exit 2 and the key file is not opened", (code, len(Mock.seen), "no live opt-in" in err), (2, 0, True))
 
-    key_file.write_text(f'OPENROUTER_API_KEY="{KEY}"\n', encoding="utf-8")
-    os.chmod(key_file, 0o644)
-    mock(answer())
-    code, _, err = decide_cli(report, home, key=False)
-    expect("a group- or world-readable key file is exit 2, with no request", (code, len(Mock.seen)), (2, 0))
-    expect("the refusal names the mode, not the key", "chmod 600" in err, True)
+    sentinel_key(home, 0o644)
+    code, _, err = decide_cli(report, home)
+    expect("a 644 key file is exit 2 and is not opened", (code, len(Mock.seen), "chmod 600" in err), (2, 0, True))
 
-    os.chmod(key_file, 0o600)
+    key_path(home).unlink()
+    code, _, err = decide_cli(report, home, env={**LIVE, "OPENROUTER_API_KEY": KEY})
+    expect("an env key does not replace the key file: exit 2, no request", (code, len(Mock.seen), "no key file" in err), (2, 0, True))
+
+    write_key(home, "# no key here\n")
+    code, _, err = decide_cli(report, home)
+    expect("a key file without the key line is exit 2", (code, "has no OPENROUTER_API_KEY line" in err), (2, True))
+
+    write_key(home, KEY_LINE, 0o644)
     mock(answer())
-    code, _, _ = decide_cli(report, home, key=False)
+    code, _, err = decide_cli(report, home)
+    expect("a regular 644 key file is exit 2, with no request", (code, len(Mock.seen)), (2, 0))
+
+    write_key(home, KEY_LINE)
+    mock(answer())
+    code, _, _ = decide_cli(report, home)
     expect("a 600 key file is used", (code, Mock.seen[0][0]), (0, f"Bearer {KEY}"))
-
-    key_file.write_text("# no key here\n", encoding="utf-8")
-    mock(answer())
-    code, _, _ = decide_cli(report, home, key=False)
-    expect("a key file without the key line is exit 2", code, 2)
-    key_file.unlink()
 
 
 def check_refused_inputs(tmp, home, task):
@@ -322,8 +359,8 @@ def check_probe(tmp, home):
     cases = tmp / "cases.jsonl"
     cases.write_text("\n".join(json.dumps(c) for c in (clean, failing)) + "\n", encoding="utf-8")
 
-    def probe(*extra, key=True):
-        return run_cli([str(PROBE), "--cases", str(cases), *extra], home, key)
+    def probe(*extra, env={}):
+        return run_cli([str(PROBE), "--cases", str(cases), *extra], home, env)
 
     code, out, _ = probe()
     expect("the probe dry run exits 0 and builds one request", (code, "dry run: 2 cases, 1 requests built" in out, "1 routed in code" in out), (0, True, True))
@@ -335,7 +372,7 @@ def check_probe(tmp, home):
     cases.write_text("\n".join(json.dumps(c) for c in (clean, failing)) + "\n", encoding="utf-8")
 
     mock(answer(), answer(p_user=0.9))
-    code, out, _ = probe("--live", "--runs", "2")
+    code, out, _ = probe("--live", "--runs", "2", env=LIVE)
     expect("the probe live run exits 0", code, 0)
     expect("live makes one call per run for the Jev case, none for the code case", len(Mock.seen), 2)
     for label, fragment in [
@@ -346,8 +383,17 @@ def check_probe(tmp, home):
         ("the live summary totals cost", "cost: $0.000080 (2 calls with usage.cost, 0 without)"),
     ]:
         expect(label, fragment in out, True)
-    code, _, _ = probe("--live", key=False)
-    expect("the probe live run without a key is exit 2", code, 2)
+    sentinel_key(home, 0o600)
+    mock(answer())
+    code, _, err = probe("--live", env={"TASK_DECIDE_LIVE": "1"})
+    expect("the probe live run without TASK_ROLE is exit 2 and the key file is not opened", (code, len(Mock.seen), "TASK_ROLE" in err), (2, 0, True))
+    sentinel_key(home, 0o644)
+    code, _, err = probe("--live", env=LIVE)
+    expect("the probe live run with a 644 key file is exit 2 and does not open it", (code, len(Mock.seen), "chmod 600" in err), (2, 0, True))
+    key_path(home).unlink()
+    code, _, err = probe("--live", env=LIVE)
+    expect("the probe live run without a key file is exit 2", (code, "no key file" in err), (2, True))
+    write_key(home, KEY_LINE)
 
 
 def main():
@@ -356,13 +402,14 @@ def main():
         home = tmp / "home"
         task = tmp / "tasks" / "fixture"
         home.mkdir()
+        write_key(home, KEY_LINE)
         check_formula_rules(tmp, FORMULA.read_text(encoding="utf-8"))
         formula = DD.load_formula(FORMULA)
         expect("the shipped formula loads", formula["formula"], "worker-step")
 
         report = write_report(task)
         mock(answer())
-        code, out, _ = run_cli([str(CLI), "--formula", str(FORMULA), "--report", str(report), "--step", "12c", "--dry-run"], home, key=False)
+        code, out, _ = run_cli([str(CLI), "--formula", str(FORMULA), "--report", str(report), "--step", "12c", "--dry-run"], home, env={})
         expect("the dry run exits 0", code, 0)
         expect("the dry-run body is the snapshot", json.loads(out), EXPECTED_BODY)
         expect("the dry run made no request", len(Mock.seen), 0)

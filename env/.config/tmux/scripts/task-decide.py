@@ -16,9 +16,12 @@ unavailable (the caller treats it as escalate), 2 usage error, 3 invalid formula
 or report. --dry-run prints the exact request body and makes no request; it
 exits 0, or the route's code when a check fails.
 
-The key comes from OPENROUTER_API_KEY, else ~/.config/task-agents/openrouter.env,
-which must not be readable by group or others. It is never printed or recorded.
-TASK_DECIDE_ENDPOINT overrides the URL (tests only). Stdlib only.
+A live request needs TASK_ROLE=orchestrator, TASK_DECIDE_LIVE=1 (the CLI's
+opt-in) and ~/.config/task-agents/openrouter.env at mode 600. Otherwise it exits 2
+before the key file is opened. Code-routed reports make no request, so they need
+none of this. The key comes from OPENROUTER_API_KEY, else the key file's line. It
+is never printed or recorded. TASK_DECIDE_ENDPOINT overrides the URL (tests only).
+Stdlib only.
 """
 import argparse
 import http.client
@@ -26,6 +29,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import sys
 import time
 import tomllib
@@ -77,22 +81,35 @@ def endpoint():
     return os.environ.get("TASK_DECIDE_ENDPOINT", ENDPOINT)
 
 
+def key_file():
+    return Path.home() / ".config/task-agents/openrouter.env"
+
+
+def live_gate(opt_in):
+    """Refuses a live request before the key file is opened, unless every condition holds."""
+    if os.environ.get("TASK_ROLE") != "orchestrator":
+        raise Usage("live requests are for the orchestrator only: TASK_ROLE must be orchestrator")
+    if not opt_in:
+        raise Usage("no live opt-in: jev-probe needs --live; task-decide needs TASK_DECIDE_LIVE=1")
+    path = key_file()
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        raise Usage(f"no key file at {path}; a live request needs it at mode 600")
+    if mode != 0o600:
+        raise Usage(f"{path} must be mode 600 (it is {mode:o}); run chmod 600 on it")
+
+
 def load_key():
+    """Called only after live_gate passes: the env key, else the key file's line."""
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if key:
         return key
-    path = Path.home() / ".config/task-agents/openrouter.env"
-    try:
-        mode = path.stat().st_mode
-    except OSError:
-        raise Usage("no key: set OPENROUTER_API_KEY or create ~/.config/task-agents/openrouter.env (mode 600)")
-    if mode & 0o077:
-        raise Usage("~/.config/task-agents/openrouter.env is readable by group or others; run chmod 600 on it")
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in key_file().read_text(encoding="utf-8").splitlines():
         match = re.fullmatch(r"\s*(?:export\s+)?OPENROUTER_API_KEY\s*=\s*(.*?)\s*", line)
         if match and match.group(1).strip("\"'"):
             return match.group(1).strip("\"'")
-    raise Usage("~/.config/task-agents/openrouter.env has no OPENROUTER_API_KEY line")
+    raise Usage(f"{key_file()} has no OPENROUTER_API_KEY line")
 
 
 def _number(value):
@@ -370,11 +387,12 @@ def record(formula, report, route, reason, response=None, answers=None):
     }
 
 
-def decide(formula, report, *, model, key_loader=load_key, url=None, sleep=time.sleep):
-    """Returns (record, exit code). Makes at most one decision request."""
+def decide(formula, report, *, model, opt_in, key_loader=load_key, url=None, sleep=time.sleep):
+    """Returns (record, exit code). Makes at most one decision request, and only when live_gate passes."""
     blocked = code_route(formula, report)
     if blocked:
         return record(formula, report, "escalate", blocked), ROUTES["escalate"]
+    live_gate(opt_in)
     body = build_request(formula, report, model)
     try:
         response = call(body, key_loader(), url or endpoint(), sleep)
@@ -419,7 +437,7 @@ def main(argv=None):
         report = load_report(args.report, args.step)
         if args.dry_run:
             return dry_run(formula, report, model)
-        result, code = decide(formula, report, model=model)
+        result, code = decide(formula, report, model=model, opt_in=os.environ.get("TASK_DECIDE_LIVE") == "1")
         root = args.task_root or args.report.resolve().parents[2]
         path = root / "decisions" / report["agent"] / f"{report['step']}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
