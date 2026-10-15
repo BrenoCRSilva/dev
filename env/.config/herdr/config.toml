@@ -77,6 +77,13 @@ command = "~/.config/tmux/scripts/agent-picker.sh"
 [ui]
 accent = "blue"
 
+# the tab row is hidden while a workspace has one tab; a second tab brings it back
+hide_tab_bar_when_single_tab = true
+
+# the workspace sidebar starts collapsed to a compact rail
+sidebar_start_collapsed = true
+sidebar_collapsed_mode = "compact"
+
 # tmux drew single-line dividers between adjacent panes and no outer frame
 pane_gaps = false
 pane_outer_borders = false
