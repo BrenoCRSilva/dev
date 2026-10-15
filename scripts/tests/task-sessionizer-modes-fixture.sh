@@ -18,7 +18,8 @@ MENU_SELECT_CHOICES="$TMP_ROOT/menu-choices"
 FZF_LOG="$TMP_ROOT/fzf.log"
 MENU_INPUT_LOG="$TMP_ROOT/menu-input.log"
 MENU_INPUT_CHOICES="$TMP_ROOT/menu-input-choices"
-export HOME TASKS_DIR TMUX_TMPDIR NVIM_LOG HERDR_LOG TMUX_LOG GIT_LOG MENU_SELECT_LOG MENU_SELECT_CHOICES FZF_LOG MENU_INPUT_LOG MENU_INPUT_CHOICES
+MENU_ROWS_LOG="$TMP_ROOT/menu-rows.log"
+export HOME TASKS_DIR TMUX_TMPDIR NVIM_LOG HERDR_LOG TMUX_LOG GIT_LOG MENU_SELECT_LOG MENU_SELECT_CHOICES FZF_LOG MENU_INPUT_LOG MENU_INPUT_CHOICES MENU_ROWS_LOG
 mkdir -p "$HOME/Projects" "$HOME/Work/group" "$TASKS_DIR" "$TMUX_TMPDIR" "$BIN"
 PATH="$BIN:/usr/bin:/bin"
 export PATH
@@ -163,12 +164,12 @@ legacy_windows=$(grep 'new-window -d -t =fixture-legacy: -n ' "$TMUX_LOG" | sed 
 # Create task from the same rows and sequential choices the graphical menu
 # consumes: choose WORKER and CONTEXT repos, then finish multi-select.
 queue_file "$MENU_SELECT_CHOICES" \
-    $'Create new task\taction:create' \
+    $'Create new task\tstart a task from repos' \
     $'worker\t'"$(display_path "$repo_worker")" \
     $'WORKER\tCreate a task worktree, nvim/srv windows, and repo agent' \
     $'context\t'"$(display_path "$repo_context")" \
     $'CONTEXT\tRead-only canonical checkout; no worktree or repo agent' \
-    $'Done\taction:done (1 worker, 1 context)'
+    $'Finish selection\t1 worker, 1 context chosen'
 queue_file "$MENU_INPUT_CHOICES" fixture-menu
 run_menu
 
@@ -183,11 +184,11 @@ grep -Fq 'researcher never edits repository trees' "$task/AGENTS.md" || fail 'AG
 
 # Add another context through the menu's Add repo to task flow.
 queue_file "$MENU_SELECT_CHOICES" \
-    $'Add repo to task\taction:add' \
-    $'fixture-menu\ttask: worker, context (context) on fixture-menu' \
+    $'Add repo to task\tadd worker or context repos to a task' \
+    $'fixture-menu\tworker, context (context) on fixture-menu' \
     $'added\t'"$(display_path "$repo_added")" \
     $'CONTEXT\tRead-only canonical checkout; no worktree or repo agent' \
-    $'Done\taction:done (0 worker, 1 context)'
+    $'Finish selection\t0 worker, 1 context chosen'
 : > "$TMP_ROOT/inputs"
 run_menu
 grep -Fq $'added\t'"$repo_added" "$task/.task-context.tsv" || fail 'Add repo to task did not record context checkout'
@@ -277,8 +278,8 @@ printf 'PASS: popup path invokes every Omarchy selector step; fzf remains termin
 # The Omarchy selector has no custom keybinding API, so close is an action,
 # task picker, and explicit Close/Cancel confirmation.
 queue_file "$MENU_SELECT_CHOICES" \
-    $'Close task\taction:close' \
-    $'fixture-menu\ttask: worker, context, added (context) on fixture-menu' \
+    $'Close task\tremove worktrees and sessions; branches stay' \
+    $'fixture-menu\tworker, context, added (context) on fixture-menu' \
     $'Cancel\tLeave task unchanged'
 run_menu
 [[ -d "$task" ]] || fail 'cancelled popup close removed its task'
@@ -287,8 +288,8 @@ grep -Fxq 'Close task fixture-menu?' "$MENU_SELECT_LOG" || fail 'popup close act
 printf 'PASS: popup close route can be cancelled safely\n'
 
 queue_file "$MENU_SELECT_CHOICES" \
-    $'Close task\taction:close' \
-    $'fixture-menu\ttask: running, worker, context, added (context) on fixture-menu' \
+    $'Close task\tremove worktrees and sessions; branches stay' \
+    $'fixture-menu\trunning, worker, context, added (context) on fixture-menu' \
     $'Close task\tRemove worktrees and sessions; branches stay'
 TMUX_HAS_SESSION=fixture-menu; export TMUX_HAS_SESSION
 run_menu
@@ -367,9 +368,9 @@ printf 'PASS: demote closes the repo server window\n'
 # Popup: Task repos -> repo -> Demote -> Run (the plan rows precede Run).
 detail=$("$SESSIONIZER" rows | awk -F '\t' '$1 == "task" && $2 == "fixture-demote" { print $3 }')
 queue_file "$MENU_SELECT_CHOICES" \
-    $'Task repos\taction:repos' \
-    $'fixture-demote\ttask: '"$detail" \
-    $'added\tadded  worker' \
+    $'Task repos\tpromote, demote or remove a task\'s repos' \
+    $'fixture-demote\t'"$detail" \
+    $'added\tworker' \
     $'Demote\tremove the worktree; keep the branch' \
     $'Run\tdemote added in fixture-demote'
 run_menu
@@ -385,12 +386,11 @@ printf 'PASS: popup Task repos flow demotes a worker after a dry run and Run\n'
 "$SESSIONIZER" promote fixture-demote worker >/dev/null || fail 'promote for dirty popup test failed'
 printf 'dirty popup\n' >> "$dtask/worker/README.md"
 detail=$("$SESSIONIZER" rows | awk -F '\t' '$1 == "task" && $2 == "fixture-demote" { print $3 }')
-MENU_ROWS_LOG="$TMP_ROOT/menu-rows.log"; export MENU_ROWS_LOG
-: > "$MENU_ROWS_LOG"; : > "$MENU_SELECT_LOG"
+: > "$MENU_SELECT_LOG"
 queue_file "$MENU_SELECT_CHOICES" \
-    $'Task repos\taction:repos' \
-    $'fixture-demote\ttask: '"$detail" \
-    $'worker\tworker  worker' \
+    $'Task repos\tpromote, demote or remove a task\'s repos' \
+    $'fixture-demote\t'"$detail" \
+    $'worker\tworker' \
     $'Demote\tremove the worktree; keep the branch' \
     $'Run (force: discards uncommitted work)\tdemote worker in fixture-demote'
 run_menu
@@ -401,3 +401,11 @@ grep -Fq 'Run (force: discards uncommitted work)' "$MENU_ROWS_LOG" || fail 'forc
 [[ ! -e "$dtask/worker" ]] || fail 'forced popup demote left the worktree'
 git -C "$repo_worker" show-ref --verify --quiet refs/heads/fixture-demote || fail 'forced popup demote deleted the branch'
 printf 'PASS: popup forced demote warns about discarded work in its title, plan and Run row\n'
+
+# Popup rows show descriptions only: no internal action:/task: key or plan
+# label appears in any visible text (fields 2 and 3; field 1 is the icon).
+grep -Fq $'Task repos\tpromote, demote or remove a task\'s repos' "$MENU_ROWS_LOG" || fail 'Task repos row lacks its description'
+if awk -F '\t' '{ for (i = 2; i <= NF; i++) if ($i ~ /^action:/ || $i ~ /^task:/) found = 1 } END { exit found ? 0 : 1 }' "$MENU_ROWS_LOG"; then
+    fail 'a popup row shows an internal action:/task: key as visible text'
+fi
+printf 'PASS: popup rows show no internal action: keys; Task repos carries its description\n'
