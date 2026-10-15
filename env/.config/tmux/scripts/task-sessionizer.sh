@@ -1064,11 +1064,10 @@ quit_nvim_window() {
 # demote_repo <task> <repo> <dry-run yes|no> <force yes|no>
 demote_repo() {
     local task=$1 selector=$2 dry=$3 force=$4 kind name wt origin s branch base ahead status
-    local agent_pane agent_status agent_name ws wtforce=() stopforce=()
+    local agent_pane agent_status agent_name agent ws wtforce=() stopforce=()
     IFS=$'\t' read -r kind name wt origin < <(task_repo_lookup "$task" "$selector") ||
         die "no repo $selector in $task"
     [[ "$kind" == worker ]] || die "$name is already context in $task"
-    agent_name="worker-$name"
     s=$(session_name "$task")
     branch=$(git -C "$wt" branch --show-current 2>/dev/null)
     status=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) ||
@@ -1089,8 +1088,11 @@ demote_repo() {
     fi
     [[ "$force" == yes ]] && wtforce=(--force) && stopforce=(--force)
 
-    # Agent: stopped first, since a working agent refuses without --force.
-    if agent=$(task_agent_line "$s" "$agent_name"); then
+    # Agent: stopped first, since a working agent refuses without --force. A worker
+    # started before the worker- names is still called by its repo name.
+    agent_name="worker-$name"
+    agent=$(task_agent_line "$s" "$agent_name") || { agent_name=$name; agent=$(task_agent_line "$s" "$name") || agent=; }
+    if [[ -n "$agent" ]]; then
         read -r agent_pane agent_status <<< "$agent"
         if [[ "$agent_status" == working && "$force" != yes ]]; then
             if [[ "$dry" == yes ]]; then

@@ -11,6 +11,8 @@ TMUX_TMPDIR="$TMP_ROOT/tmux"
 BIN="$TMP_ROOT/bin"
 NVIM_LOG="$TMP_ROOT/nvim.log"
 HERDR_LOG="$TMP_ROOT/herdr.log"
+LEGACY_AGENT_FILE="$TMP_ROOT/legacy-agent"
+export LEGACY_AGENT_FILE
 TMUX_LOG="$TMP_ROOT/tmux.log"
 GIT_LOG="$TMP_ROOT/git.log"
 MENU_SELECT_LOG="$TMP_ROOT/menu-select.log"
@@ -62,6 +64,10 @@ printf '%s\n' "$*" >> "$HERDR_LOG"
 case "$*" in
     *'workspace list') printf '{"result":{"workspaces":[]}}\n' ;;
     *'workspace create'*) printf '{"result":{"pane_id":"fixture-pane"}}\n' ;;
+    *'session list'*) [ -f "$LEGACY_AGENT_FILE" ] && printf 'fixture-oldname  running\n'; exit 0 ;;
+    *'agent get worker-'*) exit 1 ;;
+    *'agent get worker') [ -f "$LEGACY_AGENT_FILE" ] || exit 1; printf '{"result":{"agent":{"pane_id":"legacy-pane","agent_status":"idle"}}}\n' ;;
+    *'agent prompt worker /exit'*) rm -f "$LEGACY_AGENT_FILE" ;;
     *) exit 0 ;;
 esac
 EOF
@@ -333,6 +339,19 @@ grep -Fq "canonical checkout \`$repo_worker\`" "$dtask/AGENTS.md" || fail 'AGENT
 ! grep -Fq $'worker\t' "$dtask/.task-context.tsv" 2>/dev/null || fail 'promote left worker as context'
 grep -Fq '**worker** — worktree' "$dtask/AGENTS.md" || fail 'AGENTS.md lacks promoted worker'
 printf 'PASS: demote -> promote round trip keeps the branch and both records\n'
+
+# A worker started before the worker- names is still called by its repo name.
+# Demote must find that agent and stop it before the worktree goes.
+"$SESSIONIZER" create fixture-oldname --worker "$repo_worker" >/dev/null || fail 'legacy-name demote fixture: create failed'
+oldname_task="$TASKS_DIR/fixture-oldname"
+: > "$LEGACY_AGENT_FILE"
+dry=$("$SESSIONIZER" demote fixture-oldname worker --dry-run) || fail 'legacy-name demote dry run failed'
+grep -Fq 'agent:     stop worker (pane legacy-pane, idle) with /exit' <<< "$dry" || fail "legacy-name demote dry run did not find the agent: $dry"
+"$SESSIONIZER" demote fixture-oldname worker >/dev/null || fail 'demote of a legacy-named worker failed'
+grep -Fq 'agent prompt worker /exit' "$HERDR_LOG" || fail 'demote did not send /exit to the legacy-named agent'
+[[ ! -e "$LEGACY_AGENT_FILE" ]] || fail 'legacy-named agent is still running after demote'
+[[ ! -e "$oldname_task/worker" ]] || fail 'demote left the worktree behind'
+printf 'PASS: demote finds and stops a worker still named by its repo name, before removing its worktree\n'
 
 # A dirty worktree is refused, and --force discards it.
 printf 'dirty\n' >> "$dtask/worker/README.md"
