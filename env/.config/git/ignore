@@ -1,0 +1,3 @@
+# Git's default global ignore (used because core.excludesFile is unset).
+# codegraph index, built per worktree by its repo agent; never commit it.
+.codegraph/

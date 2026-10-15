@@ -2,6 +2,7 @@
 .zshrc
 .p10k.zsh
 .config/ghostty
+.config/git/ignore
 .config/hypr
 .config/omarchy/backgrounds
 .config/omarchy/branding
