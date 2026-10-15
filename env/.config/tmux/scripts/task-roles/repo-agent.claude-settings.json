@@ -1,7 +1,5 @@
 {
   "env": {
-    "CODEGRAPH_TELEMETRY": "0",
-    "PONYTAIL_QUIET_STARTUP": "1",
-    "PONYTAIL_HIDE_STATUS": "1"
+    "CODEGRAPH_TELEMETRY": "0"
   }
 }

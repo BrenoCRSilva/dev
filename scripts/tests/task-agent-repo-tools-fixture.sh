@@ -66,7 +66,30 @@ for event in SessionStart SubagentStart UserPromptSubmit; do
 done
 [[ "$codex_out" == *'PLUGIN_DATA='* ]] || fail 'codex ponytail hooks do not set PLUGIN_DATA'
 [[ "${codex_out%%-a on-request*}" == *'hooks.UserPromptSubmit='* ]] || fail 'codex tool overrides must come before the approval flags'
+[[ "$codex_out" != *PONYTAIL_QUIET_STARTUP* && "$codex_out" != *PONYTAIL_HIDE_STATUS* ]] ||
+    fail 'codex ponytail hooks still set the no-op PONYTAIL_QUIET_STARTUP/PONYTAIL_HIDE_STATUS'
+[[ "$codex_out" != *CODEGRAPH_NO_WATCH* && "$claude_out" != *CODEGRAPH_NO_WATCH* ]] || fail 'a repo launch sets CODEGRAPH_NO_WATCH'
 printf 'PASS: codex repo agent gets codegraph MCP overrides and the three ponytail hooks\n'
+
+# The claude settings file carries only the codegraph telemetry switch.
+SETTINGS="$ROOT/env/.config/tmux/scripts/task-roles/repo-agent.claude-settings.json"
+grep -Fq '"CODEGRAPH_TELEMETRY": "0"' "$SETTINGS" || fail 'repo settings lost CODEGRAPH_TELEMETRY=0'
+if grep -q 'PONYTAIL_' "$SETTINGS"; then fail 'repo settings still set no-op PONYTAIL_* variables'; fi
+if grep -rq 'CODEGRAPH_NO_WATCH' "$ROOT/env/.config/tmux/scripts"; then fail 'a tracked launcher file sets CODEGRAPH_NO_WATCH'; fi
+printf 'PASS: repo settings set only CODEGRAPH_TELEMETRY; nothing sets CODEGRAPH_NO_WATCH\n'
+
+# The tracked global ignore must hide a symlinked .codegraph (index kept outside
+# the worktree), which a trailing-slash pattern would not match.
+IGN_TEST="$TMP_ROOT/ignore-test"
+mkdir -p "$IGN_TEST/xdg/git" "$IGN_TEST/repo" "$IGN_TEST/external"
+cp "$ROOT/env/.config/git/ignore" "$IGN_TEST/xdg/git/ignore"
+git -C "$IGN_TEST/repo" init -q
+printf 'x\n' > "$IGN_TEST/repo/file.txt"
+ln -s "$IGN_TEST/external" "$IGN_TEST/repo/.codegraph"
+touch "$IGN_TEST/external/codegraph.db"
+ignored_status=$(XDG_CONFIG_HOME="$IGN_TEST/xdg" git -C "$IGN_TEST/repo" status --porcelain --untracked-files=all)
+[[ "$ignored_status" == '?? file.txt' ]] || fail "tracked ignore does not hide the symlinked .codegraph: $ignored_status"
+printf 'PASS: tracked global ignore hides a symlinked .codegraph index\n'
 
 # --- orchestrator and researcher get no repo tools, either provider -------
 for launch in "orchestrator" "--provider codex orchestrator" "start researcher fixture-pane" "--provider codex start researcher fixture-pane"; do

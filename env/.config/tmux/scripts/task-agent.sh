@@ -176,7 +176,7 @@ repo_tool_args() {
                -c 'mcp_servers.codegraph.env={CODEGRAPH_TELEMETRY="0"}')
     fi
     if [[ $ponytail == yes ]]; then
-        cmd="env PLUGIN_DATA=$PONYTAIL_STATE PONYTAIL_QUIET_STARTUP=1 PONYTAIL_HIDE_STATUS=1 node $PONYTAIL_DIR/hooks"
+        cmd="env PLUGIN_DATA=$PONYTAIL_STATE node $PONYTAIL_DIR/hooks"
         ARGS+=(
             -c "hooks.SessionStart=[{matcher=\"startup|resume|clear|compact\",hooks=[{type=\"command\",command=\"$cmd/ponytail-activate.js\",timeout=5}]}]"
             -c "hooks.SubagentStart=[{hooks=[{type=\"command\",command=\"$cmd/ponytail-subagent.js\",timeout=5}]}]"
