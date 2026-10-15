@@ -39,6 +39,7 @@ CREATE_LABEL="Create new task"
 ADD_LABEL="Add repo to task"
 CLOSE_LABEL="Close task"
 REPOS_LABEL="Task repos"
+FINISH_LABEL="Finish selection"
 
 # Worktrees created in this run whose post-create hook still has to run.
 PENDING=()
@@ -989,10 +990,10 @@ task_repo_rows() {
     local task=$1 wt name path
     while IFS= read -r wt; do
         name=$(basename "$wt")
-        printf '%s\t%s\t%s  worker\n' "$ICON_REPO" "$name" "$name"
+        printf '%s\t%s\tworker\n' "$ICON_REPO" "$name"
     done < <(task_worktrees "$task")
     while IFS=$'\t' read -r name path; do
-        [[ -n "$name" ]] && printf '%s\t%s\t%s  context\n' "$ICON_CONTEXT" "$name" "$name"
+        [[ -n "$name" ]] && printf '%s\t%s\tcontext\n' "$ICON_CONTEXT" "$name"
     done < <(task_contexts "$task")
 }
 
@@ -1620,18 +1621,18 @@ repos_terminal() {
 menu_task_rows() {
     local t
     while IFS= read -r t; do
-        printf '%s\t%s\ttask: %s\n' "$ICON_TASK" "$t" "$(task_detail "$t")"
+        printf '%s\t%s\t%s\n' "$ICON_TASK" "$t" "$(task_detail "$t")"
     done < <(list_tasks)
-    printf '%s\t%s\taction:repos\n' "$ICON_REPO" "$REPOS_LABEL"
-    printf '%s\t%s\taction:add\n' "$ICON_ADD" "$ADD_LABEL"
-    printf '%s\t%s\taction:create\n' "$ICON_REPO" "$CREATE_LABEL"
-    printf '%s\t%s\taction:close\n' "$ICON_CONTEXT" "$CLOSE_LABEL"
+    printf '%s\t%s\tpromote, demote or remove a task'"'"'s repos\n' "$ICON_REPO" "$REPOS_LABEL"
+    printf '%s\t%s\tadd worker or context repos to a task\n' "$ICON_ADD" "$ADD_LABEL"
+    printf '%s\t%s\tstart a task from repos\n' "$ICON_REPO" "$CREATE_LABEL"
+    printf '%s\t%s\tremove worktrees and sessions; branches stay\n' "$ICON_CONTEXT" "$CLOSE_LABEL"
 }
 
 menu_existing_task_rows() {
     local t
     while IFS= read -r t; do
-        printf '%s\t%s\ttask: %s\n' "$ICON_TASK" "$t" "$(task_detail "$t")"
+        printf '%s\t%s\t%s\n' "$ICON_TASK" "$t" "$(task_detail "$t")"
     done < <(list_tasks)
 }
 
@@ -1763,10 +1764,10 @@ menu_task_repos() {
     fi
     # A forced run shows the refusal it overrides as the first plan row.
     if [[ -n "$reason" ]]; then
-        plan+=$(printf '%s\tplan\t%s\n' "$ICON_CONTEXT" "$(head -n1 <<< "$reason")")$'\n'
+        plan+=$(printf '%s\t%s\n' "$ICON_CONTEXT" "$(head -n1 <<< "$reason")")$'\n'
     fi
     while IFS= read -r line; do
-        plan+=$(printf '%s\tplan\t%s\n' "$ICON_CONTEXT" "$line")$'\n'
+        plan+=$(printf '%s\t%s\n' "$ICON_CONTEXT" "$line")$'\n'
     done <<< "$dry_out"
     rows="$plan$(printf '%s\t%s\t%s %s in %s' "$ICON_DONE" "$run_label" "$verb" "$name" "$task")"$'\n'
     rows+=$(printf '%s\tCancel\tkeep everything as it is' "$ICON_CONTEXT")
@@ -1788,7 +1789,7 @@ menu_repo_picker() {
     while :; do
         rows=""
         if ((${#MENU_WORKERS[@]} + ${#MENU_CONTEXTS[@]})); then
-            rows+=$(printf '%s\tDone\taction:done (%d worker, %d context)\n' "$ICON_DONE" "${#MENU_WORKERS[@]}" "${#MENU_CONTEXTS[@]}")$'\n'
+            rows+=$(printf '%s\t%s\t%d worker, %d context chosen\n' "$ICON_DONE" "$FINISH_LABEL" "${#MENU_WORKERS[@]}" "${#MENU_CONTEXTS[@]}")$'\n'
         fi
         while IFS= read -r repo; do
             [[ -n "${chosen[$repo]:-}" ]] && continue
@@ -1797,7 +1798,7 @@ menu_repo_picker() {
         done < <(list_repos)
         sel=$(menu_choose "$prompt" "$rows") || return 1
         IFS=$'\t' read -r name display <<< "$sel"
-        [[ "$display" == action:done* ]] && break
+        [[ "$name" == "$FINISH_LABEL" ]] && break
         repo=${display/#\~/$HOME}
         mode_rows=$(printf '%s\tWORKER\tCreate a task worktree, nvim/srv windows, and repo agent\n%s\tCONTEXT\tRead-only canonical checkout; no worktree or repo agent' "$ICON_REPO" "$ICON_CONTEXT")
         sel=$(menu_choose "Repo mode: $name" "$mode_rows") || return 1
@@ -1817,9 +1818,8 @@ pick_menu() {
     mkdir -p "$TASKS_DIR"
     sel=$(menu_choose "Tasks" "$(menu_task_rows)") || return 0
     IFS=$'\t' read -r label detail <<< "$sel"
-    case "$detail" in
-        task:*) open_session "$label"; return ;;
-        action:create)
+    case "$label" in
+        "$CREATE_LABEL")
             input=$(menu_input "Name for new task") || return 0
             task=$input
             valid_name "$task" || die "task name must match [A-Za-z0-9._-]+ (got '$task')"
@@ -1829,31 +1829,34 @@ pick_menu() {
             for mode in "${MENU_CONTEXTS[@]}"; do selection+=(--context "$mode"); done
             create_task "$task" "${selection[@]}"
             ;;
-        action:add)
+        "$ADD_LABEL")
             sel=$(menu_choose "Add repo to task" "$(menu_existing_task_rows)") || return 0
             IFS=$'\t' read -r task detail <<< "$sel"
-            [[ "$detail" == task:* ]] || return 0
+            [[ -d "$TASKS_DIR/$task" ]] || return 0
             menu_repo_picker "$task" "Repos to add to $task" || return 0
             selection=()
             for mode in "${MENU_WORKERS[@]}"; do selection+=(--worker "$mode"); done
             for mode in "${MENU_CONTEXTS[@]}"; do selection+=(--context "$mode"); done
             add_task_repos "$task" "${selection[@]}"
             ;;
-        action:repos)
+        "$REPOS_LABEL")
             sel=$(menu_choose "Task for repos" "$(menu_existing_task_rows)") || return 0
             IFS=$'\t' read -r task detail <<< "$sel"
-            [[ "$detail" == task:* ]] || return 0
+            [[ -d "$TASKS_DIR/$task" ]] || return 0
             menu_task_repos "$task"
             return
             ;;
-        action:close)
+        "$CLOSE_LABEL")
             sel=$(menu_choose "Task to close" "$(menu_existing_task_rows)") || return 0
             IFS=$'\t' read -r task detail <<< "$sel"
-            [[ "$detail" == task:* ]] || return 0
+            [[ -d "$TASKS_DIR/$task" ]] || return 0
             close_task_menu "$task"
             return
             ;;
-        *) return 0 ;;
+        *)
+            [[ -d "$TASKS_DIR/$label" ]] && open_session "$label"
+            return
+            ;;
     esac
     open_session "$task"
 }
