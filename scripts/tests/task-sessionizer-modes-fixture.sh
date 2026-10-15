@@ -166,9 +166,9 @@ legacy_windows=$(grep 'new-window -d -t =fixture-legacy: -n ' "$TMUX_LOG" | sed 
 queue_file "$MENU_SELECT_CHOICES" \
     $'Create\tstart a new task' \
     $'worker\t'"$(display_path "$repo_worker")" \
-    $'WORKER\tCreate a task worktree, nvim/srv windows, and repo agent' \
+    $'WORKER\tCreate a task worktree, nvim/srv windows, and worker agent' \
     $'context\t'"$(display_path "$repo_context")" \
-    $'CONTEXT\tRead-only canonical checkout; no worktree or repo agent' \
+    $'CONTEXT\tRead-only canonical checkout; no worktree or agent' \
     $'Finish selection\t1 worker, 1 context chosen'
 queue_file "$MENU_INPUT_CHOICES" fixture-menu
 run_menu
@@ -178,7 +178,7 @@ task="$TASKS_DIR/fixture-menu"
 [[ -e "$task/worker/.git" ]] || fail 'WORKER choice did not create a git worktree'
 [[ ! -e "$task/context" ]] || fail 'CONTEXT choice created a task worktree'
 grep -Fq $'context\t'"$repo_context" "$task/.task-context.tsv" || fail 'context checkout was not recorded'
-grep -Fq "$repo_context" "$task/AGENTS.md" && grep -Fq 'read-only reference, no task worktree or repo agent' "$task/AGENTS.md" ||
+grep -Fq "$repo_context" "$task/AGENTS.md" && grep -Fq 'read-only reference, no task worktree or agent' "$task/AGENTS.md" ||
     fail 'AGENTS.md omits read-only context path or boundary'
 grep -Fq 'researcher never edits repository trees' "$task/AGENTS.md" || fail 'AGENTS.md omits researcher boundary'
 
@@ -188,7 +188,7 @@ queue_file "$MENU_SELECT_CHOICES" \
     $'fixture-menu\tworker, context (context) on fixture-menu' \
     $'Add repos\tadd worker or context repos to fixture-menu' \
     $'added\t'"$(display_path "$repo_added")" \
-    $'CONTEXT\tRead-only canonical checkout; no worktree or repo agent' \
+    $'CONTEXT\tRead-only canonical checkout; no worktree or agent' \
     $'Finish selection\t0 worker, 1 context chosen' \
     $'Back\treturn to the top level'
 : > "$TMP_ROOT/inputs"
@@ -259,9 +259,9 @@ printf 'PASS: terminal fzf Ctrl+D closes a selected clean task after confirmatio
 
 # Agent launcher confines worker metadata write access to the canonical .git
 # directory and selects the researcher role/model separately.
-repo_args=$("$TASK_AGENT" --dry-run --provider codex start repo context fixture-pane "$repo_context")
+repo_args=$("$TASK_AGENT" --dry-run --provider codex start worker context fixture-pane "$repo_context")
 [[ "$repo_args" == *'-s workspace-write --add-dir '*"$repo_context/.git"* ]] || fail 'Codex worker lacks scoped canonical .git access'
-claude_args=$("$TASK_AGENT" --dry-run --provider claude start repo context fixture-pane "$repo_context")
+claude_args=$("$TASK_AGENT" --dry-run --provider claude start worker context fixture-pane "$repo_context")
 [[ "$claude_args" == *'--add-dir '*"$repo_context/.git"* && $(grep -o -- '--add-dir' <<< "$claude_args" | wc -l) -eq 1 ]] ||
     fail 'Claude worker lacks scoped canonical .git access'
 research_args=$("$TASK_AGENT" --dry-run --provider codex start researcher fixture-pane)
@@ -580,12 +580,12 @@ report_task="$TASKS_DIR/report-task"
 [[ ! -e "$report_task" ]] || fail 'clean close left the report task folder'
 
 "$SESSIONIZER" create report-task --worker "$repo_worker" >/dev/null || fail 'report fixture create failed'
-mkdir -p "$report_task/reports/dotfiles"
-printf '{}\n' > "$report_task/reports/dotfiles/9.json"
+mkdir -p "$report_task/reports/worker-dotfiles"
+printf '{}\n' > "$report_task/reports/worker-dotfiles/9.json"
 if out=$("$SESSIONIZER" close report-task 2>&1); then fail 'close accepted a step report'; fi
 grep -Fq 'reports/ has files (force close removes them)' <<< "$out" || fail "close did not report the step reports: $out"
-rm -f "$report_task/reports/dotfiles/9.json"
-printf 'Step 9\n' > "$report_task/hooks/dotfiles.md"
+rm -f "$report_task/reports/worker-dotfiles/9.json"
+printf 'Step 9\n' > "$report_task/hooks/worker-dotfiles.md"
 if out=$("$SESSIONIZER" close report-task 2>&1); then fail 'close accepted an assignment file'; fi
 grep -Fq 'hooks/ has files (force close removes them)' <<< "$out" || fail "close did not report the assignment file: $out"
 "$SESSIONIZER" close report-task --force >/dev/null || fail 'forced close failed'

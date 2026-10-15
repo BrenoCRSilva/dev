@@ -37,7 +37,7 @@ report() {
     local label=$1 out flags="" token
     shift
     out=$("$TASK_AGENT" --dry-run "$@" 2> /dev/null)
-    for token in '--settings' 'orchestrator.claude-settings' 'repo-agent.claude-settings' '--mcp-config' \
+    for token in '--settings' 'orchestrator.claude-settings' 'worker.claude-settings' 'researcher.claude-settings' '--mcp-config' \
         '--allowedTools' '--plugin-dir' 'mcp_servers.codegraph.command' 'hooks.SessionStart' 'task-assignment.sh' \
         'reports/' 'projects=' '--add-dir' '--permission-mode' '-a on-request' '-s workspace-write'; do
         [[ "$out" == *"$token"* ]] && flags+="$token  "
@@ -48,7 +48,7 @@ report() {
 echo "codegraph: $(command -v codegraph || echo missing)   ponytail checkout: $(ls -d "$HOME/.local/share/ponytail/v5.2.0" 2> /dev/null || echo missing)"
 report 'claude orchestrator' orchestrator
 report 'codex orchestrator' --provider codex orchestrator
-report 'claude repo' start repo dotfiles worker-pane "$CANON"
-report 'codex repo' --provider codex start repo dotfiles worker-pane "$CANON"
+report 'claude worker' start worker dotfiles worker-pane "$CANON"
+report 'codex worker' --provider codex start worker dotfiles worker-pane "$CANON"
 report 'claude researcher' start researcher research-pane
 report 'codex researcher' --provider codex start researcher research-pane

@@ -8,7 +8,7 @@ Ghostty, tmux, and Neovim. The Neovim configuration is owned here at
 home remains the runtime copy. Hardware
 specific Hyprland input and monitor settings live in `env/hosts/` overlays.
 
-Every task, including a single-repo task, has a task-root herdr workspace for the orchestrator and one workspace per repo. Choose the orchestrator provider at the task root; it starts missing repo agents. Reopening an older task adds the missing orchestrator workspace without replacing repo panes.
+Every task, including a single-repo task, has a task-root herdr workspace for the orchestrator and one workspace per repo. Choose the orchestrator provider at the task root; it starts missing worker agents. Reopening an older task adds the missing orchestrator workspace without replacing repo panes.
 
 This repo appears in the task sessionizer under `~/Projects`. Personal repos
 live in `~/Projects/<name>`, and work repos in `~/Work/<name>`; `~/Work/tries`

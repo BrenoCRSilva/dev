@@ -505,10 +505,11 @@ write_agents_md() {
 
 ## Notes for agents
 - Worker repo subfolders are task worktrees on the branch shown in Repo modes. Each worker writes only inside its assigned worktree.
-- Context-only repos are canonical checkouts listed in Repo modes; they are read-only references with no worktree or repo agent. Only the researcher reads them, through its clones under \`research/context/\`. Workers never read them; ask the orchestrator for the facts you need.
+- Agent names: \`orchestrator\`, \`researcher\`, and \`worker-<repo>\` for each worker repo (listed under Repo modes). Hook files and report folders use these names.
+- Context-only repos are canonical checkouts listed in Repo modes; they are read-only references with no worktree or agent. Only the researcher reads them, through its clones under \`research/context/\`. Workers never read them; ask the orchestrator for the facts you need.
 - Researcher notes belong under the task root's \`research/\`; researcher never edits repository trees, its context clones included.
-- \`hooks/<agent>.md\` is an agent's assignment (step, scope, contract IDs, done when). The orchestrator writes it; the agent gets it at session start. Workers never write it.
-- \`reports/<agent>/<step>.json\` is an agent's step report, checked with \`task-report.py\`. Each agent writes only its own folder.
+- \`hooks/<agent>.md\` is an agent's assignment (step, scope, contract IDs, done when), e.g. \`hooks/worker-dotfiles.md\`. The orchestrator writes it; the agent gets it at session start. Workers never write it.
+- \`reports/<agent>/<step>.json\` is an agent's step report, checked with \`task-report.py\`, e.g. \`reports/worker-dotfiles/9.json\`. Each agent writes only its own folder.
 - Don't \`git checkout\` other branches; use the existing task worktrees.
 - Each agent's role comes from its launch prompt (~/.config/tmux/scripts/task-roles/). The orchestrator maintains the task plan and shared contracts.
 EOF
@@ -574,7 +575,7 @@ lines = [
 ]
 if workers:
     lines.extend(
-        f"- **{md(name)}** — worktree `{md(worktree)}`; canonical checkout `{md(canonical)}`; branch `{md(branch or '?')}`."
+        f"- **{md(name)}** — worktree `{md(worktree)}`; canonical checkout `{md(canonical)}`; branch `{md(branch or '?')}`; agent `worker-{md(name)}`."
         for name, worktree, canonical, branch in workers
     )
 else:
@@ -582,7 +583,7 @@ else:
 lines.extend(["", "### Context only (read-only)"])
 if contexts:
     lines.extend(
-        f"- **{md(name)}** — canonical checkout `{md(path)}`; read-only reference, no task worktree or repo agent."
+        f"- **{md(name)}** — canonical checkout `{md(path)}`; read-only reference, no task worktree or agent."
         for name, path in sorted(contexts, key=lambda row: row[0].casefold())
     )
 else:
@@ -829,7 +830,7 @@ generated_agents() {
 }
 
 # Claude Code reads CLAUDE.md, not AGENTS.md. A symlink (rather than an
-# @AGENTS.md import) means repo agents pick it up from the parent folder
+# @AGENTS.md import) means worker agents pick it up from the parent folder
 # without the "external import" approval. The settings let the orchestrator
 # run herdr and task-agent.sh without asking. The subagents (status-reader,
 # diff-reviewer) are copied in when absent, so a file the user edited is kept.
@@ -1063,10 +1064,11 @@ quit_nvim_window() {
 # demote_repo <task> <repo> <dry-run yes|no> <force yes|no>
 demote_repo() {
     local task=$1 selector=$2 dry=$3 force=$4 kind name wt origin s branch base ahead status
-    local agent_pane agent_status ws wtforce=() stopforce=()
+    local agent_pane agent_status agent_name ws wtforce=() stopforce=()
     IFS=$'\t' read -r kind name wt origin < <(task_repo_lookup "$task" "$selector") ||
         die "no repo $selector in $task"
     [[ "$kind" == worker ]] || die "$name is already context in $task"
+    agent_name="worker-$name"
     s=$(session_name "$task")
     branch=$(git -C "$wt" branch --show-current 2>/dev/null)
     status=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) ||
@@ -1088,20 +1090,20 @@ demote_repo() {
     [[ "$force" == yes ]] && wtforce=(--force) && stopforce=(--force)
 
     # Agent: stopped first, since a working agent refuses without --force.
-    if agent=$(task_agent_line "$s" "$name"); then
+    if agent=$(task_agent_line "$s" "$agent_name"); then
         read -r agent_pane agent_status <<< "$agent"
         if [[ "$agent_status" == working && "$force" != yes ]]; then
             if [[ "$dry" == yes ]]; then
-                printf 'refused:   agent %s is working; wait for it or use --force\n' "$name"
+                printf 'refused:   agent %s is working; wait for it or use --force\n' "$agent_name"
                 return 1
             fi
-            die "agent $name is working; wait for it or use demote $task $name --force"
+            die "agent $agent_name is working; wait for it or use demote $task $name --force"
         fi
         if [[ "$dry" == yes ]]; then
-            printf 'agent:     stop %s (pane %s, %s) with /exit\n' "$name" "$agent_pane" "$agent_status"
+            printf 'agent:     stop %s (pane %s, %s) with /exit\n' "$agent_name" "$agent_pane" "$agent_status"
         else
-            TASK_SESSION=$s "$(dirname "$SELF")/task-agent.sh" stop "$name" "${stopforce[@]}" ||
-                die "could not stop agent $name; the worktree was not touched"
+            TASK_SESSION=$s "$(dirname "$SELF")/task-agent.sh" stop "$agent_name" "${stopforce[@]}" ||
+                die "could not stop agent $agent_name; the worktree was not touched"
         fi
     elif [[ "$dry" == yes ]]; then
         printf 'agent:     none running\n'
@@ -1347,7 +1349,7 @@ herdr_layout() {
         if [[ "$wt" == "$TASKS_DIR/$task/research" ]]; then label=research; else label=$(basename "$wt"); fi
         grep -qxF "\"label\":\"$label\"" <<< "$labels" && continue
         # The task-root workspace is the orchestrator, which starts
-        # the repo agents itself, so repo panes must stay at a shell prompt.
+        # the worker agents itself, so repo panes must stay at a shell prompt.
         role=()
         picker=
         if [[ "$wt" == "$TASKS_DIR/$task" ]]; then
@@ -2072,7 +2074,7 @@ menu_repo_picker() {
         IFS=$'\t' read -r name display <<< "$sel"
         [[ "$name" == "$FINISH_LABEL" ]] && break
         repo=${display/#\~/$HOME}
-        mode_rows=$(printf '%s\tWORKER\tCreate a task worktree, nvim/srv windows, and repo agent\n%s\tCONTEXT\tRead-only canonical checkout; no worktree or repo agent' "$ICON_REPO" "$ICON_CONTEXT")
+        mode_rows=$(printf '%s\tWORKER\tCreate a task worktree, nvim/srv windows, and worker agent\n%s\tCONTEXT\tRead-only canonical checkout; no worktree or agent' "$ICON_REPO" "$ICON_CONTEXT")
         sel=$(menu_choose "Repo mode: $name" "$mode_rows") || return 1
         IFS=$'\t' read -r mode _ <<< "$sel"
         case "$mode" in

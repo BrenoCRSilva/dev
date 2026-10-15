@@ -1,5 +1,5 @@
 # Git's default global ignore (used because core.excludesFile is unset).
-# codegraph index, built per worktree by its repo agent; never commit it.
+# codegraph index, built per worktree by its worker agent; never commit it.
 # No trailing slash: a symlinked .codegraph (index kept elsewhere) is a file to
 # git, so "/" would not match it.
 .codegraph

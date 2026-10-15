@@ -1,0 +1,31 @@
+{
+  "env": {
+    "CODEGRAPH_TELEMETRY": "0"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.config/tmux/scripts/task-guard.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.config/tmux/scripts/task-assignment.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

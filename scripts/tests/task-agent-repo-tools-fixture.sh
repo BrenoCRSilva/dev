@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Repo agents get codegraph and ponytail when both are present; the researcher
+# Workers get codegraph and ponytail when both are present; the researcher
 # gets codegraph only; the orchestrator gets neither. Each starts without a
-# missing tool (with a warning). Repo and researcher agents always get the
-# assignment hook and write access to their reports folder. Codex repo and
+# missing tool (with a warning). Workers and the researcher always get the
+# assignment hook and write access to their reports folder. Codex worker and
 # researcher launches pass a trust override for the pane's cwd; the
 # orchestrator's launch is unchanged.
 set -euo pipefail
@@ -47,17 +47,17 @@ trust_override=$(printf '%q' "projects={\"$WORKTREE_REAL\"={trust_level=\"truste
 research_trust_override=$(printf '%q' "projects={\"$RESEARCH_REAL\"={trust_level=\"trusted\"}}")
 
 # --- absent: no codegraph on PATH, no ponytail checkout -------------------
-claude_out=$("$TASK_AGENT" --dry-run --provider claude start repo dotfiles fixture-pane "$REPO" 2> "$ERR")
-grep -Fq 'codegraph is not on PATH; repo agent starts without it' "$ERR" || fail 'missing codegraph is not reported for repo'
+claude_out=$("$TASK_AGENT" --dry-run --provider claude start worker dotfiles fixture-pane "$REPO" 2> "$ERR")
+grep -Fq 'codegraph is not on PATH; worker agent starts without it' "$ERR" || fail 'missing codegraph is not reported for worker'
 grep -Fq 'ponytail 5.2.0 is not usable' "$ERR" || fail 'missing ponytail checkout is not reported'
 [[ "$claude_out" == *'--permission-mode auto --add-dir'* ]] || fail 'absent tools removed the claude repo permission args'
 [[ "$claude_out" != *--mcp-config* && "$claude_out" != *--plugin-dir* ]] || fail 'absent tools still added claude flags'
 
-codex_out=$("$TASK_AGENT" --dry-run --provider codex start repo dotfiles fixture-pane "$REPO" 2> "$ERR")
+codex_out=$("$TASK_AGENT" --dry-run --provider codex start worker dotfiles fixture-pane "$REPO" 2> "$ERR")
 [[ "$codex_out" == *'-a on-request -s workspace-write --add-dir'* ]] || fail 'absent tools removed the codex repo permission args'
 [[ "$codex_out" != *mcp_servers* && "$codex_out" != *ponytail-activate* ]] || fail 'absent tools still added codex config'
 [[ "$codex_out" == *'hooks.SessionStart='* && "$codex_out" == *'task-assignment.sh'* ]] || fail 'absent tools removed the assignment hook'
-printf 'PASS: repo agents start without codegraph or ponytail, with a warning; the assignment hook stays\n'
+printf 'PASS: workers start without codegraph or ponytail, with a warning; the assignment hook stays\n'
 
 research_out=$("$TASK_AGENT" --dry-run --provider claude start researcher fixture-pane 2> "$ERR")
 grep -Fq 'codegraph is not on PATH; researcher agent starts without it' "$ERR" || fail 'missing codegraph is not reported for researcher'
@@ -68,12 +68,19 @@ codex_research=$("$TASK_AGENT" --dry-run --provider codex start researcher fixtu
 [[ "$codex_research" == *'hooks.SessionStart='* ]] || fail 'absent codegraph removed the researcher assignment hook'
 printf 'PASS: researcher starts without codegraph, with a warning\n'
 
+# start repo is a deprecated alias: it warns, and the agent is still worker-<repo>.
+alias_out=$("$TASK_AGENT" --dry-run --provider claude start repo dotfiles fixture-pane "$REPO" 2> "$ERR")
+grep -Fq "'start repo' is deprecated; use 'start worker dotfiles' (its agent is worker-dotfiles)" "$ERR" ||
+    fail 'start repo does not warn that it is deprecated'
+[[ "$alias_out" == *'herdr agent start worker-dotfiles'* ]] || fail 'start repo does not name the agent worker-dotfiles'
+printf 'PASS: start repo still works, with a deprecation warning, as start worker\n'
+
 # Codex trust needs the pane's cwd; without it, a dry run says so and a real
 # start refuses rather than stall on the trust prompt.
-codex_untrusted=$("$TASK_AGENT" --dry-run --provider codex start repo dotfiles fixture-pane "$REPO" 2> "$ERR")
+codex_untrusted=$("$TASK_AGENT" --dry-run --provider codex start worker dotfiles fixture-pane "$REPO" 2> "$ERR")
 [[ "$codex_untrusted" == *'trust: cannot read the cwd of pane fixture-pane'* && "$codex_untrusted" != *'projects='* ]] ||
     fail 'codex repo without a pane cwd did not report the missing trust override'
-if "$TASK_AGENT" --provider codex start repo dotfiles fixture-pane "$REPO" > /dev/null 2> "$ERR"; then
+if "$TASK_AGENT" --provider codex start worker dotfiles fixture-pane "$REPO" > /dev/null 2> "$ERR"; then
     fail 'codex repo started without a trust override'
 fi
 # The reports folder comes from the pane's cwd too, so that is the first refusal.
@@ -90,19 +97,19 @@ for hook in ponytail-activate ponytail-subagent ponytail-mode-tracker; do
     printf '// stub\n' > "$PONYTAIL/hooks/$hook.js"
 done
 
-claude_out=$(FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --dry-run --provider claude start repo dotfiles fixture-pane "$REPO" 2> "$ERR")
+claude_out=$(FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --dry-run --provider claude start worker dotfiles fixture-pane "$REPO" 2> "$ERR")
 if grep -v '^trust:' "$ERR" | grep -q .; then fail "present tools still warned: $(cat "$ERR")"; fi
-[[ "$claude_out" == *'repo-agent.mcp.json'* && "$claude_out" == *'mcp__codegraph__'* ]] || fail 'claude repo lacks the codegraph MCP config or allow rule'
+[[ "$claude_out" == *'worker.mcp.json'* && "$claude_out" == *'mcp__codegraph__'* ]] || fail 'claude repo lacks the codegraph MCP config or allow rule'
 [[ "$claude_out" == *"--plugin-dir $PONYTAIL"* ]] || fail 'claude repo lacks the ponytail plugin dir'
-[[ "$claude_out" == *"--settings $ROLES/repo-agent.claude-settings.json"* ]] || fail 'claude repo lacks its settings file'
+[[ "$claude_out" == *"--settings $ROLES/worker.claude-settings.json"* ]] || fail 'claude repo lacks its settings file'
 [[ "${claude_out%%--add-dir*}" == *--plugin-dir* && "${claude_out%%--add-dir*}" == *--mcp-config* ]] ||
     fail 'claude tool flags must come before the variadic --add-dir'
 [[ $(grep -o -- '--add-dir' <<< "$claude_out" | wc -l) -eq 1 ]] || fail 'claude repo has more than one --add-dir'
-[[ "$claude_out" == *"--add-dir $REPO_REAL/.git $TASK_REAL/reports/dotfiles"* ]] ||
+[[ "$claude_out" == *"--add-dir $REPO_REAL/.git $TASK_REAL/reports/worker-dotfiles"* ]] ||
     fail 'claude repo lacks write access to its own reports folder and its .git'
-printf 'PASS: claude repo agent gets codegraph MCP, its allow rule, the ponytail plugin, its settings and its reports folder\n'
+printf 'PASS: claude worker gets codegraph MCP, its allow rule, the ponytail plugin, its settings and its reports folder\n'
 
-codex_out=$(FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --dry-run --provider codex start repo dotfiles fixture-pane "$REPO" 2> "$ERR")
+codex_out=$(FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --dry-run --provider codex start worker dotfiles fixture-pane "$REPO" 2> "$ERR")
 [[ "$codex_out" == *'mcp_servers.codegraph.command='* && "$codex_out" == *'mcp_servers.codegraph.env='* ]] ||
     fail 'codex repo lacks the codegraph MCP overrides'
 for event in SessionStart SubagentStart UserPromptSubmit; do
@@ -113,18 +120,18 @@ done
 [[ "$codex_out" == *"$trust_override"* ]] || fail 'codex repo lacks the trust override for its pane cwd'
 [[ $(grep -o -- 'hooks.SessionStart=' <<< "$codex_out" | wc -l) -eq 1 ]] || fail 'codex repo sets hooks.SessionStart more than once (a later -c would replace the first)'
 [[ "$codex_out" == *'ponytail-activate.js'*'task-assignment.sh'* ]] || fail 'codex SessionStart does not hold ponytail activation and the assignment hook together'
-[[ "$codex_out" == *"--add-dir $REPO_REAL/.git --add-dir $TASK_REAL/reports/dotfiles"* ]] ||
+[[ "$codex_out" == *"--add-dir $REPO_REAL/.git --add-dir $TASK_REAL/reports/worker-dotfiles"* ]] ||
     fail 'codex repo lacks write access to its own reports folder'
 [[ "$codex_out" != *PONYTAIL_QUIET_STARTUP* && "$codex_out" != *PONYTAIL_HIDE_STATUS* ]] ||
     fail 'codex ponytail hooks still set the no-op PONYTAIL_QUIET_STARTUP/PONYTAIL_HIDE_STATUS'
 [[ "$codex_out" != *CODEGRAPH_NO_WATCH* && "$claude_out" != *CODEGRAPH_NO_WATCH* ]] || fail 'a repo launch sets CODEGRAPH_NO_WATCH'
-printf 'PASS: codex repo agent gets codegraph MCP overrides, the three ponytail hooks and the trust override\n'
+printf 'PASS: codex worker gets codegraph MCP overrides, the three ponytail hooks and the trust override\n'
 
 # The researcher gets codegraph and nothing else.
 research_claude=$(FIXTURE_PANE_CWD="$RESEARCH" "$TASK_AGENT" --dry-run start researcher fixture-pane 2> "$ERR")
-[[ "$research_claude" == *'repo-agent.mcp.json'* && "$research_claude" == *'mcp__codegraph__'* ]] ||
+[[ "$research_claude" == *'worker.mcp.json'* && "$research_claude" == *'mcp__codegraph__'* ]] ||
     fail 'claude researcher lacks the codegraph MCP config or allow rule'
-[[ "$research_claude" == *"--settings $ROLES/repo-agent.claude-settings.json"* && "$research_claude" == *'--permission-mode auto'* ]] ||
+[[ "$research_claude" == *"--settings $ROLES/researcher.claude-settings.json"* && "$research_claude" == *'--permission-mode auto'* ]] ||
     fail 'claude researcher lacks its settings or permission mode'
 [[ "$research_claude" != *--plugin-dir* ]] || fail 'claude researcher got ponytail'
 [[ "$research_claude" == *"--add-dir $TASK_REAL/reports/researcher"* && "$research_claude" != *'/.git'* ]] ||
@@ -141,11 +148,11 @@ research_codex=$(FIXTURE_PANE_CWD="$RESEARCH" "$TASK_AGENT" --dry-run --provider
 printf 'PASS: researcher gets codegraph, the assignment hook, its reports folder and the codex trust override, but no ponytail and no repo write access\n'
 
 # The claude settings file carries only the codegraph telemetry switch.
-SETTINGS="$ROOT/env/.config/tmux/scripts/task-roles/repo-agent.claude-settings.json"
-grep -Fq '"CODEGRAPH_TELEMETRY": "0"' "$SETTINGS" || fail 'repo settings lost CODEGRAPH_TELEMETRY=0'
-if grep -q 'PONYTAIL_' "$SETTINGS"; then fail 'repo settings still set no-op PONYTAIL_* variables'; fi
+SETTINGS="$ROOT/env/.config/tmux/scripts/task-roles/worker.claude-settings.json"
+grep -Fq '"CODEGRAPH_TELEMETRY": "0"' "$SETTINGS" || fail 'worker settings lost CODEGRAPH_TELEMETRY=0'
+if grep -q 'PONYTAIL_' "$SETTINGS"; then fail 'worker settings still set no-op PONYTAIL_* variables'; fi
 if grep -rq 'CODEGRAPH_NO_WATCH' "$ROOT/env/.config/tmux/scripts"; then fail 'a tracked launcher file sets CODEGRAPH_NO_WATCH'; fi
-printf 'PASS: repo settings set only CODEGRAPH_TELEMETRY; nothing sets CODEGRAPH_NO_WATCH\n'
+printf 'PASS: worker settings set only CODEGRAPH_TELEMETRY; nothing sets CODEGRAPH_NO_WATCH\n'
 
 # The tracked global ignore must hide a symlinked .codegraph (index kept outside
 # the worktree), which a trailing-slash pattern would not match.
@@ -164,7 +171,7 @@ printf 'PASS: tracked global ignore hides a symlinked .codegraph index\n'
 for launch in "orchestrator" "--provider codex orchestrator"; do
     # shellcheck disable=SC2086
     out=$(FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --dry-run $launch 2> "$ERR")
-    if grep -Eq 'codegraph|ponytail|mcp|plugin-dir|repo-agent|hooks\.|dangerously|projects=' <<< "$out"; then
+    if grep -Eq 'codegraph|ponytail|mcp|plugin-dir|worker\.|hooks\.|dangerously|projects=' <<< "$out"; then
         fail "'$launch' picked up repo-only tools: $out"
     fi
 done
@@ -198,14 +205,14 @@ fi
 [ "$1 $2" = "agent start" ] && exit 0
 exit 1
 EOF
-if FIXTURE_PANE_CWD="$RESEARCH" "$TASK_AGENT" --provider codex start repo dotfiles fixture-pane "$REPO" > /dev/null 2> "$ERR"; then
+if FIXTURE_PANE_CWD="$RESEARCH" "$TASK_AGENT" --provider codex start worker dotfiles fixture-pane "$REPO" > /dev/null 2> "$ERR"; then
     fail 'repo start accepted a pane in the research folder'
 fi
-grep -Fq 'pane fixture-pane is not in the folder of dotfiles' "$ERR" || fail 'refused repo start does not say why'
-[[ ! -e "$TASK_REAL/reports/dotfiles" ]] || fail 'refused start made a reports folder'
-FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --provider codex start repo dotfiles fixture-pane "$REPO" > /dev/null 2> "$ERR" ||
+grep -Fq 'pane fixture-pane is not in the folder of worker-dotfiles' "$ERR" || fail 'refused worker start does not say why'
+[[ ! -e "$TASK_REAL/reports/worker-dotfiles" ]] || fail 'refused start made a reports folder'
+FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --provider codex start worker dotfiles fixture-pane "$REPO" > /dev/null 2> "$ERR" ||
     fail "repo start failed: $(cat "$ERR")"
-[[ -d "$TASK_REAL/reports/dotfiles" && ! -e "$TASK_REAL/reports/researcher" ]] || fail 'repo start did not make only its own reports folder'
+[[ -d "$TASK_REAL/reports/worker-dotfiles" && ! -e "$TASK_REAL/reports/researcher" ]] || fail 'repo start did not make only its own reports folder'
 FIXTURE_PANE_CWD="$RESEARCH" "$TASK_AGENT" --provider codex start researcher fixture-pane > /dev/null 2> "$ERR" ||
     fail "researcher start failed: $(cat "$ERR")"
 [[ -d "$TASK_REAL/reports/researcher" ]] || fail 'researcher start did not make its reports folder'
