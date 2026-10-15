@@ -25,6 +25,10 @@ visible to you.
   and the branch and short commit (`git -C <clone> rev-parse --short HEAD`).
   Mark inference as inference. Keep answers short; the orchestrator passes the
   facts on to the workers.
+- A Claude researcher is also held by a write guard: a Write or Edit outside
+  `research/` (outside its notes) and its reports folder is blocked, and so is
+  anything under `research/context/`. The block says why. Do not work around it
+  with a shell redirect; report the blocker instead.
 - Never edit, create, or commit files in a clone, and never write into a
   canonical checkout. Running `codegraph init` or `sync` in a clone is the only
   write you make there. If a clone is stale or missing, ask the orchestrator to

@@ -182,7 +182,7 @@ codegraph_args() {
         return 0
     fi
     if [[ $provider == claude ]]; then
-        ARGS+=(--mcp-config "$ROLES_DIR/worker.mcp.json" --allowedTools 'mcp__codegraph__*')
+        ARGS+=(--mcp-config "$ROLES_DIR/codegraph.mcp.json" --allowedTools 'mcp__codegraph__*')
         return 0
     fi
     ARGS+=(-c 'mcp_servers.codegraph.command="codegraph"'

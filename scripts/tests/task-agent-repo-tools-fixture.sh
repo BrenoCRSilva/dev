@@ -99,7 +99,7 @@ done
 
 claude_out=$(FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --dry-run --provider claude start worker dotfiles fixture-pane "$REPO" 2> "$ERR")
 if grep -v '^trust:' "$ERR" | grep -q .; then fail "present tools still warned: $(cat "$ERR")"; fi
-[[ "$claude_out" == *'worker.mcp.json'* && "$claude_out" == *'mcp__codegraph__'* ]] || fail 'claude repo lacks the codegraph MCP config or allow rule'
+[[ "$claude_out" == *'codegraph.mcp.json'* && "$claude_out" == *'mcp__codegraph__'* ]] || fail 'claude repo lacks the codegraph MCP config or allow rule'
 [[ "$claude_out" == *"--plugin-dir $PONYTAIL"* ]] || fail 'claude repo lacks the ponytail plugin dir'
 [[ "$claude_out" == *"--settings $ROLES/worker.claude-settings.json"* ]] || fail 'claude repo lacks its settings file'
 [[ "${claude_out%%--add-dir*}" == *--plugin-dir* && "${claude_out%%--add-dir*}" == *--mcp-config* ]] ||
@@ -129,7 +129,7 @@ printf 'PASS: codex worker gets codegraph MCP overrides, the three ponytail hook
 
 # The researcher gets codegraph and nothing else.
 research_claude=$(FIXTURE_PANE_CWD="$RESEARCH" "$TASK_AGENT" --dry-run start researcher fixture-pane 2> "$ERR")
-[[ "$research_claude" == *'worker.mcp.json'* && "$research_claude" == *'mcp__codegraph__'* ]] ||
+[[ "$research_claude" == *'codegraph.mcp.json'* && "$research_claude" == *'mcp__codegraph__'* ]] ||
     fail 'claude researcher lacks the codegraph MCP config or allow rule'
 [[ "$research_claude" == *"--settings $ROLES/researcher.claude-settings.json"* && "$research_claude" == *'--permission-mode auto'* ]] ||
     fail 'claude researcher lacks its settings or permission mode'

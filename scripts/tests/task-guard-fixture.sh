@@ -13,6 +13,7 @@ TMP_ROOT=$(mktemp -d)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 ERR="$TMP_ROOT/stderr"
+GUARD_MODE=worker
 
 TASK="$TMP_ROOT/tasks/fixture"
 WT="$TASK/dotfiles"
@@ -41,7 +42,7 @@ call() {
 # run_guard <project dir> <hook input>: sets STATUS and OUT (stdout) and ERRTEXT (stderr).
 run_guard() {
     STATUS=0
-    OUT=$(printf '%s' "$2" | CLAUDE_PROJECT_DIR="$1" "$GUARD" 2> "$ERR") || STATUS=$?
+    OUT=$(printf '%s' "$2" | CLAUDE_PROJECT_DIR="$1" "$GUARD" "$GUARD_MODE" 2> "$ERR") || STATUS=$?
     ERRTEXT=$(cat "$ERR")
 }
 
@@ -101,17 +102,58 @@ NOJQ="$TMP_ROOT/nojq"
 mkdir -p "$NOJQ"
 ln -s "$(command -v cat)" "$NOJQ/cat"
 STATUS=0
-printf '%s' "$(call Write "$WT/x.txt" "$WT")" | env PATH="$NOJQ" CLAUDE_PROJECT_DIR="$WT" "$(command -v bash)" "$GUARD" 2> "$ERR" || STATUS=$?
+printf '%s' "$(call Write "$WT/x.txt" "$WT")" | env PATH="$NOJQ" CLAUDE_PROJECT_DIR="$WT" "$(command -v bash)" "$GUARD" worker 2> "$ERR" || STATUS=$?
 if [[ $STATUS -ne 2 ]] || ! grep -Fq 'jq is missing' "$ERR"; then
     fail "without jq the guard did not block: $STATUS $(cat "$ERR")"
 fi
 printf 'PASS: without jq every write is blocked, with the reason\n'
 
-# Only the worker's settings carry the guard; the researcher's do not.
-jq -e '.hooks.PreToolUse[] | select(.matcher == "Write|Edit|MultiEdit|NotebookEdit") | .hooks[] | select(.command == "~/.config/tmux/scripts/task-guard.sh")' \
-    "$ROLES/worker.claude-settings.json" > /dev/null || fail 'worker settings lack the write guard'
-if jq -e '.hooks.PreToolUse' "$ROLES/researcher.claude-settings.json" > /dev/null 2>&1; then
-    fail 'researcher settings carry the worker write guard'
-fi
-jq -e '.hooks.SessionStart' "$ROLES/worker.claude-settings.json" > /dev/null || fail 'worker settings lost the assignment hook'
-printf 'PASS: the write guard is wired into the worker settings only\n'
+# --- researcher ---------------------------------------------------------------
+# The researcher works in <task-root>/research/: its notes are writable, the
+# context clones under research/context/ never are, and its reports folder is
+# its own. Worker worktrees and other agents' reports are outside it.
+GUARD_MODE=researcher
+RESEARCH="$TASK/research"
+mkdir -p "$RESEARCH/context/clone" "$RESEARCH/notes"
+ln -s "$RESEARCH/context/clone" "$RESEARCH/link-to-clone"
+RESEARCH=$(realpath "$RESEARCH")
+
+allow 'researcher writes its notes under research/' "$RESEARCH" Write "$RESEARCH/notes/findings.md"
+allow 'researcher edits its notes with MultiEdit' "$RESEARCH" MultiEdit "$RESEARCH/notes/sources.md"
+allow 'researcher writes its own reports folder' "$RESEARCH" Write "$TASK/reports/researcher/4.json"
+allow 'a path with .. that stays outside the clones' "$RESEARCH" Write "$RESEARCH/context/../notes/summary.md"
+block 'researcher writes a file in a context clone' "$RESEARCH" Edit "$RESEARCH/context/clone/src/main.py"
+block 'researcher writes a notebook in a context clone' "$RESEARCH" NotebookEdit "$RESEARCH/context/clone/n.ipynb"
+block 'researcher creates a new clone folder' "$RESEARCH" Write "$RESEARCH/context/new-clone/file.txt"
+block 'researcher reaches a clone through a symlink in research/' "$RESEARCH" Write "$RESEARCH/link-to-clone/x.txt"
+block 'researcher reaches a clone through a traversal' "$RESEARCH" Write "$RESEARCH/notes/../context/clone/x.txt"
+block 'researcher writes a worker worktree' "$RESEARCH" Edit "$WT/env/deep/x.txt"
+block "researcher writes another agent's reports" "$RESEARCH" Write "$TASK/reports/worker-dotfiles/9.json"
+block 'researcher traverses into a worker worktree' "$RESEARCH" Write "$RESEARCH/../dotfiles/x.txt"
+block 'researcher traverses to the task root' "$RESEARCH" Write "$RESEARCH/../AGENTS.md"
+block 'researcher writes the canonical checkout' "$RESEARCH" Write "$CANON/env/x"
+block 'a launch folder that is not research/' "$TASK" Write "$RESEARCH/notes/x.md"
+block 'a researcher folder that does not exist' "$TASK/research-missing" Write "$RESEARCH/notes/x.md"
+run_guard '' "$(call Write "$RESEARCH/notes/x.md" "$RESEARCH")"
+[[ $STATUS -eq 2 && "$ERRTEXT" == *'CLAUDE_PROJECT_DIR is not set'* ]] || fail "researcher without CLAUDE_PROJECT_DIR was not blocked: $STATUS $ERRTEXT"
+printf 'PASS: researcher without CLAUDE_PROJECT_DIR is blocked\n'
+GUARD_MODE=worker
+
+# The mode is required: a guard run without one, or with another, blocks.
+STATUS=0
+printf '%s' "$(call Write "$WT/x.txt" "$WT")" | CLAUDE_PROJECT_DIR="$WT" "$GUARD" 2> "$ERR" || STATUS=$?
+[[ $STATUS -eq 2 && "$(cat "$ERR")" == *'unknown guard mode'* ]] || fail "a run without a mode was not blocked: $STATUS $(cat "$ERR")"
+STATUS=0
+printf '%s' "$(call Write "$WT/x.txt" "$WT")" | CLAUDE_PROJECT_DIR="$WT" "$GUARD" reviewer 2> "$ERR" || STATUS=$?
+[[ $STATUS -eq 2 ]] || fail "an unknown mode was not blocked: $STATUS"
+printf 'PASS: a guard run with no mode, or an unknown one, blocks\n'
+
+# Each role's settings run the guard in its own mode.
+for role in worker researcher; do
+    # The settings file holds the literal ~/ path, so the tilde must not expand here.
+    # shellcheck disable=SC2088
+    jq -e --arg c "~/.config/tmux/scripts/task-guard.sh $role" '.hooks.PreToolUse[] | select(.matcher == "Write|Edit|MultiEdit|NotebookEdit") | .hooks[] | select(.command == $c)' \
+        "$ROLES/$role.claude-settings.json" > /dev/null || fail "$role settings lack the write guard in mode $role"
+    jq -e '.hooks.SessionStart' "$ROLES/$role.claude-settings.json" > /dev/null || fail "$role settings lost the assignment hook"
+done
+printf 'PASS: each role'\''s settings run the write guard in its own mode, and keep the assignment hook\n'

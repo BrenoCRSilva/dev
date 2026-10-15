@@ -9,7 +9,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.config/tmux/scripts/task-guard.sh",
+            "command": "~/.config/tmux/scripts/task-guard.sh worker",
             "timeout": 5
           }
         ]
