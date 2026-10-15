@@ -98,6 +98,14 @@ permissions.
   `task-report.py check`: `herdr agent read <name> --lines 40`. Do not read the
   whole pane.
 
+## Routing a finished step: task-decide
+
+- After a worker's report passes `task-report.py check`, run this once, in one Bash call:
+  `python3 ~/.config/tmux/scripts/task-decide.py --formula ~/.config/tmux/scripts/task-roles/formulas/worker-step.toml --report <task-root>/reports/<agent>/<step>.json --step <step>`
+- Read only its exit code and its one-line stdout. Exit 0 (continue): record the step in `AGENTS.md` and carry on with the plan, without an Opus turn. Exit 10 (escalate), 11 (ask_user), 20 (service failed; treat as escalate) or 3 (invalid formula or report): wake up and decide from the report and `<task-root>/decisions/<agent>/<step>.json`. Exit 11 needs the user: ask at a checkpoint.
+- Exit 2 is a problem on your side (flags or key). Fix it; do not retry blindly. Do not open the key file or pass a key yourself.
+- Use it only on a worker report, never with `--dry-run`. Workers never run it. It never merges, pushes, deploys or installs: those stay with you after the user's OK.
+
 ## Subagents for verbose work
 
 - `status-reader` (Haiku, `.claude/agents/`): reads a pane or report and returns
