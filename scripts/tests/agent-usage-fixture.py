@@ -146,9 +146,10 @@ def main():
             fail(f"total turns {total['turns']} != 9 (dedupe or counting wrong)")
         if total["sessions"] != 3:
             fail(f"total sessions {total['sessions']} != 3 (sess-a, sess-b, cx-1)")
-        if total["unpriced_turns"] != 5:
-            fail(f"unpriced turns {total['unpriced_turns']} != 5 (opus, sonnet, synthetic, 2 codex)")
-        near(total["cost_usd"], 0.0338, "total priced cost")
+        if total["unpriced_turns"] != 3:
+            fail(f"unpriced turns {total['unpriced_turns']} != 3 (synthetic, 2 codex)")
+        # Haiku 0.0348 + Opus 0.058 + Sonnet 0.0009.
+        near(total["cost_usd"], 0.0937, "total priced cost")
 
         haiku = find(report["by_model"], provider="claude", model="claude-haiku-5-5")
         if haiku["turns"] != 4 or haiku["input"] != 102500 or haiku["output"] != 1200:
@@ -156,10 +157,16 @@ def main():
         if haiku["cache_read"] != 120000 or haiku["cache_write"] != 30000:
             fail(f"haiku cache tokens wrong: {haiku}")
         # Tiers: m-a, m-old and m-d are first-tier; m-b (150.5k prompt) is second-tier.
-        near(haiku["cost_usd"], 0.0338, "haiku cost (tiers)")
+        near(haiku["cost_usd"], 0.0348, "haiku cost (tiers)")
+        if haiku["tiered_turns"] != 4 or haiku["long_turns"] != 1 or haiku["long_share"] != 0.25:
+            fail(f"haiku >100k columns wrong: {haiku}")
+        near(haiku["long_cost_usd"], 0.0245, "haiku >100k cost")
         opus = find(report["by_model"], provider="claude", model="claude-opus-5-5")
-        if opus["cost_usd"] is not None or opus["cache_write"] != 5000:
-            fail(f"unpriced opus row wrong: {opus}")
+        near(opus["cost_usd"], 0.058, "opus cost (4 / 20, 1h write 2x)")
+        if opus["cache_write"] != 5000 or opus["long_share"] is not None:
+            fail(f"opus row wrong: {opus}")
+        sonnet = find(report["by_model"], provider="claude", model="claude-sonnet-5-5")
+        near(sonnet["cost_usd"], 0.0009, "sonnet cost (2 / 10)")
         codex_row = find(report["by_model"], provider="codex", model="gpt-6-luna")
         if codex_row["turns"] != 2 or codex_row["input"] != 2930 or codex_row["cache_read"] != 12160 or codex_row["output"] != 19:
             fail(f"codex tokens wrong (cached input must be split out): {codex_row}")
@@ -172,7 +179,9 @@ def main():
         repo = find(by_agent, task="t1", role="repo", agent="api", model="claude-haiku-5-5")
         if repo["turns"] != 2:
             fail(f"repo haiku turns {repo['turns']} != 2")
-        near(repo["cost_usd"], 0.0237, "repo haiku cost")
+        near(repo["cost_usd"], 0.0247, "repo haiku cost")
+        if repo["long_turns"] != 1 or repo["long_share"] != 0.5:
+            fail(f"repo >100k share wrong: {repo}")
         find(by_agent, task="t1", role="repo", agent="api", provider="codex", model="gpt-6-luna")
         find(by_agent, task="t1", role="researcher", agent="researcher", model="claude-sonnet-5-5")
         find(by_agent, task="t1", role="researcher", agent="researcher", provider="codex", model="gpt-6-luna")
@@ -181,12 +190,38 @@ def main():
         find(report["by_task"], task="t1")
         print("PASS: totals, dedupe, tiers, cache split, codex input split, and attribution by folder")
 
+        # Per role across tasks: orchestrator, repo, researcher and interactive.
+        roles = {row["role"]: row for row in report["by_role"]}
+        if sorted(roles) != ["interactive", "orchestrator", "repo", "researcher"]:
+            fail(f"role rows wrong: {sorted(roles)}")
+        if roles["orchestrator"]["turns"] != 2 or roles["repo"]["turns"] != 4 or roles["researcher"]["turns"] != 2:
+            fail("role turn counts wrong")
+        # m-d is exactly 100,000 prompt tokens: first tier, so 0 of 1 tiered turns is above 100k.
+        if roles["interactive"]["long_turns"] != 0 or roles["interactive"]["long_share"] != 0.0:
+            fail(f"interactive role >100k share wrong: {roles['interactive']}")
+        if roles["repo"]["long_turns"] != 1 or roles["repo"]["long_share"] != 0.5:
+            fail(f"repo role >100k share wrong: {roles['repo']}")
+        if roles["orchestrator"]["long_turns"] != 0 or roles["researcher"]["long_turns"] != 0:
+            fail("orchestrator and researcher should have no >100k turns")
+        near(roles["orchestrator"]["cost_usd"], 0.0581, "orchestrator role cost (opus + haiku)")
+        print("PASS: per-role rows aggregate across tasks, with the >100k share per role")
+
+        # --cache-read-x moves only the cache-read cost: m-b (120k reads at 0.5/M) gains 0.003, m-c (10k at 4/M) gains 0.002.
+        alt = as_json(run(["--json", "--cache-read-x", "0.1"], tasks, claude, codex))
+        near(find(alt["by_model"], provider="claude", model="claude-haiku-5-5")["cost_usd"], 0.0378,
+             "haiku cost at 0.1x cache read")
+        near(find(alt["by_model"], provider="claude", model="claude-opus-5-5")["cost_usd"], 0.060,
+             "opus cost at 0.1x cache read")
+        if alt["pricing"]["cache_read_x"] != 0.1:
+            fail("pricing block does not report the cache read multiplier used")
+        print("PASS: --cache-read-x changes only the cache-read cost")
+
         # --since is inclusive, --until exclusive; m-b sits exactly at 15:00Z.
         late = as_json(run(["--json", "--since", "2026-10-15T12:00:00Z"], tasks, claude, codex))
         late_haiku = find(late["by_model"], provider="claude", model="claude-haiku-5-5")
         if late_haiku["turns"] != 2:
             fail(f"--since 12:00Z should keep m-b and m-d only, got {late_haiku['turns']}")
-        near(late_haiku["cost_usd"], 0.0335, "--since cost")
+        near(late_haiku["cost_usd"], 0.0345, "--since cost")
         early = as_json(run(["--json", "--until", "2026-10-15T12:00:00Z"], tasks, claude, codex))
         early_haiku = find(early["by_model"], provider="claude", model="claude-haiku-5-5")
         if early_haiku["turns"] != 2:

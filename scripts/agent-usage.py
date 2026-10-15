@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Read-only usage report for Claude Code and Codex sessions.
 #
-#   agent-usage.py [--since WHEN] [--until WHEN] [--json]
+#   agent-usage.py [--since WHEN] [--until WHEN] [--json] [--cache-read-x X]
 #                  [--tasks-dir DIR] [--claude-dir DIR] [--codex-dir DIR]
 #
 # Reads Claude Code logs (<claude-dir>/**/*.jsonl, main sessions and subagents)
@@ -27,22 +27,25 @@ import json
 import os
 import sys
 
-# USD per million tokens, from the list prices given for this report. None means
-# no price was given, so responses from that model cost nothing in the estimate.
-# Haiku tiers apply per response, by its prompt tokens (input + cache read +
+# USD per million tokens, from research/gastown-and-orchestrator-cost.md section
+# B.0 (Anthropic pricing page, retrieved 2026-10-15). None means no price, so
+# responses from that model are counted in tokens and cost n/a. A model with
+# several tiers is priced per response by its prompt tokens (input + cache read +
 # cache write): the first tier up to its limit, the last tier above it.
 PRICES = {
-    "claude-opus-5-5": None,
+    "claude-opus-5-5": [(None, 4.00, 20.00)],
     "claude-opus-5": None,
-    "claude-sonnet-5-5": None,
-    "claude-haiku-5-5": [(100_000, 0.10, 0.50), (None, 0.50, 1.50)],
+    "claude-sonnet-5-5": [(None, 2.00, 10.00)],
+    "claude-haiku-5-5": [(100_000, 0.10, 0.50), (None, 0.50, 2.50)],
 }
-# Cache multipliers on the input price: read, 5-minute write, 1-hour write.
+# Cache multipliers on the input price. Read is 0.05x as the pricing page states
+# for these models; --cache-read-x overrides it (the B.0 Haiku rows imply 0.1x).
 CACHE_READ_X = 0.05
 CACHE_WRITE_5M_X = 1.25
 CACHE_WRITE_1H_X = 2.00
 
 TOKEN_FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
+ROLE_ORDER = ("orchestrator", "repo", "researcher", "interactive", "unknown")
 
 
 def parse_when(text):
@@ -189,30 +192,38 @@ def attribute(cwd, tasks):
     return "-", "interactive", path
 
 
-def request_cost(model, response):
-    """USD list-price estimate for one response, or None when the model has no price."""
+def is_tiered(model):
+    return len(PRICES.get(model) or ()) > 1
+
+
+def request_cost(model, response, cache_read_x):
+    """(USD estimate, in a >100k tier) for one response; (None, False) when unpriced."""
     tiers = PRICES.get(model)
     if not tiers:
-        return None
+        return None, False
     prompt = response["input"] + response["cache_read"] + response["cache_write_5m"] + response["cache_write_1h"]
-    price_in, price_out = next((p_in, p_out) for limit, p_in, p_out in tiers if limit is None or prompt <= limit)
+    index = next(i for i, (limit, _, _) in enumerate(tiers) if limit is None or prompt <= limit)
+    _, price_in, price_out = tiers[index]
     cost = (
         response["input"] * price_in
-        + response["cache_read"] * price_in * CACHE_READ_X
+        + response["cache_read"] * price_in * cache_read_x
         + response["cache_write_5m"] * price_in * CACHE_WRITE_5M_X
         + response["cache_write_1h"] * price_in * CACHE_WRITE_1H_X
         + response["output"] * price_out
     )
-    return cost / 1_000_000
+    return cost / 1_000_000, index > 0
 
 
 def new_total():
-    total = {"sessions": set(), "turns": 0, "cost": 0.0, "unpriced_turns": 0}
+    total = {
+        "sessions": set(), "turns": 0, "cost": 0.0, "unpriced_turns": 0,
+        "tiered_turns": 0, "long_turns": 0, "long_cost": 0.0,
+    }
     total.update({field: 0 for field in TOKEN_FIELDS})
     return total
 
 
-def add_to(total, response, cost):
+def add_to(total, response, cost, tiered, long_tier):
     total["sessions"].add((response["provider"], response["session"]))
     total["turns"] += 1
     for field in TOKEN_FIELDS:
@@ -221,6 +232,11 @@ def add_to(total, response, cost):
         total["unpriced_turns"] += 1
     else:
         total["cost"] += cost
+    if tiered:
+        total["tiered_turns"] += 1
+    if long_tier:
+        total["long_turns"] += 1
+        total["long_cost"] += cost
 
 
 def finish(row, total):
@@ -231,40 +247,49 @@ def finish(row, total):
     row["cache_write"] = total["cache_write_5m"] + total["cache_write_1h"]
     row["unpriced_turns"] = total["unpriced_turns"]
     row["cost_usd"] = round(total["cost"], 6) if total["unpriced_turns"] < total["turns"] else None
+    # Share of the tiered (Haiku) turns that fell in the >100k tier.
+    row["tiered_turns"] = total["tiered_turns"]
+    row["long_turns"] = total["long_turns"]
+    row["long_share"] = round(total["long_turns"] / total["tiered_turns"], 4) if total["tiered_turns"] else None
+    row["long_cost_usd"] = round(total["long_cost"], 6) if total["long_turns"] else None
     return row
 
 
-def build_report(responses, tasks):
+def build_report(responses, tasks, cache_read_x):
     groups = {
         "by_task": collections.defaultdict(new_total),
+        "by_role": collections.defaultdict(new_total),
         "by_agent": collections.defaultdict(new_total),
         "by_model": collections.defaultdict(new_total),
     }
     everything = new_total()
     for response in responses:
         task, role, agent = attribute(response["cwd"], tasks)
-        cost = request_cost(response["model"], response)
-        add_to(everything, response, cost)
-        add_to(groups["by_task"][(task,)], response, cost)
-        add_to(groups["by_agent"][(task, role, agent, response["provider"], response["model"])], response, cost)
-        add_to(groups["by_model"][(response["provider"], response["model"])], response, cost)
+        cost, long_tier = request_cost(response["model"], response, cache_read_x)
+        tiered = is_tiered(response["model"])
+        keys = {
+            "by_task": (task,),
+            "by_role": (role,),
+            "by_agent": (task, role, agent, response["provider"], response["model"]),
+            "by_model": (response["provider"], response["model"]),
+        }
+        add_to(everything, response, cost, tiered, long_tier)
+        for name, key in keys.items():
+            add_to(groups[name][key], response, cost, tiered, long_tier)
 
-    def rows(name, keys):
-        result = []
-        for key, total in sorted(groups[name].items()):
-            row = dict(zip(keys, key))
-            result.append(finish(row, total))
-        return result
+    def rows(name, names):
+        return [finish(dict(zip(names, key)), total) for key, total in sorted(groups[name].items())]
 
     return {
         "by_task": rows("by_task", ("task",)),
+        "by_role": rows("by_role", ("role",)),
         "by_agent": rows("by_agent", ("task", "role", "agent", "provider", "model")),
         "by_model": rows("by_model", ("provider", "model")),
         "total": finish({}, everything),
         "pricing": {
-            "unit": "USD per million tokens (list-price estimate)",
-            "models": {name: tiers for name, tiers in PRICES.items()},
-            "cache_read_x": CACHE_READ_X,
+            "unit": "USD per million tokens (list-price estimate, research/gastown-and-orchestrator-cost.md B.0)",
+            "tiers": {name: tiers for name, tiers in PRICES.items()},
+            "cache_read_x": cache_read_x,
             "cache_write_5m_x": CACHE_WRITE_5M_X,
             "cache_write_1h_x": CACHE_WRITE_1H_X,
         },
@@ -277,16 +302,16 @@ def money(value):
 
 def print_table(title, headers, rows, out):
     print(title, file=out)
+    text_columns = {"task", "role", "agent", "provider", "model"}
     widths = [len(h) for h in headers]
     for row in rows:
         for i, cell in enumerate(row):
             widths[i] = max(widths[i], len(cell))
-    numeric = [i for i in range(len(headers)) if headers[i] not in ("task", "role", "agent", "provider", "model")]
 
     def line(cells):
         parts = []
         for i, cell in enumerate(cells):
-            parts.append(cell.rjust(widths[i]) if i in numeric else cell.ljust(widths[i]))
+            parts.append(cell.ljust(widths[i]) if headers[i] in text_columns else cell.rjust(widths[i]))
         return "  ".join(parts).rstrip()
 
     print(line(headers), file=out)
@@ -297,6 +322,9 @@ def print_table(title, headers, rows, out):
 
 
 def numbers(row):
+    cost = money(row["cost_usd"]) + ("*" if row["cost_usd"] is not None and row["unpriced_turns"] else "")
+    share = "-" if row["long_share"] is None else f"{row['long_share']:.0%}"
+    long_cost = "-" if row["long_cost_usd"] is None else money(row["long_cost_usd"])
     return [
         f"{row['sessions']:,}",
         f"{row['turns']:,}",
@@ -304,23 +332,24 @@ def numbers(row):
         f"{row['output']:,}",
         f"{row['cache_read']:,}",
         f"{row['cache_write']:,}",
-        money(row["cost_usd"]) + ("*" if row["cost_usd"] is not None and row["unpriced_turns"] else ""),
+        cost,
+        f"{row['long_turns']:,}",
+        share,
+        long_cost,
     ]
 
 
-METRICS = ["sessions", "turns", "input", "output", "cache read", "cache write", "est. USD"]
+METRICS = ["sessions", "turns", "input", "output", "cache read", "cache write", "est. USD",
+           ">100k turns", ">100k share", ">100k USD"]
 
 
 def print_report(report, meta, out):
     print("Agent usage, list-price estimate (not billing data)", file=out)
     print(f"range: {meta['range']}   files: {meta['files']}   bad lines skipped: {meta['bad_lines']}", file=out)
     print(file=out)
-    print_table(
-        "Per task",
-        ["task"] + METRICS,
-        [[r["task"]] + numbers(r) for r in report["by_task"]],
-        out,
-    )
+    roles = sorted(report["by_role"], key=lambda r: ROLE_ORDER.index(r["role"]) if r["role"] in ROLE_ORDER else 99)
+    print_table("Per role (all tasks)", ["role"] + METRICS, [[r["role"]] + numbers(r) for r in roles], out)
+    print_table("Per task", ["task"] + METRICS, [[r["task"]] + numbers(r) for r in report["by_task"]], out)
     print_table(
         "Per agent and model",
         ["task", "role", "agent", "provider", "model"] + METRICS,
@@ -333,11 +362,12 @@ def print_report(report, meta, out):
         [[r["provider"], r["model"]] + numbers(r) for r in report["by_model"]],
         out,
     )
-    total = report["total"]
-    print_table("Total", METRICS, [numbers(total)], out)
-    print("n/a: model has no price in PRICES (tokens still counted).", file=out)
+    print_table("Total", METRICS, [numbers(report["total"])], out)
+    print("n/a: model has no price (tokens still counted). -: no tiered (Haiku) turns in the row.", file=out)
     print("*: total includes responses from models without a price; cost covers the priced ones.", file=out)
-    print("Haiku tiers by prompt tokens per response; cache read 0.05x, cache write 1.25x (5m) / 2x (1h) of input.", file=out)
+    print(">100k turns: responses whose prompt (input + cache) was above 100,000 tokens; >100k share is that", file=out)
+    print("  over all tiered (Haiku) responses in the row; >100k USD is the cost of those responses.", file=out)
+    print(f"Cache read {report['pricing']['cache_read_x']}x, cache write 1.25x (5m) / 2x (1h) of input.", file=out)
 
 
 def main(argv=None):
@@ -345,6 +375,8 @@ def main(argv=None):
     parser.add_argument("--since", type=parse_when, help="include responses at or after this time")
     parser.add_argument("--until", type=parse_when, help="include responses before this time (exclusive)")
     parser.add_argument("--json", action="store_true", help="print JSON instead of tables")
+    parser.add_argument("--cache-read-x", type=float, default=CACHE_READ_X,
+                        help=f"cache read price as a multiple of input (default {CACHE_READ_X})")
     parser.add_argument("--tasks-dir", default=os.path.expanduser("~/tasks"))
     parser.add_argument("--claude-dir", default=os.path.expanduser("~/.claude/projects"))
     parser.add_argument("--codex-dir", default=os.path.expanduser("~/.codex/sessions"))
@@ -370,8 +402,7 @@ def main(argv=None):
             continue
         kept.append(response)
 
-    tasks = real_path(args.tasks_dir)
-    report = build_report(kept, tasks)
+    report = build_report(kept, real_path(args.tasks_dir), args.cache_read_x)
     fmt = "%Y-%m-%d %H:%M %Z"
     meta = {
         "range": " to ".join(
