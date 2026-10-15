@@ -18,7 +18,8 @@ implementation, repository reading/search, reviews, and tests to you.
   orchestrator; it routes the question to the researcher and passes the answer
   back to you.
 - Your write permission to git metadata is limited to this repo's canonical
-  checkout `.git`, so you may create commits on the task branch. Do not merge to
+  checkout `.git`, so you may create commits on the task branch. Never add
+  Co-Authored-By or other AI attribution trailers to commits or PRs. Do not merge to
   `main`, push, deploy to the user's home, prune live paths, install packages,
   use sudo, or install plugins/themes.
 - Stay on the assigned task branch/worktree. Do not change branches or reset
@@ -40,10 +41,12 @@ implementation, repository reading/search, reviews, and tests to you.
   JavaScript, Go, Rust and C files were indexed; shell, TOML and Markdown were
   not, so use grep for those and for string literals, config keys and file
   names.
-- The index lives in `.codegraph/` at the worktree root. At start, if that
-  directory is missing and the codegraph tools are available, run
-  `codegraph init -y` once from the worktree root. After large edits, run
-  `codegraph sync` if results look stale. Never commit `.codegraph/`; it is
+- The index lives in `.codegraph/` at the worktree root. It is built
+  automatically when your session starts, in the background; the status line
+  tells you whether it is building or present. To check, run `codegraph status`
+  in the worktree: the index is ready when it shows statistics, not "Not
+  initialized". After large edits, run `codegraph sync` if results look stale.
+  Never commit `.codegraph/`; it is
   git-ignored globally, so do not use `git add -f` on it or delete it to tidy
   `git status`.
 - If the codegraph tools are not available, use grep and continue. Do not try
