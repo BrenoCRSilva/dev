@@ -84,7 +84,13 @@ return {
 		},
 		hooks = {
 			-- Look of the diffview README: relative numbers, cursorline, ╱ where lines are missing.
-			diff_buf_win_enter = function(_, winid)
+			diff_buf_win_enter = function(bufnr, winid)
+				-- Diffview sets the filetype itself, after the treesitter FileType hook for
+				-- a reused buffer may already have run. Start the highlighter if it is off.
+				local lang = vim.treesitter.language.get_lang(vim.bo[bufnr].filetype)
+				if lang and vim.treesitter.highlighter.active[bufnr] == nil and vim.treesitter.language.add(lang) then
+					pcall(vim.treesitter.start, bufnr, lang)
+				end
 				vim.wo[winid].number = true
 				vim.wo[winid].relativenumber = true
 				vim.wo[winid].cursorline = true
