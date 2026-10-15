@@ -16,6 +16,7 @@ return {
 				open_files_do_not_replace_types = { "terminal", "trouble", "qf" },
 				window = {
 					position = "left",
+					mappings = { t = false }, -- neo-tree's t opens a new tab
 				},
 				filesystem = {
 					filtered_items = {

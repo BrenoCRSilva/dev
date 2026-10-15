@@ -43,6 +43,7 @@ function M.between(root, a, b)
 end
 
 function M.open(root, range)
+	repo.close_diffviews()
 	vim.cmd("DiffviewOpen " .. vim.fn.fnameescape("-C" .. root) .. " " .. range)
 end
 

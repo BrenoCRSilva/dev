@@ -52,6 +52,27 @@ function M.with_repo(callback)
 	end
 end
 
+-- Diffview opens one tab per view. Close every open view first, so there is at
+-- most one, and return to the tab that was current.
+function M.close_diffviews()
+	local ok, lib = pcall(require, "diffview.lib")
+	if not ok then
+		return
+	end
+	local current = vim.api.nvim_get_current_tabpage()
+	for _, tab in ipairs(vim.api.nvim_list_tabpages()) do
+		if vim.api.nvim_tabpage_is_valid(tab) then
+			vim.api.nvim_set_current_tabpage(tab)
+			if lib.get_current_view() then
+				pcall(vim.cmd, "DiffviewClose")
+			end
+		end
+	end
+	if vim.api.nvim_tabpage_is_valid(current) then
+		vim.api.nvim_set_current_tabpage(current)
+	end
+end
+
 function M.default_base(root)
 	local remote_head = M.git(root, { "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD" })
 	if remote_head and remote_head ~= "" then

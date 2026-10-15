@@ -9,6 +9,8 @@ return {
 			view_options = {
 				show_hidden = false,
 			},
+			-- <C-t> is oil's select_tab; no tabs here.
+			keymaps = { ["<C-t>"] = false },
 		})
 	end,
 }

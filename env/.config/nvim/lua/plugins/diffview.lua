@@ -3,6 +3,7 @@
 local repo = require("brenocrs.git-repo")
 
 local function diffview(command, root, rest)
+	repo.close_diffviews()
 	local parts = { command, vim.fn.fnameescape("-C" .. root) }
 	if rest then
 		table.insert(parts, rest)
@@ -41,6 +42,11 @@ local function repo_history()
 	end)
 end
 
+local function file_history()
+	repo.close_diffviews()
+	vim.cmd("DiffviewFileHistory %")
+end
+
 local close = { "n", "q", "<cmd>DiffviewClose<cr>", { desc = "Close diffview" } }
 
 return {
@@ -61,7 +67,7 @@ return {
 	keys = {
 		{ "<leader>gd", review_changes, desc = "Review uncommitted changes" },
 		{ "<leader>gr", review_branch, desc = "Review branch (vs main/master)" },
-		{ "<leader>gh", "<cmd>DiffviewFileHistory %<cr>", desc = "File history" },
+		{ "<leader>gh", file_history, desc = "File history" },
 		{ "<leader>gH", repo_history, desc = "Repository history" },
 		{ "<leader>gc", function() require("brenocrs.commit-diff").pick_commit() end, desc = "Diff a commit (pick)" },
 		{ "<leader>gC", function() require("brenocrs.commit-diff").pick_range() end, desc = "Diff between two commits" },

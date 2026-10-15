@@ -11,6 +11,9 @@ vim.o.relativenumber = false
 vim.o.cursorline = true
 vim.o.cursorlineopt = "number"
 
+-- No tab bar: tabs are not used for navigation (diffview's tab closes on exit).
+vim.o.showtabline = 0
+
 -- Indentation
 vim.o.tabstop = 4
 vim.o.softtabstop = 4
