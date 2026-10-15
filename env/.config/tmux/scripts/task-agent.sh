@@ -9,8 +9,9 @@
 #
 # The researcher is started on demand, not at task creation. stop sends /exit
 # to a finished worker or researcher; a working agent needs --force. Repo agents
-# also get codegraph (MCP code index) and ponytail (minimal-code rules); each is
-# skipped with a warning when it is missing, and no other role gets them.
+# get codegraph (MCP code index) and ponytail (minimal-code rules); the
+# researcher gets codegraph only; the orchestrator gets neither. A missing tool
+# is skipped with a warning.
 # The provider defaults to $TASK_PROVIDER, else claude. Launching the
 # orchestrator exports TASK_PROVIDER so the agents it starts follow it.
 # --dry-run prints the command instead of running it. --resume must be the
@@ -141,48 +142,56 @@ case "${1:-}" in
 esac
 
 # --- command ---------------------------------------------------------------
-# Adds the repo-only tools to ARGS for the provider. A missing tool is reported
-# on stderr and left out, so the agent still starts. Paths that go into the
-# codex hook command or TOML are limited to safe characters, since they are not
-# quoted for the shell or TOML.
+# Adds the role's tools to ARGS for the provider: repo agents get codegraph and
+# ponytail, the researcher gets codegraph only, and the orchestrator neither. A
+# missing tool is reported on stderr and left out, so the agent still starts.
+# Paths that go into the codex hook command or TOML are limited to safe
+# characters, since they are not quoted for the shell or TOML.
 safe_path() { [[ "$1" =~ ^[A-Za-z0-9_./-]+$ ]]; }
 
-repo_tool_args() {
-    local provider=$1 codegraph=no ponytail=no cmd
-    if command -v codegraph >/dev/null 2>&1; then
-        codegraph=yes
-    else
-        echo "task-agent: codegraph is not on PATH; repo agent starts without it" >&2
-    fi
-    if [[ -f "$PONYTAIL_DIR/.claude-plugin/plugin.json" && -f "$PONYTAIL_DIR/hooks/ponytail-activate.js" ]] &&
-        safe_path "$PONYTAIL_DIR" && safe_path "$PONYTAIL_STATE" && command -v node >/dev/null 2>&1; then
-        ponytail=yes
-    else
-        echo "task-agent: ponytail $PONYTAIL_VERSION is not usable at $PONYTAIL_DIR (missing checkout, unsafe path or no node); repo agent starts without it" >&2
-    fi
+tool_args() {
+    codegraph_args "$1"
+    if [[ $role == repo ]]; then ponytail_args "$1"; fi
+}
 
+# The MCP code index. Claude gets the config file and its allow rule (with the
+# settings file that sets CODEGRAPH_TELEMETRY=0); codex gets the same server as
+# per-launch -c overrides.
+codegraph_args() {
+    local provider=$1
+    if ! command -v codegraph >/dev/null 2>&1; then
+        echo "task-agent: codegraph is not on PATH; $role agent starts without it" >&2
+        return 0
+    fi
     if [[ $provider == claude ]]; then
-        ARGS+=(--settings "$ROLES_DIR/repo-agent.claude-settings.json")
-        if [[ $codegraph == yes ]]; then
-            ARGS+=(--mcp-config "$ROLES_DIR/repo-agent.mcp.json" --allowedTools 'mcp__codegraph__*')
-        fi
-        if [[ $ponytail == yes ]]; then ARGS+=(--plugin-dir "$PONYTAIL_DIR"); fi
-        return
+        ARGS+=(--settings "$ROLES_DIR/repo-agent.claude-settings.json"
+               --mcp-config "$ROLES_DIR/repo-agent.mcp.json" --allowedTools 'mcp__codegraph__*')
+        return 0
     fi
+    ARGS+=(-c 'mcp_servers.codegraph.command="codegraph"'
+           -c 'mcp_servers.codegraph.args=["serve","--mcp"]'
+           -c 'mcp_servers.codegraph.env={CODEGRAPH_TELEMETRY="0"}')
+}
 
-    if [[ $codegraph == yes ]]; then
-        ARGS+=(-c 'mcp_servers.codegraph.command="codegraph"'
-               -c 'mcp_servers.codegraph.args=["serve","--mcp"]'
-               -c 'mcp_servers.codegraph.env={CODEGRAPH_TELEMETRY="0"}')
+# ponytail is loaded for repo agents only: the claude plugin with --plugin-dir,
+# and the codex hooks as per-launch -c overrides.
+ponytail_args() {
+    local provider=$1 cmd
+    if [[ ! -f "$PONYTAIL_DIR/.claude-plugin/plugin.json" || ! -f "$PONYTAIL_DIR/hooks/ponytail-activate.js" ]] ||
+        ! safe_path "$PONYTAIL_DIR" || ! safe_path "$PONYTAIL_STATE" || ! command -v node >/dev/null 2>&1; then
+        echo "task-agent: ponytail $PONYTAIL_VERSION is not usable at $PONYTAIL_DIR (missing checkout, unsafe path or no node); repo agent starts without it" >&2
+        return 0
     fi
-    if [[ $ponytail == yes ]]; then
-        cmd="env PLUGIN_DATA=$PONYTAIL_STATE node $PONYTAIL_DIR/hooks"
-        ARGS+=(
-            -c "hooks.SessionStart=[{matcher=\"startup|resume|clear|compact\",hooks=[{type=\"command\",command=\"$cmd/ponytail-activate.js\",timeout=5}]}]"
-            -c "hooks.SubagentStart=[{hooks=[{type=\"command\",command=\"$cmd/ponytail-subagent.js\",timeout=5}]}]"
-            -c "hooks.UserPromptSubmit=[{hooks=[{type=\"command\",command=\"$cmd/ponytail-mode-tracker.js\",timeout=5}]}]"
-        )
+    if [[ $provider == claude ]]; then
+        ARGS+=(--plugin-dir "$PONYTAIL_DIR")
+        return 0
     fi
+    cmd="env PLUGIN_DATA=$PONYTAIL_STATE node $PONYTAIL_DIR/hooks"
+    ARGS+=(
+        -c "hooks.SessionStart=[{matcher=\"startup|resume|clear|compact\",hooks=[{type=\"command\",command=\"$cmd/ponytail-activate.js\",timeout=5}]}]"
+        -c "hooks.SubagentStart=[{hooks=[{type=\"command\",command=\"$cmd/ponytail-subagent.js\",timeout=5}]}]"
+        -c "hooks.UserPromptSubmit=[{hooks=[{type=\"command\",command=\"$cmd/ponytail-mode-tracker.js\",timeout=5}]}]"
+    )
 }
 
 # Fills ARGS with the role's model, effort and prompt for the provider. A dry
@@ -195,8 +204,8 @@ agent_args() {
     [[ -f "$file" ]] || { echo "task-agent: missing $file" >&2; exit 1; }
     if [[ $provider == claude ]]; then
         ARGS=(--model "${MODEL[claude:$role]}" --effort "${EFFORT[claude:$role]}" --append-system-prompt-file "$file")
+        if [[ $role == repo || $role == researcher ]]; then tool_args claude; fi
         if [[ $role == repo ]]; then
-            repo_tool_args claude
             ARGS+=(--permission-mode auto --add-dir "$canonical_repo/.git")
         elif [[ $role == researcher ]]; then
             ARGS+=(--permission-mode auto)
@@ -211,14 +220,50 @@ agent_args() {
         ARGS=()
         if [[ $want_resume == yes ]]; then ARGS=(resume --last); fi
         ARGS+=(-m "${MODEL[codex:$role]}" -c "model_reasoning_effort=\"${EFFORT[codex:$role]}\"" -c "developer_instructions=$prompt")
+        if [[ $role == repo || $role == researcher ]]; then
+            tool_args codex
+            codex_trust_args
+        fi
         # Codex's closest match to Claude's auto mode: the model decides when to
         # ask (on-request), inside the same workspace-write sandbox as before.
         if [[ $role == repo ]]; then
-            repo_tool_args codex
             ARGS+=(-a on-request -s workspace-write --add-dir "$canonical_repo/.git")
         fi
         if [[ $role == researcher ]]; then ARGS+=(-a on-request -s workspace-write); fi
     fi
+}
+
+# The cwd of the pane an agent starts in, as herdr reports it, resolved; empty
+# when herdr cannot say.
+pane_cwd() {
+    local cwd
+    cwd=$(herdr pane get "$pane" 2>/dev/null | jq -r '.result.pane.cwd // empty' 2>/dev/null) || cwd=
+    [[ -n "$cwd" ]] || return 0
+    realpath -e "$cwd" 2>/dev/null || true
+}
+
+# Codex asks once per folder whether to trust it, which stalls an unattended
+# start. Its trust is read from the projects table of ~/.codex/config.toml. A -c
+# override with a dotted key that quotes the path is ignored; the inline-table
+# form is honored (checked with codex 0.162.1: the override skips the prompt for
+# that folder, and a different folder still gets it). It applies to this launch
+# only, so the global config is not edited.
+codex_trust_args() {
+    local cwd
+    cwd=$(pane_cwd)
+    if [[ -z "$cwd" ]]; then
+        if [[ $dry_run == yes ]]; then
+            echo "trust: cannot read the cwd of pane $pane (herdr lookup failed); no codex trust override"
+            return 0
+        fi
+        echo "task-agent: cannot read the cwd of pane $pane; not starting codex without its trust override" >&2
+        exit 1
+    fi
+    if ! safe_path "$cwd"; then
+        echo "task-agent: pane cwd has characters the codex trust override cannot quote: $cwd" >&2
+        exit 1
+    fi
+    ARGS+=(-c "projects={\"$cwd\"={trust_level=\"trusted\"}}")
 }
 
 # Claude asks once per directory whether to trust it, which stalls an unattended
@@ -231,7 +276,7 @@ trust_pane_cwd() {
     # jq program: $p is jq's variable (passed by --arg), not a shell expansion.
     # shellcheck disable=SC2016
     local filter='.projects //= {} | .projects[$p] //= {} | .projects[$p].hasTrustDialogAccepted = true'
-    cwd=$(herdr pane get "$pane" 2>/dev/null | jq -r '.result.pane.cwd // empty' 2>/dev/null) || cwd=
+    cwd=$(pane_cwd)
     if [[ -z "$cwd" ]]; then
         if [[ $dry_run == yes ]]; then
             echo "trust: cannot read the cwd of pane $pane (herdr lookup failed); nothing to mark"
@@ -240,7 +285,6 @@ trust_pane_cwd() {
         echo "task-agent: cannot read the cwd of pane $pane; not starting without its trust set" >&2
         exit 1
     fi
-    cwd=$(realpath -e "$cwd") || { echo "task-agent: pane cwd does not exist: $cwd" >&2; exit 1; }
 
     if [[ -f $cfg ]]; then
         state=$(jq -r --arg p "$cwd" '(.projects[$p] // {}) | .hasTrustDialogAccepted | tostring' "$cfg")

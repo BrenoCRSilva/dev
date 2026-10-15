@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Repo agents get codegraph and ponytail when both are present, and start
-# without a missing one (with a warning). Orchestrator and researcher launches
-# get neither, for either provider.
+# Repo agents get codegraph and ponytail when both are present; the researcher
+# gets codegraph only; the orchestrator gets neither. Each starts without a
+# missing tool (with a warning). Codex repo and researcher launches pass a trust
+# override for the pane's cwd; the orchestrator's launch is unchanged.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -13,22 +14,33 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 HOME="$TMP_ROOT/home"
 BIN="$TMP_ROOT/bin"
 REPO="$TMP_ROOT/Projects/dotfiles"
+WORKTREE="$TMP_ROOT/tasks/fixture/dotfiles"
 ERR="$TMP_ROOT/stderr"
-mkdir -p "$HOME" "$BIN" "$REPO/.git"
+mkdir -p "$HOME" "$BIN" "$REPO/.git" "$WORKTREE"
+WORKTREE_REAL=$(realpath "$WORKTREE")
 export HOME
 PATH="$BIN:/usr/bin:/bin"
 export PATH
 
-# herdr is stubbed so the claude trust lookup finds nothing; node only has to
-# exist for the presence check.
-for stub in herdr node; do
-    printf '#!/bin/sh\nexit 1\n' > "$BIN/$stub"
-    chmod +x "$BIN/$stub"
-done
+# herdr answers "pane get" with the cwd in FIXTURE_PANE_CWD when it is set, and
+# fails otherwise. node only has to exist for the presence check.
+cat > "$BIN/herdr" <<'EOF'
+#!/bin/sh
+if [ "$1 $2" = "pane get" ] && [ -n "${FIXTURE_PANE_CWD:-}" ]; then
+    printf '{"result":{"pane":{"cwd":"%s"}}}\n' "$FIXTURE_PANE_CWD"
+    exit 0
+fi
+exit 1
+EOF
+printf '#!/bin/sh\nexit 1\n' > "$BIN/node"
+chmod +x "$BIN/herdr" "$BIN/node"
+
+# The trust override as the dry run prints it (printf %q escapes its braces and quotes).
+trust_override=$(printf '%q' "projects={\"$WORKTREE_REAL\"={trust_level=\"trusted\"}}")
 
 # --- absent: no codegraph on PATH, no ponytail checkout -------------------
 claude_out=$("$TASK_AGENT" --dry-run --provider claude start repo dotfiles fixture-pane "$REPO" 2> "$ERR")
-grep -Fq 'codegraph is not on PATH' "$ERR" || fail 'missing codegraph is not reported'
+grep -Fq 'codegraph is not on PATH; repo agent starts without it' "$ERR" || fail 'missing codegraph is not reported for repo'
 grep -Fq 'ponytail 5.2.0 is not usable' "$ERR" || fail 'missing ponytail checkout is not reported'
 [[ "$claude_out" == *'--permission-mode auto --add-dir'* ]] || fail 'absent tools removed the claude repo permission args'
 [[ "$claude_out" != *--mcp-config* && "$claude_out" != *--plugin-dir* ]] || fail 'absent tools still added claude flags'
@@ -37,6 +49,25 @@ codex_out=$("$TASK_AGENT" --dry-run --provider codex start repo dotfiles fixture
 [[ "$codex_out" == *'-a on-request -s workspace-write --add-dir'* ]] || fail 'absent tools removed the codex repo permission args'
 [[ "$codex_out" != *mcp_servers* && "$codex_out" != *hooks.* ]] || fail 'absent tools still added codex config'
 printf 'PASS: repo agents start without codegraph or ponytail, with a warning\n'
+
+research_out=$("$TASK_AGENT" --dry-run --provider claude start researcher fixture-pane 2> "$ERR")
+grep -Fq 'codegraph is not on PATH; researcher agent starts without it' "$ERR" || fail 'missing codegraph is not reported for researcher'
+[[ "$(cat "$ERR")" != *ponytail* ]] || fail 'researcher was told about ponytail'
+[[ "$research_out" != *--mcp-config* && "$research_out" != *--allowedTools* ]] || fail 'absent codegraph still added researcher MCP flags'
+codex_research=$("$TASK_AGENT" --dry-run --provider codex start researcher fixture-pane 2> "$ERR")
+[[ "$codex_research" != *mcp_servers* ]] || fail 'absent codegraph still added codex researcher overrides'
+printf 'PASS: researcher starts without codegraph, with a warning\n'
+
+# Codex trust needs the pane's cwd; without it, a dry run says so and a real
+# start refuses rather than stall on the trust prompt.
+codex_untrusted=$("$TASK_AGENT" --dry-run --provider codex start repo dotfiles fixture-pane "$REPO" 2> "$ERR")
+[[ "$codex_untrusted" == *'trust: cannot read the cwd of pane fixture-pane'* && "$codex_untrusted" != *'projects='* ]] ||
+    fail 'codex repo without a pane cwd did not report the missing trust override'
+if "$TASK_AGENT" --provider codex start repo dotfiles fixture-pane "$REPO" > /dev/null 2> "$ERR"; then
+    fail 'codex repo started without a trust override'
+fi
+grep -Fq 'not starting codex without its trust override' "$ERR" || fail 'refused codex start does not say why'
+printf 'PASS: codex repo start without a readable pane cwd is refused, not stalled\n'
 
 # --- present: stub codegraph and a pinned ponytail checkout ---------------
 printf '#!/bin/sh\nexit 0\n' > "$BIN/codegraph"
@@ -58,7 +89,7 @@ if grep -v '^trust:' "$ERR" | grep -q .; then fail "present tools still warned: 
 [[ $(grep -o -- '--add-dir' <<< "$claude_out" | wc -l) -eq 1 ]] || fail 'claude repo has more than one --add-dir'
 printf 'PASS: claude repo agent gets codegraph MCP, its allow rule, the ponytail plugin and its settings\n'
 
-codex_out=$("$TASK_AGENT" --dry-run --provider codex start repo dotfiles fixture-pane "$REPO" 2> "$ERR")
+codex_out=$(FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --dry-run --provider codex start repo dotfiles fixture-pane "$REPO" 2> "$ERR")
 [[ "$codex_out" == *'mcp_servers.codegraph.command='* && "$codex_out" == *'mcp_servers.codegraph.env='* ]] ||
     fail 'codex repo lacks the codegraph MCP overrides'
 for event in SessionStart SubagentStart UserPromptSubmit; do
@@ -66,10 +97,27 @@ for event in SessionStart SubagentStart UserPromptSubmit; do
 done
 [[ "$codex_out" == *'PLUGIN_DATA='* ]] || fail 'codex ponytail hooks do not set PLUGIN_DATA'
 [[ "${codex_out%%-a on-request*}" == *'hooks.UserPromptSubmit='* ]] || fail 'codex tool overrides must come before the approval flags'
+[[ "$codex_out" == *"$trust_override"* ]] || fail 'codex repo lacks the trust override for its pane cwd'
 [[ "$codex_out" != *PONYTAIL_QUIET_STARTUP* && "$codex_out" != *PONYTAIL_HIDE_STATUS* ]] ||
     fail 'codex ponytail hooks still set the no-op PONYTAIL_QUIET_STARTUP/PONYTAIL_HIDE_STATUS'
 [[ "$codex_out" != *CODEGRAPH_NO_WATCH* && "$claude_out" != *CODEGRAPH_NO_WATCH* ]] || fail 'a repo launch sets CODEGRAPH_NO_WATCH'
-printf 'PASS: codex repo agent gets codegraph MCP overrides and the three ponytail hooks\n'
+printf 'PASS: codex repo agent gets codegraph MCP overrides, the three ponytail hooks and the trust override\n'
+
+# The researcher gets codegraph and nothing else.
+research_claude=$(FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --dry-run start researcher fixture-pane 2> "$ERR")
+[[ "$research_claude" == *'repo-agent.mcp.json'* && "$research_claude" == *'mcp__codegraph__'* ]] ||
+    fail 'claude researcher lacks the codegraph MCP config or allow rule'
+[[ "$research_claude" == *'repo-agent.claude-settings.json'* && "$research_claude" == *'--permission-mode auto'* ]] ||
+    fail 'claude researcher lacks its settings or permission mode'
+[[ "$research_claude" != *--plugin-dir* && "$research_claude" != *--add-dir* ]] || fail 'claude researcher got ponytail or repo write access'
+research_codex=$(FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --dry-run --provider codex start researcher fixture-pane 2> "$ERR")
+[[ "$research_codex" == *'mcp_servers.codegraph.command='* && "$research_codex" == *'mcp_servers.codegraph.env='* ]] ||
+    fail 'codex researcher lacks the codegraph MCP overrides'
+[[ "$research_codex" != *hooks.* && "$research_codex" != *PLUGIN_DATA* && "$research_codex" != *--add-dir* ]] ||
+    fail 'codex researcher got ponytail hooks or repo write access'
+[[ "$research_codex" == *"$trust_override"* ]] || fail 'codex researcher lacks the trust override for its pane cwd'
+[[ "$research_codex" == *'-a on-request -s workspace-write'* ]] || fail 'codex researcher lost its sandbox flags'
+printf 'PASS: researcher gets codegraph (both providers) and the codex trust override, but no ponytail and no repo write access\n'
 
 # The claude settings file carries only the codegraph telemetry switch.
 SETTINGS="$ROOT/env/.config/tmux/scripts/task-roles/repo-agent.claude-settings.json"
@@ -91,16 +139,16 @@ ignored_status=$(XDG_CONFIG_HOME="$IGN_TEST/xdg" git -C "$IGN_TEST/repo" status 
 [[ "$ignored_status" == '?? file.txt' ]] || fail "tracked ignore does not hide the symlinked .codegraph: $ignored_status"
 printf 'PASS: tracked global ignore hides a symlinked .codegraph index\n'
 
-# --- orchestrator and researcher get no repo tools, either provider -------
-for launch in "orchestrator" "--provider codex orchestrator" "start researcher fixture-pane" "--provider codex start researcher fixture-pane"; do
+# The orchestrator gets no repo tools and no trust override, either provider.
+for launch in "orchestrator" "--provider codex orchestrator"; do
     # shellcheck disable=SC2086
-    out=$("$TASK_AGENT" --dry-run $launch 2> "$ERR")
-    if grep -Eq 'codegraph|ponytail|mcp|plugin-dir|--settings|hooks\.|dangerously' <<< "$out"; then
+    out=$(FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --dry-run $launch 2> "$ERR")
+    if grep -Eq 'codegraph|ponytail|mcp|plugin-dir|--settings|hooks\.|dangerously|projects=' <<< "$out"; then
         fail "'$launch' picked up repo-only tools: $out"
     fi
 done
-printf 'PASS: orchestrator and researcher launches carry no repo-only tools\n'
+printf 'PASS: orchestrator launches carry no codegraph, ponytail or trust override\n'
 
 # Dry runs must not write state under the home directory.
-[[ ! -e "$HOME/.local/state/ponytail" ]] || fail 'dry run created the ponytail state dir'
+[[ ! -e "$HOME/.local/state/ponytail" && ! -e "$HOME/.claude.json" ]] || fail 'dry run wrote state under HOME'
 printf 'PASS: dry runs write nothing under HOME\n'

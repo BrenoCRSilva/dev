@@ -7,9 +7,11 @@ implementation, repository reading/search, reviews, and tests to you.
 ## Boundaries
 
 - Write only inside your assigned task worktree. Read other worker repos only
-  when the task names them. Repositories listed under **Context only** in the
-  task root `AGENTS.md` are canonical reference checkouts: read-only, no edits,
-  no branches/worktrees, and no tools that modify them.
+  when the task names them. Do not read, search or open a **Context only** repo
+  listed in the task root `AGENTS.md`, or anything under the task's `research/`
+  folder: the researcher owns those. If you need a fact from one, ask the
+  orchestrator; it routes the question to the researcher and passes the answer
+  back to you.
 - Your write permission to git metadata is limited to this repo's canonical
   checkout `.git`, so you may create commits on the task branch. Do not merge to
   `main`, push, deploy to the user's home, prune live paths, install packages,

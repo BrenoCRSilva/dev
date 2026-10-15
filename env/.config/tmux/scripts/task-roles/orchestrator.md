@@ -24,22 +24,27 @@ permissions.
 2. Read `AGENTS.md`'s Repository modes section. Start an agent only for each
    worker repo, using its worker workspace and canonical checkout path:
    `task-agent.sh start repo <name> <pane_id> <canonical_repo> [--resume]`.
-   Context repos are canonical read-only references; do not start agents or
-   create worktrees for them.
+   Context repos get no agent and no worktree. Only the researcher reads them,
+   through its clones.
 3. Do not start the researcher at start-up; it is started on demand. When the
    plan needs web research or scraping outside the task repositories, start it
    in the `research` workspace's root pane:
    `task-agent.sh start researcher <pane_id> [--resume]`. It works only in
-   `<task-root>/research/`. If it is already running (`herdr agent list`), send
-   it the request instead. Once its work is reported, end it with
-   `task-agent.sh stop researcher`.
+   `<task-root>/research/`, including the context clones under
+   `research/context/`. Send it every question about a context repo. If it is
+   already running (`herdr agent list`), send it the request instead. Once its
+   work is reported, end it with `task-agent.sh stop researcher`.
+   To refresh the context clones (fetch, then fast-forward each to its canonical
+   checkout's current branch), run
+   `~/.config/tmux/scripts/task-sessionizer.sh refresh <task> [repo]`.
    Finished worker agents are ended the same way: `task-agent.sh stop <repo>`.
 4. Keep the Agents table in `AGENTS.md` accurate. Pass the user's chosen model
    to repo agents; Codex repo agents use Luna (`gpt-6-luna`).
 5. If a needed repo is listed as context, promote it with
    `~/.config/tmux/scripts/task-sessionizer.sh promote <task> <repo>` and then
    refresh the worker workspace/pane inventory. The command updates the task
-   record and creates its worker worktree and session resources.
+   record, creates its worker worktree and session resources, and removes its
+   researcher clone.
    To stop working in a repo, demote it with
    `~/.config/tmux/scripts/task-sessionizer.sh demote <task> <repo>`: its agent
    stops, its worktree is removed, and the branch is kept. Use `remove` to drop
@@ -52,8 +57,9 @@ permissions.
 - Break the goal into numbered, reviewable steps in `AGENTS.md`; give each step
   one owner. Mark checkpoints for the user.
 - Assign code changes, tests, and reviews to worker repo agents. Assign external
-  web research/scraping to the researcher. Use context repos only as read-only
-  reference material; promote one before requesting edits there.
+  web research/scraping, and every question about a context repo, to the
+  researcher. Pass its answers to the workers that need them: workers never read
+  context repos. Promote a context repo before requesting edits there.
 - Record cross-repo contracts with IDs and keep task status current. Ask the
   user about product choices or permission blockers; do not silently decide
   them.
@@ -73,3 +79,5 @@ permissions.
 - Do not run deployment, package/theme/plugin installation, sudo, merge, or
   push steps until the relevant agent has delivered reviewable results and you
   have inspected the plan and dry-run.
+- Do not tell a worker to read a context repo or anything under `research/`.
+  Route that question through the researcher.
