@@ -11,7 +11,7 @@
 # directory it ran in:
 #   <tasks>/<task>              orchestrator
 #   <tasks>/<task>/research     researcher (and research/context/<repo> clones)
-#   <tasks>/<task>/<folder>     repo agent, named after the folder
+#   <tasks>/<task>/<folder>     worker agent, named after the folder
 #   anywhere else               interactive, named by its directory
 #
 # Costs are list-price estimates from PRICES, not billing data. A model without a
@@ -45,7 +45,7 @@ CACHE_WRITE_5M_X = 1.25
 CACHE_WRITE_1H_X = 2.00
 
 TOKEN_FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
-ROLE_ORDER = ("orchestrator", "repo", "researcher", "interactive", "unknown")
+ROLE_ORDER = ("orchestrator", "worker", "researcher", "interactive", "unknown")
 
 
 def parse_when(text):
@@ -188,7 +188,7 @@ def attribute(cwd, tasks):
             return task, "orchestrator", "orchestrator"
         if rest[0] == "research":
             return task, "researcher", "researcher"
-        return task, "repo", rest[0]
+        return task, "worker", rest[0]
     return "-", "interactive", path
 
 

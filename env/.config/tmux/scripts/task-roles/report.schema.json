@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "report.schema.json",
   "title": "Task step report (C4)",
-  "description": "Written by a repo agent or the researcher to <task-root>/reports/<agent>/<step>.json at each checkpoint and when the step is done. The orchestrator reads it instead of the pane; task-decide (research/jev-decisions.md 7.3) takes it as --report. Paths in files_changed are relative to the agent's folder: the worktree for a repo agent, research/ for the researcher. Check it with task-report.py check before reporting.",
+  "description": "Written by a worker or the researcher to <task-root>/reports/<agent>/<step>.json at each checkpoint and when the step is done. The orchestrator reads it instead of the pane; task-decide (research/jev-decisions.md 7.3) takes it as --report. Paths in files_changed are relative to the agent's folder: the worktree for a worker, research/ for the researcher. Check it with task-report.py check before reporting.",
   "type": "object",
   "additionalProperties": false,
   "required": ["step", "agent", "branch", "head_sha", "files_changed", "checks", "risks", "needs_decision", "context_estimate_k", "summary"],
@@ -14,13 +14,13 @@
       "maxLength": 64
     },
     "agent": {
-      "description": "The repo name, or researcher.",
+      "description": "The agent's name: worker-<repo> for a worker, or researcher. Also its folder under reports/ and its hooks/ file name.",
       "type": "string",
-      "pattern": "^[A-Za-z0-9._-]+$",
+      "pattern": "^(worker-[A-Za-z0-9._-]+|researcher)$",
       "maxLength": 64
     },
     "branch": {
-      "description": "Task branch of a repo agent. null for the researcher.",
+      "description": "Task branch of a worker. null for the researcher.",
       "type": ["string", "null"],
       "maxLength": 200
     },

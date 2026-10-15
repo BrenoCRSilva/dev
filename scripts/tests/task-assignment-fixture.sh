@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # task-assignment.sh adds the assignment file of the agent whose folder the
 # session starts in: a worker's worktree (or a folder inside it) gets
-# hooks/<repo>.md, the research folder gets hooks/researcher.md. It prints
+# hooks/worker-<repo>.md, the research folder gets hooks/researcher.md. It prints
 # nothing when there is no file, no such folder, or no jq. Its output is the
 # SessionStart JSON with the file's text, unchanged, as additionalContext.
 # Writes only inside a temporary folder.
@@ -21,7 +21,7 @@ git -C "$WORKTREE" init -q
 # Quotes, a backslash, a newline and a non-ASCII character must survive as JSON.
 DOTFILES_TEXT=$'# dotfiles: step 9\nScope: "env/" only, C4 \\ report\nDone when: café checks pass'
 RESEARCH_TEXT='# researcher: step 4'
-printf '%s\n' "$DOTFILES_TEXT" > "$TASK/hooks/dotfiles.md"
+printf '%s\n' "$DOTFILES_TEXT" > "$TASK/hooks/worker-dotfiles.md"
 printf '%s\n' "$RESEARCH_TEXT" > "$TASK/hooks/researcher.md"
 
 # run_hook <cwd> [PATH]: prints the hook output for a session started in cwd.
@@ -54,6 +54,10 @@ expect_text "$WORKTREE" "$DOTFILES_TEXT" 'worker worktree gets its assignment fi
 expect_text "$WORKTREE/env/deep" "$DOTFILES_TEXT" 'a folder inside the worktree names the same worker'
 expect_text "$TASK/research" "$RESEARCH_TEXT" 'research folder gets the researcher assignment file'
 expect_silent "$TASK" 'the task root (orchestrator) gets nothing'
+# The file is named for the agent, worker-<repo>; the bare repo name is no longer read.
+mv "$TASK/hooks/worker-dotfiles.md" "$TASK/hooks/dotfiles.md"
+expect_silent "$WORKTREE" 'a worker is not handed the old hooks/<repo>.md name'
+mv "$TASK/hooks/dotfiles.md" "$TASK/hooks/worker-dotfiles.md"
 # The researcher starts in research/, never inside a context clone, so a clone
 # (a git repo of its own) takes no assignment.
 mkdir -p "$TASK/research/context/clonesrc" && git -C "$TASK/research/context/clonesrc" init -q

@@ -176,13 +176,13 @@ def main():
         if orchestrator["turns"] != 1:
             fail("orchestrator opus row wrong")
         find(by_agent, task="t1", role="orchestrator", agent="orchestrator", model="claude-haiku-5-5")
-        repo = find(by_agent, task="t1", role="repo", agent="api", model="claude-haiku-5-5")
-        if repo["turns"] != 2:
-            fail(f"repo haiku turns {repo['turns']} != 2")
-        near(repo["cost_usd"], 0.0247, "repo haiku cost")
-        if repo["long_turns"] != 1 or repo["long_share"] != 0.5:
-            fail(f"repo >100k share wrong: {repo}")
-        find(by_agent, task="t1", role="repo", agent="api", provider="codex", model="gpt-6-luna")
+        worker = find(by_agent, task="t1", role="worker", agent="api", model="claude-haiku-5-5")
+        if worker["turns"] != 2:
+            fail(f"worker haiku turns {worker['turns']} != 2")
+        near(worker["cost_usd"], 0.0247, "worker haiku cost")
+        if worker["long_turns"] != 1 or worker["long_share"] != 0.5:
+            fail(f"worker >100k share wrong: {worker}")
+        find(by_agent, task="t1", role="worker", agent="api", provider="codex", model="gpt-6-luna")
         find(by_agent, task="t1", role="researcher", agent="researcher", model="claude-sonnet-5-5")
         find(by_agent, task="t1", role="researcher", agent="researcher", provider="codex", model="gpt-6-luna")
         interactive = find(by_agent, task="-", role="interactive", agent=other_path(home), model="claude-haiku-5-5")
@@ -190,17 +190,17 @@ def main():
         find(report["by_task"], task="t1")
         print("PASS: totals, dedupe, tiers, cache split, codex input split, and attribution by folder")
 
-        # Per role across tasks: orchestrator, repo, researcher and interactive.
+        # Per role across tasks: orchestrator, worker, researcher and interactive.
         roles = {row["role"]: row for row in report["by_role"]}
-        if sorted(roles) != ["interactive", "orchestrator", "repo", "researcher"]:
+        if sorted(roles) != ["interactive", "orchestrator", "researcher", "worker"]:
             fail(f"role rows wrong: {sorted(roles)}")
-        if roles["orchestrator"]["turns"] != 2 or roles["repo"]["turns"] != 4 or roles["researcher"]["turns"] != 2:
+        if roles["orchestrator"]["turns"] != 2 or roles["worker"]["turns"] != 4 or roles["researcher"]["turns"] != 2:
             fail("role turn counts wrong")
         # m-d is exactly 100,000 prompt tokens: first tier, so 0 of 1 tiered turns is above 100k.
         if roles["interactive"]["long_turns"] != 0 or roles["interactive"]["long_share"] != 0.0:
             fail(f"interactive role >100k share wrong: {roles['interactive']}")
-        if roles["repo"]["long_turns"] != 1 or roles["repo"]["long_share"] != 0.5:
-            fail(f"repo role >100k share wrong: {roles['repo']}")
+        if roles["worker"]["long_turns"] != 1 or roles["worker"]["long_share"] != 0.5:
+            fail(f"worker role >100k share wrong: {roles['worker']}")
         if roles["orchestrator"]["long_turns"] != 0 or roles["researcher"]["long_turns"] != 0:
             fail("orchestrator and researcher should have no >100k turns")
         near(roles["orchestrator"]["cost_usd"], 0.0581, "orchestrator role cost (opus + haiku)")

@@ -3,18 +3,22 @@
 # place these are set.
 #
 #   task-agent.sh [--dry-run] [--provider claude|codex] orchestrator [--resume]
-#   task-agent.sh [--dry-run] [--provider claude|codex] start repo <name> <pane_id> <canonical_repo> [--resume]
+#   task-agent.sh [--dry-run] [--provider claude|codex] start worker <repo> <pane_id> <canonical_repo> [--resume]
 #   task-agent.sh [--dry-run] [--provider claude|codex] start researcher <pane_id> [--resume]
 #   task-agent.sh [--dry-run] stop <name> [--force]
 #
+# Agent names: worker-<repo> for a worker and researcher for the researcher. The
+# orchestrator names itself at start-up (herdr cannot name it at launch). The
+# deprecated `start repo` is still accepted, with a warning, as `start worker`.
 # The researcher is started on demand, not at task creation. stop sends /exit
-# to a finished worker or researcher; a working agent needs --force. Repo agents
+# to a finished worker or researcher; a working agent needs --force. Workers
 # get codegraph (MCP code index) and ponytail (minimal-code rules); the
 # researcher gets codegraph only; the orchestrator gets neither, but its Claude
-# launch gets the status line settings (orchestrator.claude-settings.json). Repo
-# and researcher agents also get the assignment hook (hooks/<agent>.md, see
+# launch gets the status line settings (orchestrator.claude-settings.json).
+# Workers and the researcher also get the assignment hook (hooks/<agent>.md, see
 # task-assignment.sh) and write access to their own reports/<agent>/ folder. A
-# missing tool is skipped with a warning.
+# Claude worker also gets the write guard (worker.claude-settings.json, see
+# task-guard.sh). A missing tool is skipped with a warning.
 # The provider defaults to $TASK_PROVIDER, else claude. Launching the
 # orchestrator exports TASK_PROVIDER so the agents it starts follow it.
 # --dry-run prints the command instead of running it. --resume must be the
@@ -24,14 +28,14 @@ set -euo pipefail
 ROLES_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/task-roles"
 
 declare -A MODEL=(
-    [claude:orchestrator]=claude-opus-5-5 [claude:repo]=claude-haiku-5-5 [claude:researcher]=claude-haiku-5-5
-    [codex:orchestrator]=gpt-6-astra      [codex:repo]=gpt-6-luna         [codex:researcher]=gpt-6-luna
+    [claude:orchestrator]=claude-opus-5-5 [claude:worker]=claude-haiku-5-5 [claude:researcher]=claude-haiku-5-5
+    [codex:orchestrator]=gpt-6-astra      [codex:worker]=gpt-6-luna         [codex:researcher]=gpt-6-luna
 )
 declare -A EFFORT=(
-    [claude:orchestrator]=medium [claude:repo]=high [claude:researcher]=high
-    [codex:orchestrator]=medium  [codex:repo]=high  [codex:researcher]=medium
+    [claude:orchestrator]=medium [claude:worker]=high [claude:researcher]=high
+    [codex:orchestrator]=medium  [codex:worker]=high  [codex:researcher]=medium
 )
-declare -A PROMPT=([orchestrator]=orchestrator.md [repo]=repo-agent.md [researcher]=researcher.md)
+declare -A PROMPT=([orchestrator]=orchestrator.md [worker]=worker.md [researcher]=researcher.md)
 
 # ponytail is pinned to a tag and checked out outside any repo. Its Claude
 # plugin loads with --plugin-dir; its hooks are passed to codex with -c. For
@@ -52,7 +56,7 @@ ASSIGN_HOOK="$HOME/.config/tmux/scripts/task-assignment.sh"
 usage() {
     cat >&2 <<'EOF'
 usage: task-agent.sh [--dry-run] [--provider claude|codex] orchestrator [--resume]
-       task-agent.sh [--dry-run] [--provider claude|codex] start repo <name> <pane_id> <canonical_repo> [--resume]
+       task-agent.sh [--dry-run] [--provider claude|codex] start worker <repo> <pane_id> <canonical_repo> [--resume]
        task-agent.sh [--dry-run] [--provider claude|codex] start researcher <pane_id> [--resume]
        task-agent.sh [--dry-run] stop <name> [--force]
 EOF
@@ -126,7 +130,9 @@ if (( $# > 0 )) && [[ "${!#}" == --resume ]]; then
     set -- "${@:1:$#-1}"
 fi
 
-role='' name='' pane='' canonical_repo=''
+# name is the herdr agent name; folder is the pane folder the agent must start in
+# (the repo name for a worker, research for the researcher).
+role='' name='' folder='' pane='' canonical_repo=''
 case "${1:-}" in
     orchestrator)
         (( $# == 1 )) || usage
@@ -134,15 +140,18 @@ case "${1:-}" in
     start)
         (( $# >= 2 )) || usage
         case "$2" in
-            repo)
+            worker|repo)
                 (( $# == 5 )) && [[ -n "$3" && -n "$4" && -n "$5" ]] || usage
-                role=repo name=$3 pane=$4 canonical_repo=$5
+                if [[ $2 == repo ]]; then
+                    echo "task-agent: 'start repo' is deprecated; use 'start worker $3' (its agent is worker-$3)" >&2
+                fi
+                role=worker folder=$3 name=worker-$3 pane=$4 canonical_repo=$5
                 canonical_repo=$(realpath -e "$canonical_repo") || { echo "task-agent: canonical repo does not exist" >&2; exit 1; }
                 [[ -d "$canonical_repo/.git" ]] || { echo "task-agent: expected a canonical git checkout with a .git directory: $canonical_repo" >&2; exit 1; }
                 ;;
             researcher)
                 (( $# == 3 )) && [[ -n "$3" ]] || usage
-                role=researcher name=researcher pane=$3
+                role=researcher name=researcher folder=research pane=$3
                 ;;
             *) usage ;;
         esac
@@ -151,7 +160,7 @@ case "${1:-}" in
 esac
 
 # --- command ---------------------------------------------------------------
-# Adds the role's tools to ARGS for the provider: repo agents get codegraph and
+# Adds the role's tools to ARGS for the provider: workers get codegraph and
 # ponytail, the researcher gets codegraph only, and the orchestrator neither. A
 # missing tool is reported on stderr and left out, so the agent still starts.
 # Paths that go into the codex hook command or TOML are limited to safe
@@ -160,7 +169,7 @@ safe_path() { [[ "$1" =~ ^[A-Za-z0-9_./-]+$ ]]; }
 
 tool_args() {
     codegraph_args "$1"
-    if [[ $role == repo ]]; then ponytail_args "$1"; fi
+    if [[ $role == worker ]]; then ponytail_args "$1"; fi
 }
 
 # The MCP code index. Claude gets the config file and its allow rule (the
@@ -173,7 +182,7 @@ codegraph_args() {
         return 0
     fi
     if [[ $provider == claude ]]; then
-        ARGS+=(--mcp-config "$ROLES_DIR/repo-agent.mcp.json" --allowedTools 'mcp__codegraph__*')
+        ARGS+=(--mcp-config "$ROLES_DIR/codegraph.mcp.json" --allowedTools 'mcp__codegraph__*')
         return 0
     fi
     ARGS+=(-c 'mcp_servers.codegraph.command="codegraph"'
@@ -181,13 +190,13 @@ codegraph_args() {
            -c 'mcp_servers.codegraph.env={CODEGRAPH_TELEMETRY="0"}')
 }
 
-# ponytail is loaded for repo agents only: the claude plugin with --plugin-dir,
+# ponytail is loaded for workers only: the claude plugin with --plugin-dir,
 # and the codex hooks as per-launch -c overrides.
 ponytail_args() {
     local provider=$1 cmd
     if [[ ! -f "$PONYTAIL_DIR/.claude-plugin/plugin.json" || ! -f "$PONYTAIL_DIR/hooks/ponytail-activate.js" ]] ||
         ! safe_path "$PONYTAIL_DIR" || ! safe_path "$PONYTAIL_STATE" || ! command -v node >/dev/null 2>&1; then
-        echo "task-agent: ponytail $PONYTAIL_VERSION is not usable at $PONYTAIL_DIR (missing checkout, unsafe path or no node); repo agent starts without it" >&2
+        echo "task-agent: ponytail $PONYTAIL_VERSION is not usable at $PONYTAIL_DIR (missing checkout, unsafe path or no node); worker agent starts without it" >&2
         return 0
     fi
     if [[ $provider == claude ]]; then
@@ -204,7 +213,7 @@ ponytail_args() {
 
 # Claude reads the assignment hook from the settings file, so only codex needs
 # it here. codex reads one hooks.SessionStart override, so this is the only one:
-# it holds the ponytail activation (repo agents, when loaded) and the assignment
+# it holds the ponytail activation (workers, when loaded) and the assignment
 # hook.
 codex_session_start_args() {
     if ! safe_path "$ASSIGN_HOOK"; then
@@ -230,7 +239,7 @@ report_dir() {
         echo "task-agent: cannot read the cwd of pane $pane; not starting without its reports folder" >&2
         exit 1
     fi
-    if [[ $role == repo && "${cwd##*/}" != "$name" ]] || [[ $role == researcher && "${cwd##*/}" != research ]]; then
+    if [[ "${cwd##*/}" != "$folder" ]]; then
         echo "task-agent: pane $pane is not in the folder of $name (cwd: $cwd)" >&2
         exit 1
     fi
@@ -249,16 +258,14 @@ agent_args() {
     file="$ROLES_DIR/${PROMPT[$role]}"
     [[ -f "$file" ]] || { echo "task-agent: missing $file" >&2; exit 1; }
     REPORTS=''
-    if [[ $role == repo || $role == researcher ]]; then report_dir; fi
+    if [[ $role == worker || $role == researcher ]]; then report_dir; fi
     if [[ $provider == claude ]]; then
-        ARGS=(--model "${MODEL[claude:$role]}" --effort "${EFFORT[claude:$role]}" --append-system-prompt-file "$file")
-        if [[ $role == repo || $role == researcher ]]; then
-            ARGS+=(--settings "$ROLES_DIR/repo-agent.claude-settings.json")
-            tool_args claude
-        fi
-        # The orchestrator alone gets the status line (cost, context, cache).
-        if [[ $role == orchestrator ]]; then ARGS+=(--settings "$ROLES_DIR/orchestrator.claude-settings.json"); fi
-        if [[ $role == repo ]]; then
+        # Each role's settings file: the status line for the orchestrator, the
+        # assignment hook for the others, and the write guard for workers only.
+        ARGS=(--model "${MODEL[claude:$role]}" --effort "${EFFORT[claude:$role]}" --append-system-prompt-file "$file"
+              --settings "$ROLES_DIR/$role.claude-settings.json")
+        if [[ $role == worker || $role == researcher ]]; then tool_args claude; fi
+        if [[ $role == worker ]]; then
             dirs=("$canonical_repo/.git")
             [[ -z $REPORTS ]] || dirs+=("$REPORTS")
             ARGS+=(--permission-mode auto --add-dir "${dirs[@]}")
@@ -276,14 +283,14 @@ agent_args() {
         ARGS=()
         if [[ $want_resume == yes ]]; then ARGS=(resume --last); fi
         ARGS+=(-m "${MODEL[codex:$role]}" -c "model_reasoning_effort=\"${EFFORT[codex:$role]}\"" -c "developer_instructions=$prompt")
-        if [[ $role == repo || $role == researcher ]]; then
+        if [[ $role == worker || $role == researcher ]]; then
             tool_args codex
             codex_session_start_args
             codex_trust_args
         fi
         # Codex's closest match to Claude's auto mode: the model decides when to
         # ask (on-request), inside the same workspace-write sandbox as before.
-        if [[ $role == repo ]]; then
+        if [[ $role == worker ]]; then
             dirs=("$canonical_repo/.git")
             [[ -z $REPORTS ]] || dirs+=("$REPORTS")
             ARGS+=(-a on-request -s workspace-write)
@@ -330,7 +337,7 @@ codex_trust_args() {
 }
 
 # Claude asks once per directory whether to trust it, which stalls an unattended
-# start. Before a repo or researcher agent starts in its pane, mark the pane's
+# start. Before a worker or researcher agent starts in its pane, mark the pane's
 # cwd trusted in ~/.claude.json. Only projects[<cwd>].hasTrustDialogAccepted is
 # set; the file is replaced through a temp file and mv, so other keys and other
 # sessions' entries are kept.
