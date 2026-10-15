@@ -484,7 +484,7 @@ add_repo() {
 write_agents_md() {
     local task=$1 branch=$2 file="$TASKS_DIR/$1/AGENTS.md" wt
     write_claude_files "$task"
-    mkdir -p "$TASKS_DIR/$task/research"
+    mkdir -p "$TASKS_DIR/$task/research" "$TASKS_DIR/$task/reports" "$TASKS_DIR/$task/hooks"
     if [[ ! -e "$file" ]]; then
         cat > "$file" <<EOF
 # $task
@@ -507,6 +507,8 @@ write_agents_md() {
 - Worker repo subfolders are task worktrees on the branch shown in Repo modes. Each worker writes only inside its assigned worktree.
 - Context-only repos are canonical checkouts listed in Repo modes; they are read-only references with no worktree or repo agent. Only the researcher reads them, through its clones under \`research/context/\`. Workers never read them; ask the orchestrator for the facts you need.
 - Researcher notes belong under the task root's \`research/\`; researcher never edits repository trees, its context clones included.
+- \`hooks/<agent>.md\` is an agent's assignment (step, scope, contract IDs, done when). The orchestrator writes it; the agent gets it at session start. Workers never write it.
+- \`reports/<agent>/<step>.json\` is an agent's step report, checked with \`task-report.py\`. Each agent writes only its own folder.
 - Don't \`git checkout\` other branches; use the existing task worktrees.
 - Each agent's role comes from its launch prompt (~/.config/tmux/scripts/task-roles/). The orchestrator maintains the task plan and shared contracts.
 EOF
@@ -747,6 +749,12 @@ task_close_issues() {
                     printf '%s: research notes/files (force close removes them)\n' "$task"
                 fi
                 ;;
+            # Step reports and assignment files: kept until close, like research notes.
+            reports|hooks)
+                if [[ -L "$entry" || ! -d "$entry" ]] || find "$entry" -mindepth 1 -print -quit | grep -q .; then
+                    printf '%s: %s/ has files (force close removes them)\n' "$task" "$name"
+                fi
+                ;;
             .claude)
                 extra=no
                 for sub in "$entry"/* "$entry"/.[!.]*; do
@@ -901,7 +909,7 @@ create_task() {
             name=$(basename "$repo")
             printf '%s: clone to research/context/%s (read-only, for the researcher)\n' "$name" "$name"
         done
-        printf 'agents-md: write AGENTS.md and its Repo modes block; CLAUDE.md, .claude settings and subagents if absent (no agent is started)\n'
+        printf 'agents-md: write AGENTS.md and its Repo modes block; CLAUDE.md, .claude settings and subagents if absent; reports/ and hooks/ folders (no agent is started)\n'
         printf 'runtime:   task session, nvim and srv windows, post-create hooks\n'
         return 0
     fi
@@ -1478,7 +1486,7 @@ remove_task() {
         for d in "$dir/research/context"/*/; do
             [[ -d "$d" ]] && printf 'clone:     remove %s (read-only context clone)\n' "${d%/}"
         done
-        printf 'files:     remove AGENTS.md, CLAUDE.md, REPORT.md, .task-context.tsv, .task-worker-order, prompts/, generated .claude settings and subagents\n'
+        printf 'files:     remove AGENTS.md, CLAUDE.md, REPORT.md, .task-context.tsv, .task-worker-order, prompts/, reports/, hooks/, generated .claude settings and subagents\n'
         printf 'session:   stop herdr session and kill tmux session %s\n' "$(session_name "$task")"
         if [[ -n "$issues" && "$force" != --force ]]; then
             printf 'refused:   close would be blocked; review the items above, then close %s --force\n' "$task"
@@ -1504,7 +1512,7 @@ remove_task() {
     rm -f "$dir/REPORT.md"
     rm -f "$(task_context_file "$task")"
     rm -f "$dir/.task-worker-order"
-    rm -rf -- "$dir/research/context" "$dir/prompts"
+    rm -rf -- "$dir/research/context" "$dir/prompts" "$dir/reports" "$dir/hooks"
     rmdir "$dir/research" 2>/dev/null || true
     settings=$(cat "$dir/.claude/settings.json" 2>/dev/null)
     generated_task_settings "$settings" && rm -f "$dir/.claude/settings.json"

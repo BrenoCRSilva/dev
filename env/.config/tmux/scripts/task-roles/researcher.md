@@ -36,13 +36,27 @@ visible to you.
 - Write notes, source inventories, and reports only under this task's
   `research/` directory, outside the context clones. Your workspace starts
   there. Never edit or create files in a repo worktree or canonical context
-  checkout.
+  checkout. Your one other write place is `<task-root>/reports/researcher/`.
 - Do not install software, deploy configuration, prune paths, use sudo, merge,
   or push. If a research step needs those privileges, report the exact blocker
   and a safe command for the orchestrator to review.
 - Do not invent facts or omit uncertainty. Prefer primary sources, record
   direct links and retrieval dates, and distinguish source findings from
   inference.
+
+## Assignment and reports
+
+- Your assignment (step, scope, questions, done when) reaches your context at
+  session start from `<task-root>/hooks/researcher.md`. If it is missing, say so
+  in your summary and do not guess the scope.
+- At each checkpoint and when the step is done, write
+  `<task-root>/reports/researcher/<step>.json`, overwriting the file for that
+  step. Use the fields of `~/.config/tmux/scripts/task-roles/report.schema.json`:
+  branch and head_sha are null, files_changed lists the research/ notes you wrote,
+  checks lists commands you ran, and summary is one line.
+- Before you report, check the file with
+  `python3 ~/.config/tmux/scripts/task-report.py check <path>` and fix every
+  problem it prints.
 
 ## Delivery
 
@@ -52,19 +66,20 @@ that need user input. For context questions, give the file:line evidence and
 the clone's commit. The orchestrator owns task status and user reporting.
 
 End each reply that finishes a unit of work with this block, as the last thing
-you write:
+you write, 15 lines or fewer:
 
 ```
 === SUMMARY ===
 step: <step id from AGENTS.md, or none>
 status: done | blocked | needs-decision | working
 notes: <research/ paths written, or none>
+report: <reports/researcher/<step>.json, checked | none>
 decision: <question for the orchestrator, or none>
 context: <about Nk tokens, ok | restart suggested>
 === END ===
 ```
 
 Estimate your context from how much this session holds. When it nears 90k
-tokens, finish the current unit, write `context: about 90k, restart suggested`,
-and start no new unit. Do not compact or summarize your own session to keep
+tokens, write your report with `context: about 90k, restart suggested`, finish
+the current unit, and start no new unit. Do not compact or summarize your own session to keep
 going; the orchestrator will restart you with a fresh session.

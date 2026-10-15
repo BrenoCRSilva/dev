@@ -11,7 +11,9 @@
 # to a finished worker or researcher; a working agent needs --force. Repo agents
 # get codegraph (MCP code index) and ponytail (minimal-code rules); the
 # researcher gets codegraph only; the orchestrator gets neither, but its Claude
-# launch gets the status line settings (orchestrator.claude-settings.json). A
+# launch gets the status line settings (orchestrator.claude-settings.json). Repo
+# and researcher agents also get the assignment hook (hooks/<agent>.md, see
+# task-assignment.sh) and write access to their own reports/<agent>/ folder. A
 # missing tool is skipped with a warning.
 # The provider defaults to $TASK_PROVIDER, else claude. Launching the
 # orchestrator exports TASK_PROVIDER so the agents it starts follow it.
@@ -39,6 +41,12 @@ declare -A PROMPT=([orchestrator]=orchestrator.md [repo]=repo-agent.md [research
 PONYTAIL_VERSION=5.2.0
 PONYTAIL_DIR="$HOME/.local/share/ponytail/v$PONYTAIL_VERSION"
 PONYTAIL_STATE="$HOME/.local/state/ponytail/codex"
+# Set by ponytail_args for codex; codex_session_start_args puts it in the one
+# SessionStart override that also carries the assignment hook.
+PONYTAIL_START_HOOK=''
+# The assignment hook is the same command for every agent and provider, so one
+# hook trust covers all of them. Deployed copies live in ~/.config/tmux/scripts.
+ASSIGN_HOOK="$HOME/.config/tmux/scripts/task-assignment.sh"
 
 # --- arguments -------------------------------------------------------------
 usage() {
@@ -155,9 +163,9 @@ tool_args() {
     if [[ $role == repo ]]; then ponytail_args "$1"; fi
 }
 
-# The MCP code index. Claude gets the config file and its allow rule (with the
-# settings file that sets CODEGRAPH_TELEMETRY=0); codex gets the same server as
-# per-launch -c overrides.
+# The MCP code index. Claude gets the config file and its allow rule (the
+# settings file, which also carries CODEGRAPH_TELEMETRY=0, is added by
+# agent_args); codex gets the same server as per-launch -c overrides.
 codegraph_args() {
     local provider=$1
     if ! command -v codegraph >/dev/null 2>&1; then
@@ -165,8 +173,7 @@ codegraph_args() {
         return 0
     fi
     if [[ $provider == claude ]]; then
-        ARGS+=(--settings "$ROLES_DIR/repo-agent.claude-settings.json"
-               --mcp-config "$ROLES_DIR/repo-agent.mcp.json" --allowedTools 'mcp__codegraph__*')
+        ARGS+=(--mcp-config "$ROLES_DIR/repo-agent.mcp.json" --allowedTools 'mcp__codegraph__*')
         return 0
     fi
     ARGS+=(-c 'mcp_servers.codegraph.command="codegraph"'
@@ -188,11 +195,47 @@ ponytail_args() {
         return 0
     fi
     cmd="env PLUGIN_DATA=$PONYTAIL_STATE node $PONYTAIL_DIR/hooks"
+    PONYTAIL_START_HOOK="{type=\"command\",command=\"$cmd/ponytail-activate.js\",timeout=5},"
     ARGS+=(
-        -c "hooks.SessionStart=[{matcher=\"startup|resume|clear|compact\",hooks=[{type=\"command\",command=\"$cmd/ponytail-activate.js\",timeout=5}]}]"
         -c "hooks.SubagentStart=[{hooks=[{type=\"command\",command=\"$cmd/ponytail-subagent.js\",timeout=5}]}]"
         -c "hooks.UserPromptSubmit=[{hooks=[{type=\"command\",command=\"$cmd/ponytail-mode-tracker.js\",timeout=5}]}]"
     )
+}
+
+# Claude reads the assignment hook from the settings file, so only codex needs
+# it here. codex reads one hooks.SessionStart override, so this is the only one:
+# it holds the ponytail activation (repo agents, when loaded) and the assignment
+# hook.
+codex_session_start_args() {
+    if ! safe_path "$ASSIGN_HOOK"; then
+        echo "task-agent: assignment hook path has characters the codex override cannot quote: $ASSIGN_HOOK" >&2
+        exit 1
+    fi
+    ARGS+=(-c "hooks.SessionStart=[{matcher=\"startup|resume|clear|compact\",hooks=[${PONYTAIL_START_HOOK}{type=\"command\",command=\"$ASSIGN_HOOK\",timeout=5}]}]")
+}
+
+# The folder this agent may write its step reports to, <task-root>/reports/<name>.
+# The pane's folder names the task: a worker's worktree is <task-root>/<repo> and
+# the researcher's is <task-root>/research. REPORTS stays empty only in a dry run
+# whose pane cwd cannot be read.
+REPORTS=''
+report_dir() {
+    local cwd
+    cwd=$(pane_cwd)
+    if [[ -z "$cwd" ]]; then
+        if [[ $dry_run == yes ]]; then
+            echo "reports: cannot read the cwd of pane $pane; no reports folder in this dry run"
+            return 0
+        fi
+        echo "task-agent: cannot read the cwd of pane $pane; not starting without its reports folder" >&2
+        exit 1
+    fi
+    if [[ $role == repo && "${cwd##*/}" != "$name" ]] || [[ $role == researcher && "${cwd##*/}" != research ]]; then
+        echo "task-agent: pane $pane is not in the folder of $name (cwd: $cwd)" >&2
+        exit 1
+    fi
+    REPORTS="${cwd%/*}/reports/$name"
+    [[ $dry_run == yes ]] || mkdir -p "$REPORTS"
 }
 
 # Fills ARGS with the role's model, effort and prompt for the provider. A dry
@@ -201,17 +244,27 @@ ponytail_args() {
 ARGS=()
 agent_args() {
     local role=$1 want_resume=$2 file prompt
+    local dir
+    local -a dirs
     file="$ROLES_DIR/${PROMPT[$role]}"
     [[ -f "$file" ]] || { echo "task-agent: missing $file" >&2; exit 1; }
+    REPORTS=''
+    if [[ $role == repo || $role == researcher ]]; then report_dir; fi
     if [[ $provider == claude ]]; then
         ARGS=(--model "${MODEL[claude:$role]}" --effort "${EFFORT[claude:$role]}" --append-system-prompt-file "$file")
-        if [[ $role == repo || $role == researcher ]]; then tool_args claude; fi
+        if [[ $role == repo || $role == researcher ]]; then
+            ARGS+=(--settings "$ROLES_DIR/repo-agent.claude-settings.json")
+            tool_args claude
+        fi
         # The orchestrator alone gets the status line (cost, context, cache).
         if [[ $role == orchestrator ]]; then ARGS+=(--settings "$ROLES_DIR/orchestrator.claude-settings.json"); fi
         if [[ $role == repo ]]; then
-            ARGS+=(--permission-mode auto --add-dir "$canonical_repo/.git")
+            dirs=("$canonical_repo/.git")
+            [[ -z $REPORTS ]] || dirs+=("$REPORTS")
+            ARGS+=(--permission-mode auto --add-dir "${dirs[@]}")
         elif [[ $role == researcher ]]; then
             ARGS+=(--permission-mode auto)
+            [[ -z $REPORTS ]] || ARGS+=(--add-dir "$REPORTS")
         fi
         if [[ $want_resume == yes ]]; then ARGS+=(--continue); fi
     else
@@ -225,14 +278,21 @@ agent_args() {
         ARGS+=(-m "${MODEL[codex:$role]}" -c "model_reasoning_effort=\"${EFFORT[codex:$role]}\"" -c "developer_instructions=$prompt")
         if [[ $role == repo || $role == researcher ]]; then
             tool_args codex
+            codex_session_start_args
             codex_trust_args
         fi
         # Codex's closest match to Claude's auto mode: the model decides when to
         # ask (on-request), inside the same workspace-write sandbox as before.
         if [[ $role == repo ]]; then
-            ARGS+=(-a on-request -s workspace-write --add-dir "$canonical_repo/.git")
+            dirs=("$canonical_repo/.git")
+            [[ -z $REPORTS ]] || dirs+=("$REPORTS")
+            ARGS+=(-a on-request -s workspace-write)
+            for dir in "${dirs[@]}"; do ARGS+=(--add-dir "$dir"); done
         fi
-        if [[ $role == researcher ]]; then ARGS+=(-a on-request -s workspace-write); fi
+        if [[ $role == researcher ]]; then
+            ARGS+=(-a on-request -s workspace-write)
+            [[ -z $REPORTS ]] || ARGS+=(--add-dir "$REPORTS")
+        fi
     fi
 }
 

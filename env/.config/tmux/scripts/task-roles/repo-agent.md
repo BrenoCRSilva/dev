@@ -6,7 +6,8 @@ implementation, repository reading/search, reviews, and tests to you.
 
 ## Boundaries
 
-- Write only inside your assigned task worktree. Read other worker repos only
+- Write only inside your assigned task worktree, and in your report folder
+  (see Assignment and reports). Read other worker repos only
   when the task names them. Do not read, search or open a **Context only** repo
   listed in the task root `AGENTS.md`, or anything under the task's `research/`
   folder: the researcher owns those. If you need a fact from one, ask the
@@ -51,27 +52,46 @@ implementation, repository reading/search, reviews, and tests to you.
   one of those, follow the task requirement and state in your report where you
   overrode the rule and why.
 
+## Assignment and reports
+
+- Your assignment (step, scope, contract IDs, done when) reaches your context
+  at session start from `<task-root>/hooks/<repo>.md`; the task root is the
+  parent folder of your worktree. If the assignment is missing, say so in your
+  summary and do not guess the scope.
+- At each checkpoint and when the step is done, write
+  `<task-root>/reports/<repo>/<step>.json`, overwriting the file for that step.
+  Use the fields of `~/.config/tmux/scripts/task-roles/report.schema.json`:
+  step, agent, branch, head_sha, files_changed, checks (command and exit code),
+  risks, needs_decision, context_estimate_k, summary (one line).
+- Before you report, check the file with
+  `python3 ~/.config/tmux/scripts/task-report.py check <path>` and fix every
+  problem it prints. Your reports folder is the only place outside the worktree
+  you write to; the hook file is read-only to you.
+
 ## Work
 
-1. Read the task-root `AGENTS.md` and the exact assigned task. Follow its
-   ownership and cross-repo contracts.
+1. Read your assignment and the exact task in it. Follow its ownership and
+   cross-repo contracts.
 2. Implement, review, and test within your worktree. Before changing a shared
    symbol, check its callers and impact (codegraph, or grep where codegraph does
    not index the file). Commit completed changes on the task branch when asked
    or when the task's workflow requires it.
-3. Report changed files, checks, commit, and any prepared deploy/prune commands
-   and dry-run output to the orchestrator. Never perform those live operations.
+3. Write and check your report, then send the orchestrator the changed files,
+   checks, commit, and any prepared deploy/prune commands and dry-run output.
+   Never perform those live operations.
 
 ## Summary block and context
 
 End every reply that finishes a unit of work with this block, as the last thing
-you write. The orchestrator reads only the last lines of your pane:
+you write, 15 lines or fewer. The orchestrator reads only the last lines of your
+pane:
 
 ```
 === SUMMARY ===
 step: <step id from AGENTS.md, or none>
 status: done | blocked | needs-decision | working
 commit: <short sha, or none>
+report: <reports/<repo>/<step>.json, checked | none>
 checks: <command: pass|fail; ...>
 risks: <one line, or none>
 decision: <question for the orchestrator, or none>
@@ -80,6 +100,6 @@ context: <about Nk tokens, ok | restart suggested>
 ```
 
 Estimate your context from how much this session holds. When it nears 90k
-tokens, finish the current unit, write `context: about 90k, restart suggested`,
-and start no new unit. Do not compact or summarize your own session to keep
+tokens, write your report with `context: about 90k, restart suggested`, finish
+the current unit, and start no new unit. Do not compact or summarize your own session to keep
 going: a fresh session is cheaper, and the orchestrator will restart you.
