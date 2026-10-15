@@ -5,23 +5,26 @@
                 [--task-root <dir>] [--provider openrouter] [--model <id>]
                 [--dry-run] [--json]
 
-The formula's checks run in code first; a failing check routes "escalate" with
-no request. Otherwise one OpenRouter Decisions request carries all the formula's
-questions, and the bands and route rules decide the route. The record goes to
-<task-root>/decisions/<agent>/<step>.json and stdout gets one line:
+Code rules run first and make no request. A failing check routes "escalate" (rule
+code-check). A non-null needs_decision, a files_changed path matching [safety]
+ask_user_paths, or a keyword in risks[] or summary routes "ask_user" (rule
+code-safety). Otherwise one OpenRouter Decisions request carries the formula's three
+questions and the [gate] decides (rule jev): ask_user when needs_user p is at or above
+ask_user_needs_user; continue only when needs_user p, touches_contract p and the
+next_owner answer all clear their [gate] bounds; anything else escalates. The record
+goes to <task-root>/decisions/<agent>/<step>.json and stdout gets one line:
 "route=<route> step=<id> record=<path>".
 
-Exit codes: 0 continue, 10 escalate, 11 ask_user, 20 decision service
-unavailable (the caller treats it as escalate), 2 usage error, 3 invalid formula
-or report. --dry-run prints the exact request body and makes no request; it
-exits 0, or the route's code when a check fails.
+Exit codes: 0 continue, 10 escalate, 11 ask_user, 20 decision service unavailable
+(the caller treats it as escalate), 2 usage error, 3 invalid formula or report.
+--dry-run prints the exact request body and makes no request; it exits 0, or the
+route's code when a code rule routes the report.
 
-A live request needs TASK_ROLE=orchestrator, TASK_DECIDE_LIVE=1 (the CLI's
-opt-in) and ~/.config/task-agents/openrouter.env at mode 600. Otherwise it exits 2
-before the key file is opened. Code-routed reports make no request, so they need
-none of this. The key comes from OPENROUTER_API_KEY, else the key file's line. It
-is never printed or recorded. TASK_DECIDE_ENDPOINT overrides the URL (tests only).
-Stdlib only.
+A live request needs TASK_ROLE=orchestrator, TASK_DECIDE_LIVE=1 (the CLI's opt-in) and
+~/.config/task-agents/openrouter.env at mode 600. Otherwise it exits 2 before the key
+file is opened. Code-routed reports make no request, so they need none of this. The
+key comes from OPENROUTER_API_KEY, else the key file's line. It is never printed or
+recorded. TASK_DECIDE_ENDPOINT overrides the URL (tests only). Stdlib only.
 """
 import argparse
 import http.client
@@ -41,7 +44,6 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
 ROUTES = {"continue": 0, "escalate": 10, "ask_user": 11}
-PRECEDENCE = ["continue", "escalate", "ask_user"]
 SERVICE_EXIT = 20
 USAGE_EXIT = 2
 INVALID_EXIT = 3
@@ -50,8 +52,12 @@ RETRY_STATUS = {429, 502, 503, 524, 529}
 TIMEOUT_S = 60
 PRIVILEGED = ("merge", "push", "deploy", "install")
 MODEL_ID = re.compile(r"typesafe/jev-[A-Za-z0-9._-]+")
-NOUL_KEYS = {"key", "type", "instructions", "criteria", "reads", "band", "route_if_true", "route_if_false"}
-CHOICE_KEYS = {"key", "type", "instructions", "criteria", "reads", "min_confidence", "on_low_confidence", "routes"}
+QUESTION_TYPES = {"touches_contract": "noul", "needs_user": "noul", "next_owner": "choice"}
+NOUL_KEYS = {"key", "type", "instructions", "criteria", "reads"}
+CHOICE_KEYS = NOUL_KEYS | {"expect"}
+SAFETY_KEYS = {"ask_user_paths", "ask_user_keywords"}
+GATE_KEYS = ("ask_user_needs_user", "continue_needs_user_below", "continue_touches_contract_below", "continue_owner_min")
+OWNER_EPS = 1e-9  # float rounding at the confidence floor
 
 
 def _task_report():
@@ -126,18 +132,15 @@ def _only(table, allowed, where):
             raise Invalid(f"{where}: unknown key {key}")
 
 
-def _route(value, where):
-    if value not in ROUTES:
-        raise Invalid(f"{where}: route must be one of {', '.join(ROUTES)}")
-
-
 def _question(q):
     if not isinstance(q, dict):
         raise Invalid("steps.questions: each question is a table")
     key = q.get("key")
     where = f"question {key}"
-    if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", key):
-        raise Invalid(f"question key {key!r}: lowercase letters, digits and _")
+    if not isinstance(key, str) or key not in QUESTION_TYPES:
+        raise Invalid(f"question key {key!r}: touches_contract, needs_user or next_owner")
+    if q.get("type") != QUESTION_TYPES[key]:
+        raise Invalid(f"{where}.type: must be {QUESTION_TYPES[key]}")
     if not isinstance(q.get("instructions"), str) or not q["instructions"]:
         raise Invalid(f"{where}.instructions: required text")
     reads = q.get("reads")
@@ -151,32 +154,16 @@ def _question(q):
     criteria = q.get("criteria")
     if not isinstance(criteria, dict) or not all(isinstance(v, str) and v for v in criteria.values()):
         raise Invalid(f"{where}.criteria: text for each option")
-    if q.get("type") == "noul":
+    if q["type"] == "noul":
         _only(q, NOUL_KEYS, where)
         if set(criteria) != {"true", "false"}:
             raise Invalid(f"{where}.criteria: exactly true and false")
-        band = q.get("band")
-        if band is not None and not (
-            isinstance(band, list) and len(band) == 2 and all(_number(x) for x in band) and 0 <= band[0] < band[1] <= 1
-        ):
-            raise Invalid(f"{where}.band: [low, high] with 0 <= low < high <= 1")
-        _route(q.get("route_if_true"), where)
-        _route(q.get("route_if_false"), where)
-    elif q.get("type") == "choice":
+    else:
         _only(q, CHOICE_KEYS, where)
         if not 2 <= len(criteria) <= 255:
             raise Invalid(f"{where}.criteria: 2 to 255 options")
-        confidence = q.get("min_confidence")
-        if not _number(confidence) or not 0 <= confidence <= 1:
-            raise Invalid(f"{where}.min_confidence: a number from 0 to 1")
-        _route(q.get("on_low_confidence"), where)
-        routes = q.get("routes")
-        if not isinstance(routes, dict) or set(routes) != set(criteria):
-            raise Invalid(f"{where}.routes: one route for each option")
-        for route in routes.values():
-            _route(route, where)
-    else:
-        raise Invalid(f"{where}.type: noul or choice")
+        if q.get("expect") not in criteria:
+            raise Invalid(f"{where}.expect: one of the criteria")
 
 
 def load_formula(path):
@@ -184,7 +171,7 @@ def load_formula(path):
         formula = tomllib.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise Invalid(f"formula {path}: {error}")
-    _only(formula, {"formula", "version", "expect_exit", "never", "decision", "steps"}, "formula")
+    _only(formula, {"formula", "version", "expect_exit", "never", "decision", "safety", "gate", "steps"}, "formula")
     if not isinstance(formula.get("formula"), str) or not isinstance(formula.get("version"), int):
         raise Invalid("formula: needs a name (formula) and an integer version")
     if not _exit_ok(formula.setdefault("expect_exit", 0)):
@@ -203,6 +190,29 @@ def load_formula(path):
         raise Invalid("decision.allowed_models: typesafe/jev-* ids")
     if decision.get("zdr") is not True or decision.get("only") != ["typesafe"]:
         raise Invalid('decision: zdr must be true and only = ["typesafe"]')
+    safety = formula.get("safety")
+    if not isinstance(safety, dict):
+        raise Invalid("formula: needs a [safety] table")
+    _only(safety, SAFETY_KEYS, "safety")
+    paths = safety.get("ask_user_paths")
+    if not isinstance(paths, list) or not paths or not all(
+        isinstance(p, str) and p and not re.search(r"\*\*(?!/)", p) for p in paths
+    ):
+        raise Invalid("safety.ask_user_paths: globs; ** only as a whole folder (**/)")
+    keywords = safety.get("ask_user_keywords")
+    if not isinstance(keywords, list) or not keywords or not all(
+        isinstance(w, str) and re.fullmatch(r"[a-z][a-z-]*", w) for w in keywords
+    ):
+        raise Invalid("safety.ask_user_keywords: lowercase words")
+    # The privileged words are always keywords, whatever the list says.
+    safety["ask_user_keywords"] = list(dict.fromkeys([*keywords, *never]))
+    gate = formula.get("gate")
+    if not isinstance(gate, dict):
+        raise Invalid("formula: needs a [gate] table")
+    _only(gate, set(GATE_KEYS), "gate")
+    for key in GATE_KEYS:
+        if not _number(gate.get(key)) or not 0 <= gate[key] <= 1:
+            raise Invalid(f"gate.{key}: a number from 0 to 1")
     steps = formula.get("steps")
     if not isinstance(steps, list) or len(steps) != 1:
         raise Invalid("formula: exactly one [[steps]] entry in v1")
@@ -215,13 +225,12 @@ def load_formula(path):
         if not isinstance(check.get("cmd"), str) or not check["cmd"] or not _exit_ok(check.get("expect_exit")):
             raise Invalid("steps.checks: needs cmd and expect_exit 0-255")
     questions = step.get("questions")
-    if not isinstance(questions, list) or not questions:
-        raise Invalid("steps.questions: at least one")
+    if not isinstance(questions, list):
+        raise Invalid("steps.questions: touches_contract, needs_user and next_owner")
     for q in questions:
         _question(q)
-    keys = [q["key"] for q in questions]
-    if len(set(keys)) != len(keys):
-        raise Invalid("steps.questions: duplicate key")
+    if sorted(q["key"] for q in questions) != sorted(QUESTION_TYPES):
+        raise Invalid("steps.questions: exactly touches_contract, needs_user and next_owner")
     return formula
 
 
@@ -253,6 +262,55 @@ def code_route(formula, report):
             wrong.append(f"{required['cmd']} exit {got[-1]} (want {required['expect_exit']})")
     if wrong:
         return ("checks failed: " + "; ".join(wrong))[:300]
+    return None
+
+
+def glob_regex(pattern):
+    """'**/' matches any folders or none; '*' and '?' stay within one name."""
+    out = []
+    i = 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
+def safety_hit(formula, report):
+    """The first safety rule the report hits, as text, or None."""
+    safety = formula["safety"]
+    if report["needs_decision"] is not None:
+        return "needs_decision is set"
+    for pattern in safety["ask_user_paths"]:
+        regex = glob_regex(pattern)
+        for path in report["files_changed"]:
+            if regex.match(path):
+                return f"{pattern} matches {path}"
+    for field, texts in (("risks", report["risks"]), ("summary", [report["summary"]])):
+        for word in safety["ask_user_keywords"]:
+            pattern = rf"\b{re.escape(word)}\w*"
+            if any(re.search(pattern, text, re.IGNORECASE) for text in texts):
+                return f"keyword {word} in {field}"
+    return None
+
+
+def code_rule(formula, report):
+    """The route code gives before any request: (route, rule, reason), or None."""
+    failed = code_route(formula, report)
+    if failed:
+        return "escalate", "code-check", failed
+    hit = safety_hit(formula, report)
+    if hit:
+        return "ask_user", "code-safety", f"safety: {hit}"
     return None
 
 
@@ -337,47 +395,48 @@ def response_problem(formula, response):
     return None
 
 
-def route_answers(formula, report, answers):
-    """Applies the bands, thresholds, route rules and never-words. Returns (route, reason)."""
-    picks, parts = [], []
-    for q in questions_of(formula):
-        answer = answers[q["key"]]
-        if q["type"] == "noul":
-            p = answer["noul"]
-            low, high = q.get("band", (0.5, 0.5))
-            if low < p < high:
-                picks.append("escalate")
-                parts.append(f"{q['key']} abstains (p={p:.2f})")
-            else:
-                yes = p >= high
-                picks.append(q["route_if_true"] if yes else q["route_if_false"])
-                parts.append(f"{q['key']}={str(yes).lower()} (p={p:.2f})")
-        else:
-            probs = {option: answer["probabilities"][option] for option in q["criteria"]}
-            n = len(probs)
-            best = max(probs, key=probs.get)
-            confidence = (probs[best] - 1 / n) / (1 - 1 / n)
-            if confidence < q["min_confidence"]:
-                picks.append(q["on_low_confidence"])
-                parts.append(f"{q['key']} low confidence ({confidence:.2f})")
-            else:
-                picks.append(q["routes"][best])
-                parts.append(f"{q['key']}={best} (conf {confidence:.2f})")
-    text = report.get("needs_decision") or ""
-    hits = [word for word in formula["never"] if re.search(rf"\b{re.escape(word)}\b", text, re.IGNORECASE)]
-    if hits:
-        picks.append("ask_user")
-        parts.append(f"privileged request in needs_decision: {', '.join(hits)}")
-    route = max(picks, key=PRECEDENCE.index, default="continue")
-    return route, "checks ok; " + "; ".join(parts)
+def route_answers(formula, answers):
+    """The [gate] on Jev's answers. Returns (route, reason)."""
+    gate = formula["gate"]
+    owner = next(q for q in questions_of(formula) if q["key"] == "next_owner")
+    p_user = answers["needs_user"]["noul"]
+    p_contract = answers["touches_contract"]["noul"]
+    probs = {option: answers["next_owner"]["probabilities"][option] for option in owner["criteria"]}
+    best = max(probs, key=probs.get)
+    n = len(probs)
+    confidence = (probs[best] - 1 / n) / (1 - 1 / n)
+    head = f"checks and safety clear; needs_user p={p_user:.3f}; touches_contract p={p_contract:.3f}; next_owner {best} (conf {confidence:.3f})"
+    if p_user >= gate["ask_user_needs_user"]:
+        return "ask_user", f"{head}; needs_user at or above {gate['ask_user_needs_user']:.2f}"
+    misses = []
+    if p_user >= gate["continue_needs_user_below"]:
+        misses.append(f"needs_user not below {gate['continue_needs_user_below']:.2f}")
+    if p_contract >= gate["continue_touches_contract_below"]:
+        misses.append(f"touches_contract not below {gate['continue_touches_contract_below']:.2f}")
+    if best != owner["expect"]:
+        misses.append(f"next_owner is not {owner['expect']}")
+    if confidence < gate["continue_owner_min"] - OWNER_EPS:
+        misses.append(f"next_owner confidence below {gate['continue_owner_min']:.2f}")
+    if misses:
+        return "escalate", f"{head}; {'; '.join(misses)}"
+    return "continue", head
 
 
-def record(formula, report, route, reason, response=None, answers=None):
+def route_response(formula, response):
+    """(route, reason) for a Jev response, after the response checks."""
+    problem = response_problem(formula, response)
+    if problem:
+        return "escalate", problem
+    return route_answers(formula, response["answers"])
+
+
+def record(formula, report, route, rule, reason, response=None, answers=None):
     response = response or {}
     return {
         "step": report["step"],
         "formula": f"{formula['formula']}@{formula['version']}",
         "route": route,
+        "rule": rule,
         "reason": reason,
         "model": response.get("model"),
         "provider": response.get("provider"),
@@ -387,31 +446,34 @@ def record(formula, report, route, reason, response=None, answers=None):
     }
 
 
-def decide(formula, report, *, model, opt_in, key_loader=load_key, url=None, sleep=time.sleep):
-    """Returns (record, exit code). Makes at most one decision request, and only when live_gate passes."""
-    blocked = code_route(formula, report)
-    if blocked:
-        return record(formula, report, "escalate", blocked), ROUTES["escalate"]
+def ask_jev(formula, report, model, *, opt_in, key_loader=load_key, url=None, sleep=time.sleep):
+    """One decision request. Raises Usage before the key file is opened, ServiceError on failure."""
     live_gate(opt_in)
     body = build_request(formula, report, model)
+    return call(body, key_loader(), url or endpoint(), sleep)
+
+
+def decide(formula, report, *, model, opt_in, key_loader=load_key, url=None, sleep=time.sleep):
+    """Returns (record, exit code). Makes at most one decision request, and none when a code rule routes."""
+    hit = code_rule(formula, report)
+    if hit:
+        route, rule, reason = hit
+        return record(formula, report, route, rule, reason), ROUTES[route]
     try:
-        response = call(body, key_loader(), url or endpoint(), sleep)
+        response = ask_jev(formula, report, model, opt_in=opt_in, key_loader=key_loader, url=url, sleep=sleep)
     except ServiceError as error:
-        return record(formula, report, "escalate", f"decision service unavailable: {error}"), SERVICE_EXIT
-    problem = response_problem(formula, response)
-    if problem:
-        route, reason = "escalate", problem
-    else:
-        route, reason = route_answers(formula, report, response["answers"])
+        return record(formula, report, "escalate", "service", f"decision service unavailable: {error}"), SERVICE_EXIT
+    route, reason = route_response(formula, response)
     answers = response["answers"] if isinstance(response.get("answers"), dict) else {}
-    return record(formula, report, route, reason, response, answers), ROUTES[route]
+    return record(formula, report, route, "jev", reason, response, answers), ROUTES[route]
 
 
 def dry_run(formula, report, model):
-    blocked = code_route(formula, report)
-    if blocked:
-        print(f"route=escalate step={report['step']} dry-run: {blocked}; no request")
-        return ROUTES["escalate"]
+    hit = code_rule(formula, report)
+    if hit:
+        route, rule, reason = hit
+        print(f"route={route} step={report['step']} dry-run: {rule}: {reason}; no request")
+        return ROUTES[route]
     print(json.dumps(build_request(formula, report, model), indent=2))
     return 0
 

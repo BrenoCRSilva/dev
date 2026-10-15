@@ -1,10 +1,10 @@
-# Routes a worker step report (C4). Code runs the checks and the route rules;
-# Jev answers the three questions. Jev never routes a privileged step: a `never`
-# word in needs_decision always routes to ask_user (task-decide.py).
+# Routes a worker step report (C4). Code runs the checks and the safety rules first,
+# with no request. Jev answers three questions only when no code rule routes, and the
+# [gate] below decides on those answers. Jev never routes a privileged step (task-decide.py).
 formula = "worker-step"
-version = 1
+version = 2
 expect_exit = 0                 # every report check must exit with this
-never = ["merge", "push", "deploy", "install"]
+never = ["merge", "push", "deploy", "install"]   # Jev may not route these; they are always keywords
 
 [decision]
 provider = "openrouter"
@@ -14,6 +14,35 @@ model = "~typesafe/jev-latest"  # user decision 2026-10-15: alias, not pinned
 allowed_models = ["typesafe/jev-1.14-20261014", "typesafe/jev-1.13-20260917"]
 zdr = true
 only = ["typesafe"]
+
+[safety]
+# Code rules, checked before any Jev call. A hit routes ask_user (exit 11) and is
+# recorded with the rule that matched. TUNED PER REPO: these are this repo's
+# contract-bearing and privileged files. Another repo lists its own.
+# ask_user_paths: globs over files_changed. "**/" matches any folders or none; "*" and
+# "?" stay within one name.
+ask_user_paths = [
+  "**/task-roles/*.json",
+  "**/task-roles/*.md",
+  "**/*settings*.json",
+  "**/dotfiles.manifest",
+  "**/scripts/envctl",
+  "**/apply.sh",
+  "**/*deploy*",
+  "**/*.schema.json",
+]
+# ask_user_keywords: case-insensitive word prefixes, matched in risks[] and summary.
+# "delet" covers delete, deleted and deleting. A non-null needs_decision always asks.
+ask_user_keywords = ["deploy", "push", "merge", "install", "sudo", "prune", "delet", "contract", "schema", "secret", "key", "credential", "permission"]
+
+[gate]
+# Thresholds on Jev's probabilities, applied after the safety rules.
+ask_user_needs_user = 0.50              # needs_user p at or above this: ask_user
+continue_needs_user_below = 0.05        # continue needs needs_user p below this
+continue_touches_contract_below = 0.20  # ... and touches_contract p below this
+continue_owner_min = 0.80               # ... and next_owner is the expected owner at this confidence or more
+# Anything else escalates (exit 10). Set from the cost of each mistake; the
+# 12d live run had needs_user p 0.11-0.30 on three cases that needed the user.
 
 [[steps]]
 id = "worker-step"
@@ -25,9 +54,6 @@ type = "noul"
 instructions = "Does this step change or depend on a cross-repo contract (C1-C5 in AGENTS.md): a file, path, payload, or name that another repo reads? (state: files_changed, summary)"
 criteria = { true = "changes or relies on a contract file, path, payload, or name", false = "internal to one repo, or research only" }
 reads = ["files_changed", "summary"]
-band = [0.35, 0.65]
-route_if_true = "escalate"
-route_if_false = "continue"
 
 [[steps.questions]]
 key = "needs_user"
@@ -35,9 +61,6 @@ type = "noul"
 instructions = "Must the user decide or approve something before the next step, including any privileged request (deploy, install, merge, push)? (state: needs_decision, risks)"
 criteria = { true = "a decision, approval, or privileged request is pending", false = "no decision pending; the next step can proceed" }
 reads = ["needs_decision", "risks"]
-band = [0.35, 0.65]
-route_if_true = "ask_user"
-route_if_false = "continue"
 
 [[steps.questions]]
 key = "next_owner"
@@ -45,6 +68,4 @@ type = "choice"
 instructions = "Which role should act next? (state: needs_decision, summary)"
 criteria = { worker = "a repo worker continues or fixes its step", researcher = "external facts or context repos are needed", orchestrator = "review, plan, contract, or privileged step", none = "no next step" }
 reads = ["needs_decision", "summary"]
-min_confidence = 0.6
-on_low_confidence = "escalate"
-routes = { worker = "continue", none = "continue", researcher = "escalate", orchestrator = "escalate" }
+expect = "orchestrator"         # the only owner that continues: the step is done and the plan goes on
