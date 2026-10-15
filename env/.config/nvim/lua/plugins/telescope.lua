@@ -20,8 +20,9 @@ return {
 		require("telescope").setup({
 			defaults = {
 				mappings = {
-					i = { ["<c-i>"] = send_to_trouble_quickfix },
-					n = { ["<c-i>"] = send_to_trouble_quickfix },
+					-- <C-t> is telescope's select_tab; no tabs here.
+					i = { ["<c-i>"] = send_to_trouble_quickfix, ["<c-t>"] = false },
+					n = { ["<c-i>"] = send_to_trouble_quickfix, ["<c-t>"] = false },
 				},
 				sorting_strategy = "ascending",
 				layout_config = {

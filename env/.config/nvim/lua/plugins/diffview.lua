@@ -3,6 +3,7 @@
 local repo = require("brenocrs.git-repo")
 
 local function diffview(command, root, rest)
+	repo.close_diffviews()
 	local parts = { command, vim.fn.fnameescape("-C" .. root) }
 	if rest then
 		table.insert(parts, rest)
@@ -41,6 +42,11 @@ local function repo_history()
 	end)
 end
 
+local function file_history()
+	repo.close_diffviews()
+	vim.cmd("DiffviewFileHistory %")
+end
+
 local close = { "n", "q", "<cmd>DiffviewClose<cr>", { desc = "Close diffview" } }
 
 return {
@@ -61,7 +67,7 @@ return {
 	keys = {
 		{ "<leader>gd", review_changes, desc = "Review uncommitted changes" },
 		{ "<leader>gr", review_branch, desc = "Review branch (vs main/master)" },
-		{ "<leader>gh", "<cmd>DiffviewFileHistory %<cr>", desc = "File history" },
+		{ "<leader>gh", file_history, desc = "File history" },
 		{ "<leader>gH", repo_history, desc = "Repository history" },
 		{ "<leader>gc", function() require("brenocrs.commit-diff").pick_commit() end, desc = "Diff a commit (pick)" },
 		{ "<leader>gC", function() require("brenocrs.commit-diff").pick_range() end, desc = "Diff between two commits" },
@@ -85,12 +91,9 @@ return {
 		hooks = {
 			-- Look of the diffview README: relative numbers, cursorline, ╱ where lines are missing.
 			diff_buf_win_enter = function(bufnr, winid)
-				-- Diffview sets the filetype itself, after the treesitter FileType hook for
-				-- a reused buffer may already have run. Start the highlighter if it is off.
-				local lang = vim.treesitter.language.get_lang(vim.bo[bufnr].filetype)
-				if lang and vim.treesitter.highlighter.active[bufnr] == nil and vim.treesitter.language.add(lang) then
-					pcall(vim.treesitter.start, bufnr, lang)
-				end
+				-- Diffview sets the filetype of its buffers itself, so highlight them here too
+				-- when the FileType autocmd did not (a no-op once a highlighter is active).
+				require("brenocrs.highlight").attach(bufnr)
 				vim.wo[winid].number = true
 				vim.wo[winid].relativenumber = true
 				vim.wo[winid].cursorline = true
