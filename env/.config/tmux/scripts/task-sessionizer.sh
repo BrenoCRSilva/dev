@@ -15,6 +15,9 @@
 #   task-sessionizer.sh remove <task> <repo> [--dry-run] [--force]
 #                                            drop a repo from the task; branch kept
 #   task-sessionizer.sh refresh <task> [repo] fetch each context clone and fast-forward it
+#   task-sessionizer.sh sync <task>|--all [--dry-run]
+#                                            bring generated files up to the current
+#                                            templates: adds only, reports the rest
 #   task-sessionizer.sh close <task> [--dry-run] [--force]
 #                                            close a task; branches remain
 #   task-sessionizer.sh rm <task> [--force]  remove worktrees, dir and session
@@ -481,6 +484,60 @@ add_repo() {
         ensure_task_layout "$task"
 }
 
+# The Notes section as written now. Its markers let sync replace it exactly. The
+# texts written before, which sync replaces, are AGENTS_NOTES_V1..V4 ({branch}
+# stands for the task's branch, as V1 had it expanded).
+AGENTS_NOTES=$(cat <<'EOF'
+## Notes for agents
+<!-- task-sessionizer:notes:start -->
+- Worker repo subfolders are task worktrees on the branch shown in Repo modes. Each worker writes only inside its assigned worktree.
+- Agent names: `orchestrator`, `researcher`, and `worker-<repo>` for each worker repo (listed under Repo modes). Hook files and report folders use these names.
+- Context-only repos are canonical checkouts listed in Repo modes; they are read-only references with no worktree or agent. Only the researcher reads them, through its clones under `research/context/`. Workers never read them; ask the orchestrator for the facts you need.
+- Researcher notes belong under the task root's `research/`; researcher never edits repository trees, its context clones included.
+- `hooks/<agent>.md` is an agent's assignment (step, scope, contract IDs, done when), e.g. `hooks/worker-dotfiles.md`. The orchestrator writes it; the agent gets it at session start. Workers never write it.
+- `reports/<agent>/<step>.json` is an agent's step report, checked with `task-report.py`, e.g. `reports/worker-dotfiles/9.json`. Each agent writes only its own folder.
+- Don't `git checkout` other branches; use the existing task worktrees.
+- Each agent's role comes from its launch prompt (~/.config/tmux/scripts/task-roles/). The orchestrator maintains the task plan and shared contracts.
+<!-- task-sessionizer:notes:end -->
+EOF
+)
+AGENTS_NOTES_V1=$(cat <<'EOF'
+## Notes for agents
+- Each repo subfolder is a git worktree on branch {branch}. Work only inside your own subfolder; the orchestrator works at the task root.
+- Don't `git checkout` other branches; use the existing worktrees.
+- Each agent's role comes from its launch prompt (~/.config/tmux/scripts/task-roles/). This file holds only the task's shared state; only the orchestrator edits it.
+EOF
+)
+AGENTS_NOTES_V2=$(cat <<'EOF'
+## Notes for agents
+- Worker repo subfolders are task worktrees on the branch shown in Repo modes. Each worker writes only inside its assigned worktree.
+- Context-only repos are canonical checkouts listed in Repo modes; they are read-only references with no worktree or repo agent.
+- Researcher notes belong under the task root's `research/`; researcher never edits repository trees.
+- Don't `git checkout` other branches; use the existing task worktrees.
+- Each agent's role comes from its launch prompt (~/.config/tmux/scripts/task-roles/). The orchestrator maintains the task plan and shared contracts.
+EOF
+)
+AGENTS_NOTES_V3=$(cat <<'EOF'
+## Notes for agents
+- Worker repo subfolders are task worktrees on the branch shown in Repo modes. Each worker writes only inside its assigned worktree.
+- Context-only repos are canonical checkouts listed in Repo modes; they are read-only references with no worktree or repo agent. Only the researcher reads them, through its clones under `research/context/`. Workers never read them; ask the orchestrator for the facts you need.
+- Researcher notes belong under the task root's `research/`; researcher never edits repository trees, its context clones included.
+- Don't `git checkout` other branches; use the existing task worktrees.
+- Each agent's role comes from its launch prompt (~/.config/tmux/scripts/task-roles/). The orchestrator maintains the task plan and shared contracts.
+EOF
+)
+AGENTS_NOTES_V4=$(cat <<'EOF'
+## Notes for agents
+- Worker repo subfolders are task worktrees on the branch shown in Repo modes. Each worker writes only inside its assigned worktree.
+- Context-only repos are canonical checkouts listed in Repo modes; they are read-only references with no worktree or repo agent. Only the researcher reads them, through its clones under `research/context/`. Workers never read them; ask the orchestrator for the facts you need.
+- Researcher notes belong under the task root's `research/`; researcher never edits repository trees, its context clones included.
+- `hooks/<agent>.md` is an agent's assignment (step, scope, contract IDs, done when). The orchestrator writes it; the agent gets it at session start. Workers never write it.
+- `reports/<agent>/<step>.json` is an agent's step report, checked with `task-report.py`. Each agent writes only its own folder.
+- Don't `git checkout` other branches; use the existing task worktrees.
+- Each agent's role comes from its launch prompt (~/.config/tmux/scripts/task-roles/). The orchestrator maintains the task plan and shared contracts.
+EOF
+)
+
 write_agents_md() {
     local task=$1 branch=$2 file="$TASKS_DIR/$1/AGENTS.md" wt
     write_claude_files "$task"
@@ -503,15 +560,7 @@ write_agents_md() {
 ## Plan / status
 (Numbered steps, one owner repo each, with checks; [checkpoint] marks where the user gets a report.)
 
-## Notes for agents
-- Worker repo subfolders are task worktrees on the branch shown in Repo modes. Each worker writes only inside its assigned worktree.
-- Agent names: \`orchestrator\`, \`researcher\`, and \`worker-<repo>\` for each worker repo (listed under Repo modes). Hook files and report folders use these names.
-- Context-only repos are canonical checkouts listed in Repo modes; they are read-only references with no worktree or agent. Only the researcher reads them, through its clones under \`research/context/\`. Workers never read them; ask the orchestrator for the facts you need.
-- Researcher notes belong under the task root's \`research/\`; researcher never edits repository trees, its context clones included.
-- \`hooks/<agent>.md\` is an agent's assignment (step, scope, contract IDs, done when), e.g. \`hooks/worker-dotfiles.md\`. The orchestrator writes it; the agent gets it at session start. Workers never write it.
-- \`reports/<agent>/<step>.json\` is an agent's step report, checked with \`task-report.py\`, e.g. \`reports/worker-dotfiles/9.json\`. Each agent writes only its own folder.
-- Don't \`git checkout\` other branches; use the existing task worktrees.
-- Each agent's role comes from its launch prompt (~/.config/tmux/scripts/task-roles/). The orchestrator maintains the task plan and shared contracts.
+$AGENTS_NOTES
 EOF
     fi
     sync_repo_modes "$task"
@@ -762,7 +811,7 @@ task_close_issues() {
                     [[ -e "$sub" || -L "$sub" ]] || continue
                     case "${sub##*/}" in
                         settings.local.json) ;;
-                        settings.json)
+                        settings.json|settings.json.bak-*)
                             settings=$(cat "$sub" 2>/dev/null)
                             generated_task_settings "$settings" || extra=yes
                             ;;
@@ -778,24 +827,8 @@ task_close_issues() {
     context_clone_issues "$task"
 }
 
-# Written by the version before task-decide was allowed; still generated.
-CLAUDE_TASK_SETTINGS_V2="{
-  \"permissions\": {
-    \"allow\": [
-      \"Bash(herdr:*)\",
-      \"Bash(herdr agent wait:*)\",
-      \"Bash(~/.config/tmux/scripts/task-agent.sh:*)\",
-      \"Bash($HOME/.config/tmux/scripts/task-agent.sh:*)\",
-      \"Bash(~/.config/tmux/scripts/task-sessionizer.sh refresh:*)\",
-      \"Bash($HOME/.config/tmux/scripts/task-sessionizer.sh refresh:*)\",
-      \"Bash(~/.config/tmux/scripts/task-sessionizer.sh promote:*)\",
-      \"Bash($HOME/.config/tmux/scripts/task-sessionizer.sh promote:*)\",
-      \"Bash(~/.config/tmux/scripts/task-sessionizer.sh demote:*)\",
-      \"Bash($HOME/.config/tmux/scripts/task-sessionizer.sh demote:*)\"
-    ]
-  }
-}"
-
+# The orchestrator's allow rules. sync adds the rules missing from an older
+# settings.json, so a file is generated when every rule it holds is in here.
 CLAUDE_TASK_SETTINGS="{
   \"permissions\": {
     \"allow\": [
@@ -812,32 +845,28 @@ CLAUDE_TASK_SETTINGS="{
       \"Bash(~/.config/tmux/scripts/task-decide.py:*)\",
       \"Bash($HOME/.config/tmux/scripts/task-decide.py:*)\",
       \"Bash(python3 ~/.config/tmux/scripts/task-decide.py:*)\",
-      \"Bash(python3 $HOME/.config/tmux/scripts/task-decide.py:*)\"
+      \"Bash(python3 $HOME/.config/tmux/scripts/task-decide.py:*)\",
+      \"Bash(~/.config/tmux/scripts/task-sessionizer.sh sync:*)\",
+      \"Bash($HOME/.config/tmux/scripts/task-sessionizer.sh sync:*)\"
     ]
   }
 }"
 
-# Written by the previous version; a task created with it is still generated.
-CLAUDE_TASK_SETTINGS_V1="{
-  \"permissions\": {
-    \"allow\": [
-      \"Bash(herdr:*)\",
-      \"Bash(~/.config/tmux/scripts/task-agent.sh:*)\",
-      \"Bash($HOME/.config/tmux/scripts/task-agent.sh:*)\"
-    ]
-  }
-}"
-
-# Written by earlier versions of this script; remove_task still cleans it up.
-CLAUDE_TASK_SETTINGS_OLD='{
-  "permissions": {
-    "allow": ["Bash(herdr:*)"]
-  }
-}'
-
-# True when a task's .claude/settings.json is one this script wrote.
+# True when a settings.json is one this script could have written: only
+# permissions.allow, holding rules from the template above. Older templates
+# (and sync's appended rules) are subsets of it, so they count too.
 generated_task_settings() {
-    [[ "$1" == "$CLAUDE_TASK_SETTINGS" || "$1" == "$CLAUDE_TASK_SETTINGS_V2" || "$1" == "$CLAUDE_TASK_SETTINGS_V1" || "$1" == "$CLAUDE_TASK_SETTINGS_OLD" ]]
+    python3 -c '
+import json, sys
+try:
+    doc = json.loads(sys.stdin.read())
+    allow = doc["permissions"]["allow"]
+    known = json.loads(sys.argv[1])["permissions"]["allow"]
+    ok = list(doc) == ["permissions"] and list(doc["permissions"]) == ["allow"] and isinstance(allow, list)
+    sys.exit(0 if ok and set(allow) <= set(known) else 1)
+except (ValueError, KeyError, TypeError):
+    sys.exit(1)
+' "$CLAUDE_TASK_SETTINGS" <<< "$1"
 }
 
 # True when a task's .claude/agents holds only the subagent files this script
@@ -992,6 +1021,307 @@ promote_context() {
     dispatch_hooks "$task"
     herdr_running "$(session_name "$task")" && herdr_layout "$task" && herdr_announce "$task"
     echo "$name promoted to worker in $task"
+}
+
+# --- sync -------------------------------------------------------------------
+# sync <task>|--all [--dry-run] brings a task's generated files up to the current
+# templates. It only adds: allow rules missing from settings.json (existing rules
+# are never removed or reordered), missing subagents, folders and context clones,
+# and the Notes section when it still holds a text this script wrote. Anything
+# else is reported. It never touches worktrees, branches, canonical checkouts or
+# running agents, and a second run changes nothing.
+
+SYNC_QUIET=no
+SYNC_CHANGES=0 SYNC_REVIEW=0 SYNC_REPORT=0
+
+# One result line. change: made, or planned in a dry run. review: left as it is,
+# for a person to decide. report and info: for the orchestrator. detail: a
+# continuation line, such as a diff. Quiet runs (--all) only count.
+sync_line() {
+    local kind=$1 text=$2 verb=made
+    [[ $DRY_RUN == yes ]] && verb=planned
+    case $kind in
+        change) SYNC_CHANGES=$((SYNC_CHANGES + 1)); [[ $SYNC_QUIET == yes ]] || printf '%s: %s\n' "$verb" "$text" ;;
+        review) SYNC_REVIEW=$((SYNC_REVIEW + 1)); [[ $SYNC_QUIET == yes ]] || printf 'review: %s\n' "$text" ;;
+        report) SYNC_REPORT=$((SYNC_REPORT + 1)); [[ $SYNC_QUIET == yes ]] || printf 'report: %s\n' "$text" ;;
+        info) [[ $SYNC_QUIET == yes ]] || printf 'info: %s\n' "$text" ;;
+        detail) [[ $SYNC_QUIET == yes ]] || printf '    %s\n' "$text" ;;
+    esac
+}
+
+# Passes on the "kind<TAB>text" lines that a python check prints.
+sync_route() {
+    local kind text
+    while IFS=$'\t' read -r kind text; do
+        [[ -n "$kind" ]] && sync_line "$kind" "$text"
+    done
+}
+
+# settings.json: the template's missing allow rules are appended. The file's
+# other keys and its existing rules stay as they are. The old file is kept beside
+# it as settings.json.bak-<stamp> before a write.
+sync_settings() {
+    local task=$1 stamp=$2 file="$TASKS_DIR/$1/.claude/settings.json" out
+    if [[ ! -e "$file" ]]; then
+        sync_line change ".claude/settings.json: create from the current template"
+        [[ $DRY_RUN == yes ]] || { mkdir -p "$(dirname "$file")"; printf '%s\n' "$CLAUDE_TASK_SETTINGS" > "$file"; }
+        return 0
+    fi
+    out=$(python3 - "$file" "$stamp" "$DRY_RUN" "$CLAUDE_TASK_SETTINGS" <<'PY'
+import json, os, shutil, sys, tempfile
+
+path, stamp, dry_run, template = sys.argv[1:5]
+name = os.path.basename(path)
+want = json.loads(template)["permissions"]["allow"]
+try:
+    with open(path) as f:
+        doc = json.load(f)
+    allow = doc["permissions"]["allow"]
+    if not isinstance(allow, list):
+        raise TypeError
+except (OSError, ValueError, KeyError, TypeError):
+    print(f"review\t{name}: not a settings file with permissions.allow; left as it is")
+    sys.exit(0)
+missing = [rule for rule in want if rule not in allow]
+if not missing:
+    sys.exit(0)
+backup = f"{name}.bak-{stamp}"
+print(f"change\t{name}: +{len(missing)} allow rule(s); previous file kept as {backup}")
+if dry_run == "yes":
+    sys.exit(0)
+shutil.copy2(path, os.path.join(os.path.dirname(path), backup))
+doc["permissions"]["allow"] = allow + missing
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".settings.")
+with os.fdopen(fd, "w") as f:
+    f.write(json.dumps(doc, indent=2) + "\n")
+os.chmod(tmp, os.stat(path).st_mode & 0o777)
+os.replace(tmp, path)
+PY
+    ) || out=$'review\tsettings.json: could not be checked; left as it is'
+    sync_route <<< "$out"
+}
+
+# CLAUDE.md, settings.json and the subagents: the files create writes. A subagent
+# the user edited is kept.
+sync_claude_files() {
+    local task=$1 stamp=$2 dir="$TASKS_DIR/$1" agent name
+    local -a copy=()
+    if [[ ! -e "$dir/CLAUDE.md" && ! -L "$dir/CLAUDE.md" ]]; then
+        sync_line change "CLAUDE.md: symlink to AGENTS.md"
+        [[ $DRY_RUN == yes ]] || ln -s AGENTS.md "$dir/CLAUDE.md"
+    fi
+    sync_settings "$task" "$stamp"
+    for agent in "$TASK_ROLES_DIR"/subagents/*.md; do
+        name=${agent##*/}
+        if [[ ! -e "$dir/.claude/agents/$name" ]]; then
+            copy+=("$name")
+        elif ! cmp -s "$agent" "$dir/.claude/agents/$name"; then
+            sync_line review ".claude/agents/$name differs from the template; kept"
+        fi
+    done
+    if ((${#copy[@]})); then
+        sync_line change ".claude/agents: copy ${copy[*]}"
+        if [[ $DRY_RUN != yes ]]; then
+            mkdir -p "$dir/.claude/agents"
+            for name in "${copy[@]}"; do cp "$TASK_ROLES_DIR/subagents/$name" "$dir/.claude/agents/$name"; done
+        fi
+    fi
+}
+
+sync_folders() {
+    local dir="$TASKS_DIR/$1" folder
+    for folder in hooks reports; do
+        [[ -e "$dir/$folder" ]] && continue
+        sync_line change "$folder/: create"
+        [[ $DRY_RUN == yes ]] || mkdir -p "$dir/$folder"
+    done
+}
+
+# A missing context clone is made the way create makes one. Existing clones are
+# left alone; refresh updates them.
+sync_contexts() {
+    local task=$1 name path dir err
+    while IFS=$'\t' read -r name path; do
+        [[ -n "$name" ]] || continue
+        dir=$(context_clone_dir "$task" "$name")
+        [[ -e "$dir" || -L "$dir" ]] && continue
+        if [[ $DRY_RUN == yes ]]; then
+            sync_line change "research/context/$name: clone of $path"
+        elif err=$(clone_context "$task" "$path" "$name" 2>&1); then
+            sync_line change "research/context/$name: clone of $path"
+        else
+            sync_line review "research/context/$name: clone failed (${err:-no output}); no clone made"
+        fi
+    done < <(task_contexts "$task")
+    [[ -s "$(task_context_file "$task")" ]] &&
+        sync_line info "context clones are left as they are; task-sessionizer.sh refresh $task updates them"
+    return 0
+}
+
+# AGENTS.md's Notes section. It is replaced only when its text is one this script
+# wrote: AGENTS_NOTES_V1..V4, or the current text without markers. Any other text
+# is shown as a diff and left alone. The rest of the file is never touched.
+sync_notes() {
+    local task=$1 out
+    out=$(python3 - "$TASKS_DIR/$task/AGENTS.md" "$DRY_RUN" "$(task_branch "$task")" \
+        "$AGENTS_NOTES" "$AGENTS_NOTES_V1" "$AGENTS_NOTES_V2" "$AGENTS_NOTES_V3" "$AGENTS_NOTES_V4" <<'PY'
+import difflib, os, sys, tempfile
+
+path, dry_run, branch, current, *previous = sys.argv[1:]
+START = "<!-- task-sessionizer:notes:start -->"
+END = "<!-- task-sessionizer:notes:end -->"
+HEADING = "## Notes for agents"
+desired = current.split("\n")
+try:
+    with open(path) as f:
+        lines = f.read().splitlines()
+except OSError:
+    print("review\tAGENTS.md: missing; left as it is")
+    sys.exit(0)
+start = next((i for i, line in enumerate(lines) if line.rstrip() == HEADING), None)
+if start is None:
+    print("review\tAGENTS.md: no Notes section; left as it is")
+    sys.exit(0)
+end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+section = lines[start:end]
+tail = []
+while section and not section[-1].strip():
+    tail.insert(0, section.pop())
+body = [line for line in section if line not in (START, END)]
+bodies = [[line for line in desired if line not in (START, END)]]
+bodies += [text.replace("{branch}", branch).split("\n") for text in previous]
+if body not in bodies:
+    print("review\tAGENTS.md: Notes section differs from the template; left as it is")
+    for line in difflib.unified_diff(desired, section, "template", "AGENTS.md", lineterm=""):
+        print(f"detail\t{line}")
+    sys.exit(0)
+if section == desired:
+    sys.exit(0)
+what = "add the start and end markers" if body == bodies[0] else "replace the earlier generated text"
+print(f"change\tAGENTS.md Notes: {what}")
+if dry_run == "yes":
+    sys.exit(0)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".AGENTS.md.")
+with os.fdopen(fd, "w") as f:
+    f.write("\n".join(lines[:start] + desired + tail + lines[end:]) + "\n")
+os.chmod(tmp, os.stat(path).st_mode & 0o777)
+os.replace(tmp, path)
+PY
+    ) || out=$'review\tAGENTS.md: could not be checked; left as it is'
+    sync_route <<< "$out"
+}
+
+# Things sync reports and does not change: agents that are not named by the
+# current scheme, legacy hooks/ and reports/ names, worker branches behind their
+# repo's default branch, and Codex hook trust.
+sync_report() {
+    local task=$1 dir="$TASKS_DIR/$1" dir_real s pane name provider cwd expected repo codex=no
+    local entry name_only wt base branch behind
+    dir_real=$(realpath "$dir")
+    s=$(session_name "$task")
+    if command -v jq >/dev/null && herdr_running "$s"; then
+        while IFS='|' read -r pane name provider cwd; do
+            cwd=$(realpath -m "$cwd" 2>/dev/null) || continue
+            repo=
+            if [[ "$cwd" == "$dir_real" ]]; then
+                expected=orchestrator
+            elif [[ "$cwd" == "$dir_real/research" ]]; then
+                expected=researcher
+            elif [[ "${cwd%/*}" == "$dir_real" && -e "$cwd/.git" ]]; then
+                repo=${cwd##*/}
+                expected=worker-$repo
+            else
+                continue
+            fi
+            [[ "$provider" == codex ]] && codex=yes
+            [[ "$name" == "$expected" ]] && continue
+            case "$expected:${name:+named}" in
+                orchestrator:*|*:) sync_line report "herdr: $expected is ${name:-unnamed} (pane $pane); name it: herdr --session $s agent rename $pane orchestrator" ;;
+                worker-*:named) sync_line report "herdr: agent $name (pane $pane) should be $expected; restart: TASK_SESSION=$s ~/.config/tmux/scripts/task-agent.sh stop $name, then ~/.config/tmux/scripts/task-agent.sh start worker $repo $pane $(origin_repo "$dir/$repo") --resume" ;;
+                researcher:named) sync_line report "herdr: agent $name (pane $pane) should be researcher; restart: TASK_SESSION=$s ~/.config/tmux/scripts/task-agent.sh stop $name, then ~/.config/tmux/scripts/task-agent.sh start researcher $pane --resume" ;;
+            esac
+        done < <(herdr --session "$s" agent list 2>/dev/null |
+            jq -r '.result.agents[] | [.pane_id, (.name // ""), .agent, (.cwd // "")] | join("|")' 2>/dev/null)
+    fi
+    if [[ $codex == yes ]] && { [[ -e "$dir/hooks/researcher.md" ]] || compgen -G "$dir/hooks/worker-*.md" >/dev/null; }; then
+        sync_line report "codex: a Codex agent here may need the assignment hook approved once in /hooks (trust is per hook, and this check cannot read it)"
+    fi
+
+    for entry in "$dir"/hooks/*.md; do
+        [[ -e "$entry" ]] || continue
+        name_only=${entry##*/}
+        name_only=${name_only%.md}
+        case $name_only in orchestrator|researcher|worker-*) continue ;; esac
+        if [[ -e "$dir/$name_only/.git" ]]; then
+            sync_line report "hooks/$name_only.md is named after a repo; the agent reads hooks/worker-$name_only.md: mv hooks/$name_only.md hooks/worker-$name_only.md"
+        else
+            sync_line report "hooks/$name_only.md matches no agent name (orchestrator, researcher, worker-<repo>)"
+        fi
+    done
+    for entry in "$dir"/reports/*/; do
+        [[ -d "$entry" ]] || continue
+        name_only=${entry%/}
+        name_only=${name_only##*/}
+        case $name_only in orchestrator|researcher|worker-*) continue ;; esac
+        if [[ -e "$dir/$name_only/.git" ]]; then
+            sync_line report "reports/$name_only/ is named after a repo; the agent writes reports/worker-$name_only/: mv reports/$name_only reports/worker-$name_only"
+        else
+            sync_line report "reports/$name_only/ matches no agent name (orchestrator, researcher, worker-<repo>)"
+        fi
+    done
+
+    while IFS= read -r wt; do
+        base=$(worktree_base "$wt")
+        branch=$(git -C "$wt" branch --show-current 2>/dev/null)
+        [[ -n "$base" && "$base" != "$branch" ]] || continue
+        behind=$(git -C "$wt" rev-list --count "HEAD..$base" 2>/dev/null) || continue
+        ((behind > 0)) && sync_line report "${wt##*/}: branch $branch is $behind commit(s) behind $base; the branch is not changed"
+    done < <(task_worktrees "$task")
+    return 0
+}
+
+sync_task() {
+    local task=$1 stamp changes
+    stamp=$(date -u +%Y%m%dT%H%M%S.%NZ)
+    SYNC_CHANGES=0 SYNC_REVIEW=0 SYNC_REPORT=0
+    sync_claude_files "$task" "$stamp"
+    sync_folders "$task"
+    sync_contexts "$task"
+    sync_notes "$task"
+    sync_report "$task"
+    changes="up to date"
+    ((SYNC_CHANGES > 0)) && changes="$SYNC_CHANGES change(s) $([[ $DRY_RUN == yes ]] && echo planned || echo made)"
+    printf '%s: %s; %s for review; %s report(s)\n' "$task" "$changes" "$SYNC_REVIEW" "$SYNC_REPORT"
+}
+
+sync_all() {
+    local task
+    SYNC_QUIET=yes
+    while IFS= read -r task; do
+        [[ -f "$TASKS_DIR/$task/AGENTS.md" ]] && valid_name "$task" && sync_task "$task"
+    done < <(list_tasks)
+    SYNC_QUIET=no
+}
+
+sync_command() {
+    local all=no task='' arg
+    for arg in "$@"; do
+        case $arg in
+            --all) all=yes ;;
+            --dry-run) DRY_RUN=yes ;;
+            --*) die "unknown sync option: $arg" ;;
+            *) [[ -z $task ]] || die "usage: sync <task>|--all [--dry-run]"; task=$arg ;;
+        esac
+    done
+    if [[ $all == yes ]]; then
+        [[ -z $task ]] || die "usage: sync <task>|--all [--dry-run]"
+        sync_all
+        return 0
+    fi
+    [[ -n $task ]] || die "usage: sync <task>|--all [--dry-run]"
+    valid_name "$task" || die "invalid task name: $task"
+    [[ -f "$TASKS_DIR/$task/AGENTS.md" ]] || die "no such task: $task"
+    sync_task "$task"
 }
 
 # --- demote and remove -------------------------------------------------------
@@ -1499,7 +1829,7 @@ pick_session() {
 # --- cleanup -----------------------------------------------------------------
 
 remove_task() {
-    local task=${1:-} force=${2:-} dry=${3:-no} dir wt origin s issues wts=() origins=() settings d
+    local task=${1:-} force=${2:-} dry=${3:-no} dir wt origin s issues wts=() origins=() settings d bak
     [[ -n "$task" ]] || die "usage: rm <task> [--force]"
     dir="$TASKS_DIR/$task"
     [[ -d "$dir" ]] || die "no such task: $task"
@@ -1542,6 +1872,9 @@ remove_task() {
     rmdir "$dir/research" 2>/dev/null || true
     settings=$(cat "$dir/.claude/settings.json" 2>/dev/null)
     generated_task_settings "$settings" && rm -f "$dir/.claude/settings.json"
+    for bak in "$dir"/.claude/settings.json.bak-*; do
+        [[ -e "$bak" ]] && generated_task_settings "$(cat "$bak")" && rm -f "$bak"
+    done
     generated_agents "$dir/.claude/agents" && rm -rf -- "$dir/.claude/agents"
     rm -f "$dir/.claude/settings.local.json"
     rmdir "$dir/.claude" 2>/dev/null
@@ -2228,6 +2561,7 @@ case "$(basename "$0"):${1:-}" in
         [[ $# -ge 1 && $# -le 2 ]] || die "usage: refresh <task> [repo]"
         refresh_context "$@"
         ;;
+    *:sync) shift; sync_command "$@" ;;
     *:demote) shift; repo_command demote "$@" ;;
     *:remove) shift; repo_command remove "$@" ;;
     *:close) shift; close_task "$@" ;;
