@@ -7,14 +7,16 @@
 #   task-sessionizer.sh popup                same, in the Omarchy menu (keybind)
 #   task-sessionizer.sh sessions             session manager in the terminal
 #                                            (Super+S opens the task picker)
-#   task-sessionizer.sh create <task> [--worker repo|--context repo]...
+#   task-sessionizer.sh create <task> [--worker repo|--context repo]... [--dry-run]
 #   task-sessionizer.sh add <task> [--worker repo|--context repo]...
-#   task-sessionizer.sh promote <task> <repo> context -> worker
+#   task-sessionizer.sh promote <task> <repo> [--dry-run]  context -> worker
 #   task-sessionizer.sh demote <task> <repo> [--dry-run] [--force]
 #                                            worker -> context; worktree removed, branch kept
 #   task-sessionizer.sh remove <task> <repo> [--dry-run] [--force]
 #                                            drop a repo from the task; branch kept
-#   task-sessionizer.sh close <task> [--force] close a task; branches remain
+#   task-sessionizer.sh refresh <task> [repo] fetch each context clone and fast-forward it
+#   task-sessionizer.sh close <task> [--dry-run] [--force]
+#                                            close a task; branches remain
 #   task-sessionizer.sh rm <task> [--force]  remove worktrees, dir and session
 #   task-sessionizer.sh stop <task> [--dry-run] [--force]
 #                                            end its nvim, language servers and
@@ -53,6 +55,8 @@ PENDING=()
 # Repos added in this run, announced to a running orchestrator.
 NEW_REPOS=()
 NEW_CONTEXTS=()
+# Set by --dry-run on create, promote and close: print the plan, change nothing.
+DRY_RUN=no
 
 die() {
     echo "error: $*" >&2
@@ -333,6 +337,117 @@ dispatch_hooks() {
     PENDING=()
 }
 
+# --- researcher context clones -----------------------------------------------
+# Each context repo has a local clone at research/context/<repo> for the
+# researcher; workers never see it. `git clone --local` hardlinks the canonical
+# object store, so the clone is cheap, and it stays independent of the canonical
+# checkout's lifetime (--shared would tie it to the canonical's objects, which a
+# gc or history rewrite there could break). Git writes new object files and
+# never edits one in place, so the shared links stay as they were. Clone and
+# fetch only read the canonical: no worktree entry, no symlink, nothing written
+# into it. A clone shows committed history on the canonical's current branch.
+
+context_clone_dir() { printf '%s/research/context/%s\n' "$TASKS_DIR/$1" "$2"; }
+
+# clone_context <task> <canonical> <name>: a no-op when the clone already exists.
+clone_context() {
+    local task=$1 repo=$2 name=$3 dir
+    valid_name "$name" || die "context repo name must match [A-Za-z0-9._-]+ (got '$name')"
+    dir=$(context_clone_dir "$task" "$name")
+    [[ -e "$dir" ]] && return 0
+    mkdir -p "$(dirname "$dir")"
+    git clone --quiet --local "$repo" "$dir" || {
+        rm -rf -- "$dir"
+        die "could not clone $repo for the researcher"
+    }
+}
+
+# Removes a context clone, and research/context once it is empty. A symlink at
+# that path is removed as a link; its target is not touched.
+drop_context_clone() {
+    local dir
+    dir=$(context_clone_dir "$1" "$2")
+    [[ -e "$dir" || -L "$dir" ]] || return 0
+    rm -rf -- "$dir"
+    rmdir "$(dirname "$dir")" 2>/dev/null || true
+}
+
+# Fetches a clone's canonical checkout and moves the clone to the canonical's
+# current branch (fast-forward), or to its detached HEAD. A clone with local
+# changes is left alone: nothing in it is meant to be edited.
+refresh_context_clone() {
+    local task=$1 name=$2 repo=$3 dir branch current old new
+    dir=$(context_clone_dir "$task" "$name")
+    if [[ ! -d "$dir/.git" ]]; then
+        clone_context "$task" "$repo" "$name"
+        echo "$name: clone was missing; recreated from $repo"
+        return 0
+    fi
+    if [[ -L "$dir" || "$(git -C "$dir" config --get remote.origin.url)" != "$repo" ]]; then
+        echo "$name: $dir is not a clone of $repo; left alone" >&2
+        return 1
+    fi
+    if [[ -n "$(git --no-optional-locks -C "$dir" status --porcelain --untracked-files=all)" ]]; then
+        echo "$name: the clone has local changes; left alone (it is read-only; delete $dir and refresh to reset it)" >&2
+        return 1
+    fi
+    git -C "$dir" fetch --quiet --prune origin || { echo "$name: fetch from $repo failed" >&2; return 1; }
+    branch=$(git -C "$repo" symbolic-ref --quiet --short HEAD) || branch=
+    current=$(git -C "$dir" symbolic-ref --quiet --short HEAD) || current=
+    old=$(git -C "$dir" rev-parse --short HEAD)
+    if [[ -n "$branch" ]]; then
+        git -C "$dir" rev-parse --verify --quiet "origin/$branch^{commit}" >/dev/null ||
+            { echo "$name: branch $branch is not in the fetched refs" >&2; return 1; }
+        if [[ "$current" == "$branch" ]]; then
+            git -C "$dir" merge --quiet --ff-only "origin/$branch" ||
+                { echo "$name: $branch cannot be fast-forwarded; left as it is" >&2; return 1; }
+        else
+            git -C "$dir" checkout --quiet -B "$branch" "origin/$branch" || return 1
+        fi
+    else
+        git -C "$dir" fetch --quiet origin HEAD && git -C "$dir" checkout --quiet --detach FETCH_HEAD || return 1
+    fi
+    new=$(git -C "$dir" rev-parse --short HEAD)
+    echo "$name: $old -> $new on ${branch:-a detached HEAD}"
+}
+
+# refresh <task> [repo]: every context clone, or the one named.
+refresh_context() {
+    local task=$1 selector=${2:-} name path status=0 found=0
+    valid_name "$task" || die "invalid task name: $task"
+    [[ -d "$TASKS_DIR/$task" ]] || die "no such task: $task"
+    while IFS=$'\t' read -r name path; do
+        [[ -n "$name" ]] || continue
+        [[ -z "$selector" || "$selector" == "$name" || "$selector" == "$path" ]] || continue
+        found=1
+        refresh_context_clone "$task" "$name" "$path" || status=1
+    done < <(task_contexts "$task")
+    if [[ $found == 0 ]]; then
+        [[ -z "$selector" ]] || die "no context repo matches $selector in $task"
+        echo "no context repos in $task"
+    fi
+    return $status
+}
+
+# Reports entries under research/context that are not clones, and clones with
+# local changes. A clean clone is generated, so it goes with the task.
+context_clone_issues() {
+    local task=$1 dir="$TASKS_DIR/$1/research/context" entry status
+    [[ -d "$dir" && ! -L "$dir" ]] || return 0
+    for entry in "$dir"/* "$dir"/.[!.]*; do
+        [[ -e "$entry" || -L "$entry" ]] || continue
+        if [[ ! -d "$entry/.git" ]]; then
+            printf '%s: custom data in research/context/%s (force close removes it)\n' "$task" "${entry##*/}"
+            continue
+        fi
+        status=$(git --no-optional-locks -C "$entry" status --porcelain --untracked-files=all 2>/dev/null) || {
+            printf '%s: unable to read research/context/%s; close blocked\n' "$task" "${entry##*/}"
+            continue
+        }
+        [[ -z "$status" ]] || printf '%s: uncommitted changes in read-only clone research/context/%s (force close removes them)\n' "$task" "${entry##*/}"
+    done
+}
+
 # --- task creation -----------------------------------------------------------
 
 add_repo() {
@@ -389,8 +504,8 @@ write_agents_md() {
 
 ## Notes for agents
 - Worker repo subfolders are task worktrees on the branch shown in Repo modes. Each worker writes only inside its assigned worktree.
-- Context-only repos are canonical checkouts listed in Repo modes; they are read-only references with no worktree or repo agent.
-- Researcher notes belong under the task root's \`research/\`; researcher never edits repository trees.
+- Context-only repos are canonical checkouts listed in Repo modes; they are read-only references with no worktree or repo agent. Only the researcher reads them, through its clones under \`research/context/\`. Workers never read them; ask the orchestrator for the facts you need.
+- Researcher notes belong under the task root's \`research/\`; researcher never edits repository trees, its context clones included.
 - Don't \`git checkout\` other branches; use the existing task worktrees.
 - Each agent's role comes from its launch prompt (~/.config/tmux/scripts/task-roles/). The orchestrator maintains the task plan and shared contracts.
 EOF
@@ -529,32 +644,40 @@ add_context() {
     file=$(task_context_file "$task")
     while IFS=$'\t' read -r existing_name existing_path; do
         [[ -n "$existing_name" ]] || continue
-        [[ "$existing_path" == "$repo" ]] && { echo "$name: already context in $task"; return 0; }
+        if [[ "$existing_path" == "$repo" ]]; then
+            clone_context "$task" "$repo" "$name"
+            echo "$name: already context in $task"
+            return 0
+        fi
         [[ "$existing_name" != "$name" ]] || die "context repo name collision in $task: $name"
     done < <(task_contexts "$task")
+    clone_context "$task" "$repo" "$name"
     tmp=$(mktemp "$(dirname "$file")/.task-context.XXXXXX")
     task_contexts "$task" > "$tmp"
     printf '%s\t%s\n' "$name" "$repo" >> "$tmp"
     chmod 600 "$tmp"
     mv -f "$tmp" "$file"
     NEW_CONTEXTS+=("$name")
-    echo "$name: recorded as read-only context"
+    echo "$name: recorded as read-only context; researcher clone at research/context/$name"
 }
 
+# Drops a context record and its researcher clone (promote and remove both end here).
 remove_context() {
-    local task=$1 selector=$2 file tmp name path found=0
+    local task=$1 selector=$2 file tmp name path found=0 removed=
     file=$(task_context_file "$task")
     [[ -f "$file" ]] || die "no context repos recorded for $task"
     tmp=$(mktemp "$(dirname "$file")/.task-context.XXXXXX")
     while IFS=$'\t' read -r name path; do
         if [[ "$selector" == "$name" || "$selector" == "$path" || "$selector" == "$(basename "$path")" ]]; then
             found=1
+            removed=$name
             continue
         fi
         [[ -n "$name" ]] && printf '%s\t%s\n' "$name" "$path" >> "$tmp"
     done < "$file"
     [[ $found == 1 ]] || { unlink "$tmp"; die "no context repo matches $selector in $task"; }
     if [[ -s "$tmp" ]]; then chmod 600 "$tmp"; mv -f "$tmp" "$file"; else unlink "$tmp"; unlink "$file"; fi
+    drop_context_clone "$task" "$removed"
 }
 
 # Summarize all data that makes task closure destructive. A normal close is
@@ -568,7 +691,7 @@ task_close_issues() {
 
     while IFS= read -r wt; do
         name=$(basename "$wt")
-        status=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) || {
+        status=$(git --no-optional-locks -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) || {
             printf '%s: unable to read git status; close blocked\n' "$name"
             continue
         }
@@ -616,7 +739,8 @@ task_close_issues() {
                 fi
                 ;;
             research)
-                if [[ -d "$entry" ]] && find "$entry" -mindepth 1 -print -quit | grep -q .; then
+                # research/context holds generated clones; context_clone_issues checks them.
+                if [[ -d "$entry" ]] && find "$entry" -mindepth 1 -maxdepth 1 ! -name context -print -quit | grep -q .; then
                     printf '%s: research notes/files (force close removes them)\n' "$task"
                 fi
                 ;;
@@ -638,6 +762,7 @@ task_close_issues() {
             *) printf '%s: additional task-root data at %s (force close removes it)\n' "$task" "$name" ;;
         esac
     done
+    context_clone_issues "$task"
 }
 
 CLAUDE_TASK_SETTINGS="{
@@ -707,7 +832,7 @@ task_branch() {
 }
 
 create_task() {
-    local task=$1 repo branch
+    local task=$1 repo name branch
     shift
     local -a workers=() contexts=()
     valid_name "$task" || die "task name must match [A-Za-z0-9._-]+ (got '$task')"
@@ -715,11 +840,27 @@ create_task() {
         case "$1" in
             --worker) (($# >= 2)) || die "--worker needs a repo path"; workers+=("$2"); shift 2 ;;
             --context) (($# >= 2)) || die "--context needs a repo path"; contexts+=("$2"); shift 2 ;;
+            --dry-run) DRY_RUN=yes; shift ;;
             *) die "unknown create option: $1" ;;
         esac
     done
     ((${#workers[@]} + ${#contexts[@]} > 0)) || die "create needs at least one --worker or --context repo"
     [[ ! -e "$TASKS_DIR/$task" ]] || die "task already exists: $task"
+    if [[ "$DRY_RUN" == yes ]]; then
+        for repo in "${workers[@]}"; do
+            repo=$(canonical_repo "$repo") || die "not a canonical git checkout under ~/Projects or ~/Work: $repo"
+            name=$(basename "$repo")
+            printf '%s: worktree %s/%s on branch %s\n' "$name" "$task" "$name" "$task"
+        done
+        for repo in "${contexts[@]}"; do
+            repo=$(canonical_repo "$repo") || die "not a canonical git checkout under ~/Projects or ~/Work: $repo"
+            name=$(basename "$repo")
+            printf '%s: clone to research/context/%s (read-only, for the researcher)\n' "$name" "$name"
+        done
+        printf 'agents-md: write AGENTS.md and its Repo modes block (no agent is started)\n'
+        printf 'runtime:   task session, nvim and srv windows, post-create hooks\n'
+        return 0
+    fi
     mkdir -p "$TASKS_DIR/$task/research"
     branch=$task
     for repo in "${workers[@]}"; do add_repo "$task" "$branch" "$repo"; done
@@ -754,13 +895,21 @@ add_task_repos() {
 }
 
 promote_context() {
-    local task=$1 selector=$2 name path branch
+    local task=$1 selector=$2 dry=${3:-no} name path branch
     valid_name "$task" || die "task name must match [A-Za-z0-9._-]+ (got '$task')"
     [[ -d "$TASKS_DIR/$task" ]] || die "no such task: $task"
     path=$(awk -F '\t' -v selector="$selector" '$1 == selector || $2 == selector { print $2; found=1; exit } END { if (!found) exit 1 }' \
         "$(task_context_file "$task")") || die "no context repo matches $selector in $task"
     name=$(basename "$path")
     branch=$(task_branch "$task")
+    if [[ "$dry" == yes ]]; then
+        printf '%s: worktree %s/%s on branch %s (git worktree add)\n' "$name" "$task" "$name" "$branch"
+        printf 'clone:     remove research/context/%s\n' "$name"
+        printf 'record:    drop %s from .task-context.tsv; add it to .task-worker-order\n' "$name"
+        printf 'agents-md: regenerate the Repo modes block\n'
+        printf 'runtime:   nvim and srv windows, post-create hook, herdr layout\n'
+        return 0
+    fi
     add_repo "$task" "$branch" "$path" yes
     remove_context "$task" "$path"
     write_agents_md "$task" "$branch"
@@ -932,11 +1081,14 @@ demote_repo() {
 
     # Worktree removal keeps the branch; the record moves the repo to context.
     if [[ "$dry" == yes ]]; then
+        printf 'clone:     create research/context/%s from %s (read-only, for the researcher)\n' "$name" "$origin"
         printf 'worktree:  remove %s (git worktree remove%s); branch %s kept\n' "$wt" "${wtforce:+ --force}" "${branch:-?}"
         printf 'record:    drop %s from .task-worker-order; add %s as read-only context in .task-context.tsv\n' "$name" "$origin"
         printf 'agents-md: regenerate the Repo modes block\n'
         return 0
     fi
+    # The clone is made first, so a failure here leaves the worktree in place.
+    clone_context "$task" "$origin" "$name"
     git -C "$origin" worktree remove "${wtforce[@]}" "$wt" || die "could not remove worktree $wt"
     git -C "$origin" worktree prune
     drop_worker_order "$task" "$name"
@@ -962,6 +1114,7 @@ repo_remove() {
         demote_repo "$task" "$name" "$dry" "$force" || return 1
     fi
     if [[ "$dry" == yes ]]; then
+        printf 'clone:     remove research/context/%s\n' "$name"
         printf 'record:    remove %s from .task-context.tsv\n' "$name"
         printf 'agents-md: regenerate the Repo modes block\n'
         printf 'branch:    kept\n'
@@ -1268,13 +1421,28 @@ pick_session() {
 # --- cleanup -----------------------------------------------------------------
 
 remove_task() {
-    local task=${1:-} force=${2:-} dir wt origin s issues wts=() origins=() settings
+    local task=${1:-} force=${2:-} dry=${3:-no} dir wt origin s issues wts=() origins=() settings d
     [[ -n "$task" ]] || die "usage: rm <task> [--force]"
     dir="$TASKS_DIR/$task"
     [[ -d "$dir" ]] || die "no such task: $task"
     mapfile -t wts < <(task_worktrees "$task")
 
     issues=$(task_close_issues "$task")
+    if [[ "$dry" == yes ]]; then
+        [[ -n "$issues" ]] && printf '%s\n' "$issues"
+        for wt in "${wts[@]}"; do printf 'worktree:  remove %s (branch kept)\n' "$wt"; done
+        for d in "$dir/research/context"/*/; do
+            [[ -d "$d" ]] && printf 'clone:     remove %s (read-only context clone)\n' "${d%/}"
+        done
+        printf 'files:     remove AGENTS.md, CLAUDE.md, REPORT.md, .task-context.tsv, .task-worker-order, the task .claude settings\n'
+        printf 'session:   stop herdr session and kill tmux session %s\n' "$(session_name "$task")"
+        if [[ -n "$issues" && "$force" != --force ]]; then
+            printf 'refused:   close would be blocked; review the items above, then close %s --force\n' "$task"
+            return 1
+        fi
+        [[ -z "$issues" ]] || printf 'note:      --force discards the items above\n'
+        return 0
+    fi
     if [[ -n "$issues" && "$force" != --force ]]; then
         printf 'Close blocked for %s; review these items first:\n%s\n' "$task" "$issues" >&2
         die "use close $task --force only after reviewing; task branches are kept"
@@ -1292,6 +1460,7 @@ remove_task() {
     rm -f "$dir/REPORT.md"
     rm -f "$(task_context_file "$task")"
     rm -f "$dir/.task-worker-order"
+    rm -rf -- "$dir/research/context"
     rmdir "$dir/research" 2>/dev/null || true
     settings=$(cat "$dir/.claude/settings.json" 2>/dev/null)
     [[ "$settings" == "$CLAUDE_TASK_SETTINGS" || "$settings" == "$CLAUDE_TASK_SETTINGS_OLD" ]] && rm -f "$dir/.claude/settings.json"
@@ -1316,11 +1485,17 @@ remove_task() {
 }
 
 close_task() {
-    local task=${1:-} force=${2:-}
-    [[ -n "$task" ]] || die "usage: close <task> [--force]"
-    [[ $# -le 2 && ( -z "$force" || "$force" == --force ) ]] || die "usage: close <task> [--force]"
+    local task=${1:-} arg force='' dry=no
+    [[ -n "$task" ]] || die "usage: close <task> [--dry-run] [--force]"
+    for arg in "${@:2}"; do
+        case "$arg" in
+            --force) force=--force ;;
+            --dry-run) dry=yes ;;
+            *) die "usage: close <task> [--dry-run] [--force]" ;;
+        esac
+    done
     valid_name "$task" || die "invalid task name: $task"
-    remove_task "$task" "$force"
+    remove_task "$task" "$force" "$dry"
 }
 
 # --- stop and list -----------------------------------------------------------
@@ -1942,10 +2117,11 @@ case "$(basename "$0"):${1:-}" in
     *:hook) run_hook "${2:?task}" "${3:?repo}" ;;
     *:create)
         shift
-        [[ $# -ge 3 ]] || die "usage: create <task> --worker repo|--context repo [...]"
+        [[ $# -ge 3 ]] || die "usage: create <task> --worker repo|--context repo [...] [--dry-run]"
         task=$1
         shift
         create_task "$task" "$@"
+        [[ "$DRY_RUN" == yes ]] && exit 0
         ensure_task_runtime "$task"
         dispatch_hooks "$task"
         ;;
@@ -1963,15 +2139,19 @@ case "$(basename "$0"):${1:-}" in
         dispatch_hooks "$task"
         ;;
     *:promote)
-        [[ $# -eq 3 ]] || die "usage: promote <task> <repo>"
-        promote_context "$2" "$3"
+        dry=no
+        [[ $# -eq 4 && "$4" == --dry-run ]] && dry=yes
+        [[ $# -eq 3 || $dry == yes ]] || die "usage: promote <task> <repo> [--dry-run]"
+        promote_context "$2" "$3" "$dry"
+        ;;
+    *:refresh)
+        shift
+        [[ $# -ge 1 && $# -le 2 ]] || die "usage: refresh <task> [repo]"
+        refresh_context "$@"
         ;;
     *:demote) shift; repo_command demote "$@" ;;
     *:remove) shift; repo_command remove "$@" ;;
-    *:close)
-        [[ $# -ge 2 && $# -le 3 ]] || die "usage: close <task> [--force]"
-        close_task "$2" "${3:-}"
-        ;;
+    *:close) shift; close_task "$@" ;;
     *:stop) shift; stop_command "$@" ;;
     *:manage) [[ -n "${2:-}" ]] || die "usage: manage <task>"; valid_name "$2" || die "invalid task name: $2"; manage_terminal "$2" ;;
     *:list) list_task_resources ;;

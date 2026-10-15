@@ -452,3 +452,117 @@ FZF_OUTPUT_FILE="$TMP_ROOT/fzf-back"; export FZF_OUTPUT_FILE
 unset FZF_OUTPUT_FILE
 grep -Fq -- '--prompt manage fixture-manage>' "$FZF_LOG" || fail 'terminal manage did not open the task list'
 printf 'PASS: terminal manage opens the task Manage list in fzf\n'
+
+# --- researcher context clones and dry runs ------------------------------------
+# A context repo's clone at research/context/<repo> is the researcher's only
+# view of it. The clone reads the canonical checkout and writes nothing into it:
+# no worktree entry, and no change to the canonical .git from create, refresh or
+# close.
+canon_state() { find "$1/.git" -printf '%P %s %T@\n' | sort; }
+tree_state() { find "$1" -printf '%P %s %T@\n' | sort; }
+clone_src="$HOME/Work/group/clonesrc"
+make_repo "$clone_src"
+printf 'v1\n' > "$clone_src/doc.txt"
+git -C "$clone_src" add doc.txt
+git -C "$clone_src" commit -qm 'doc v1'
+git -C "$clone_src" checkout -q -b feature-x
+ctask="$TASKS_DIR/clone-task"
+cclone="$ctask/research/context/clonesrc"
+
+before_canon=$(canon_state "$clone_src")
+"$SESSIONIZER" create clone-task --worker "$repo_worker" --context "$clone_src" >/dev/null || fail 'clone fixture create failed'
+[[ -d "$cclone/.git" && ! -L "$cclone" ]] || fail 'create did not make a clone for the researcher'
+[[ $(git -C "$cclone" symbolic-ref --short HEAD) == feature-x ]] || fail 'clone is not on the canonical current branch'
+[[ $(git -C "$cclone" config --get remote.origin.url) == "$clone_src" ]] || fail 'clone origin is not the canonical checkout'
+[[ $(cat "$cclone/doc.txt") == v1 ]] || fail 'clone does not hold the committed content'
+[[ $(git -C "$clone_src" worktree list --porcelain | grep -c '^worktree ') -eq 1 ]] || fail 'clone added a worktree entry to the canonical checkout'
+[[ "$(canon_state "$clone_src")" == "$before_canon" ]] || fail 'create wrote into the canonical context checkout'
+! [[ -e "$ctask/clonesrc" ]] || fail 'a context repo got a task worktree'
+printf 'PASS: create makes a read-only clone of the canonical branch without touching the canonical checkout\n'
+
+# The clone is independent: it moves only on refresh, which fast-forwards it.
+printf 'v2\n' > "$clone_src/doc.txt"
+git -C "$clone_src" commit -qam 'doc v2'
+after_commit=$(canon_state "$clone_src")
+[[ $(cat "$cclone/doc.txt") == v1 ]] || fail 'clone moved without a refresh'
+refresh_out=$("$SESSIONIZER" refresh clone-task clonesrc) || fail 'refresh failed'
+[[ $(cat "$cclone/doc.txt") == v2 ]] || fail 'refresh did not fast-forward the clone'
+grep -Fq 'feature-x' <<< "$refresh_out" || fail "refresh did not name the branch: $refresh_out"
+[[ "$(canon_state "$clone_src")" == "$after_commit" ]] || fail 'refresh wrote into the canonical context checkout'
+
+# A dirty clone is left alone and refresh says so.
+printf 'stray\n' >> "$cclone/doc.txt"
+if out=$("$SESSIONIZER" refresh clone-task clonesrc 2>&1); then fail 'refresh overwrote a dirty clone'; fi
+grep -Fq 'local changes' <<< "$out" || fail "refresh did not refuse a dirty clone: $out"
+[[ $(tail -n 1 "$cclone/doc.txt") == stray ]] || fail 'refusal changed the dirty clone'
+git -C "$cclone" checkout -q -- doc.txt
+
+# The clone follows the canonical's current branch, and its detached HEAD.
+git -C "$clone_src" checkout -q -b feature-y
+"$SESSIONIZER" refresh clone-task clonesrc >/dev/null || fail 'refresh after a branch switch failed'
+[[ $(git -C "$cclone" symbolic-ref --short HEAD) == feature-y ]] || fail 'clone did not follow the canonical branch switch'
+git -C "$clone_src" checkout -q --detach
+"$SESSIONIZER" refresh clone-task clonesrc >/dev/null || fail 'refresh of a detached canonical failed'
+[[ -z "$(git -C "$cclone" symbolic-ref --quiet HEAD || true)" ]] || fail 'clone should be detached'
+[[ $(git -C "$cclone" rev-parse HEAD) == $(git -C "$clone_src" rev-parse HEAD) ]] || fail 'detached clone is not at the canonical HEAD'
+git -C "$clone_src" checkout -q feature-y
+if "$SESSIONIZER" refresh clone-task nosuch >/dev/null 2>&1; then fail 'refresh of an unknown repo succeeded'; fi
+
+# A deleted clone is recreated by refresh.
+rm -rf "$cclone"
+"$SESSIONIZER" refresh clone-task clonesrc | grep -Fq 'recreated' || fail 'refresh did not recreate a missing clone'
+[[ -d "$cclone/.git" ]] || fail 'recreated clone is missing'
+printf 'PASS: refresh fast-forwards, follows branch and detached switches, refuses dirty clones, and recreates missing ones\n'
+
+# Dry runs change nothing. Create: the plan names the clone.
+dry_state=$(tree_state "$TASKS_DIR")
+dry_out=$("$SESSIONIZER" create dry-create --worker "$repo_worker" --context "$clone_src" --dry-run) || fail 'create --dry-run failed'
+printf 'DRY-RUN create dry-create:\n%s\n' "$dry_out"
+grep -Fq 'clonesrc: clone to research/context/clonesrc' <<< "$dry_out" || fail 'create dry run omits the context clone'
+grep -Fq 'worker: worktree dry-create/worker on branch dry-create' <<< "$dry_out" || fail 'create dry run omits the worker worktree'
+[[ ! -e "$TASKS_DIR/dry-create" ]] || fail 'create dry run created the task'
+[[ "$(tree_state "$TASKS_DIR")" == "$dry_state" ]] || fail 'create dry run changed the tasks folder'
+
+# Promote dry run: the clone is still there and nothing moved.
+dry_state=$(tree_state "$ctask")
+dry_out=$("$SESSIONIZER" promote clone-task clonesrc --dry-run) || fail 'promote --dry-run failed'
+printf 'DRY-RUN promote clone-task clonesrc:\n%s\n' "$dry_out"
+grep -Fq 'clone:     remove research/context/clonesrc' <<< "$dry_out" || fail 'promote dry run omits the clone removal'
+[[ -d "$cclone/.git" && ! -e "$ctask/clonesrc" ]] || fail 'promote dry run changed the clone or created a worktree'
+[[ "$(tree_state "$ctask")" == "$dry_state" ]] || fail 'promote dry run changed the task folder'
+
+# Promote removes the clone; demote creates it again.
+"$SESSIONIZER" promote clone-task clonesrc >/dev/null || fail 'promote failed'
+[[ ! -e "$cclone" && -e "$ctask/clonesrc/.git" ]] || fail 'promote did not remove the clone and create the worktree'
+dry_out=$("$SESSIONIZER" demote clone-task clonesrc --dry-run) || fail 'demote --dry-run failed'
+grep -Fq 'clone:     create research/context/clonesrc' <<< "$dry_out" || fail 'demote dry run omits the clone creation'
+"$SESSIONIZER" demote clone-task clonesrc >/dev/null || fail 'demote failed'
+[[ -d "$cclone/.git" && ! -e "$ctask/clonesrc" ]] || fail 'demote did not create the clone and remove the worktree'
+printf 'PASS: create, promote and demote keep the clone in step with the context record\n'
+
+# Close: a dry run lists the clone and removes nothing; a dirty clone blocks it.
+dry_state=$(tree_state "$ctask")
+close_dry=$("$SESSIONIZER" close clone-task --dry-run) || fail 'close --dry-run failed for a clean task'
+printf 'DRY-RUN close clone-task:\n%s\n' "$close_dry"
+grep -Fq 'research/context/clonesrc (read-only context clone)' <<< "$close_dry" || fail 'close dry run omits the clone'
+[[ -d "$cclone/.git" && -d "$ctask" ]] || fail 'close dry run removed the task or its clone'
+[[ "$(tree_state "$ctask")" == "$dry_state" ]] || fail 'close dry run changed the task folder'
+printf 'stray\n' >> "$cclone/doc.txt"
+if out=$("$SESSIONIZER" close clone-task 2>&1); then fail 'close accepted a dirty context clone'; fi
+grep -Fq 'uncommitted changes in read-only clone research/context/clonesrc' <<< "$out" || fail "close did not report the dirty clone: $out"
+[[ -d "$cclone/.git" ]] || fail 'blocked close removed the clone'
+git -C "$cclone" checkout -q -- doc.txt
+"$SESSIONIZER" close clone-task >/dev/null 2>&1 || fail 'clean close with a context clone was blocked'
+[[ ! -e "$ctask" ]] || fail 'clean close left the task folder'
+git -C "$repo_worker" show-ref --verify --quiet refs/heads/clone-task || fail 'close deleted the worker branch'
+
+# Research notes still block a normal close; a clone alone does not.
+"$SESSIONIZER" create clone-notes --context "$clone_src" >/dev/null || fail 'notes fixture create failed'
+printf 'finding\n' > "$TASKS_DIR/clone-notes/research/notes.md"
+if out=$("$SESSIONIZER" close clone-notes 2>&1); then fail 'close accepted research notes'; fi
+grep -Fq 'research notes/files' <<< "$out" || fail "close did not report research notes: $out"
+if "$SESSIONIZER" close clone-notes --dry-run >/dev/null 2>&1; then fail 'close --dry-run was not refused for research notes'; fi
+"$SESSIONIZER" close clone-notes --force >/dev/null || fail 'forced close failed'
+[[ ! -e "$TASKS_DIR/clone-notes" ]] || fail 'forced close left the notes task'
+printf 'PASS: close dry runs list and remove nothing, a dirty clone or research notes block a normal close, and clean clones go with the task\n'
+printf 'PASS: --dry-run plans for create, promote, demote and close name the context clone\n'
