@@ -24,10 +24,12 @@ RESEARCH_TEXT='# researcher: step 4'
 printf '%s\n' "$DOTFILES_TEXT" > "$TASK/hooks/worker-dotfiles.md"
 printf '%s\n' "$RESEARCH_TEXT" > "$TASK/hooks/researcher.md"
 
-# run_hook <cwd> [PATH]: prints the hook output for a session started in cwd.
+# run_hook <cwd> [PATH]: prints the hook output for a session started in cwd. The
+# default PATH leaves out ~/.local/bin, so a real codegraph never starts an index here
+# (task-codegraph-index-fixture.sh covers that).
 run_hook() {
     local cwd=$1
-    (cd "$cwd" && env PATH="${2:-$PATH}" "$BASH_BIN" "$HOOK")
+    (cd "$cwd" && env PATH="${2:-/usr/bin:/bin}" "$BASH_BIN" "$HOOK")
 }
 
 # expect_text <cwd> <expected text> <label>: the output must be the SessionStart

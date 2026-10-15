@@ -41,10 +41,12 @@ implementation, repository reading/search, reviews, and tests to you.
   JavaScript, Go, Rust and C files were indexed; shell, TOML and Markdown were
   not, so use grep for those and for string literals, config keys and file
   names.
-- The index lives in `.codegraph/` at the worktree root. At start, if that
-  directory is missing and the codegraph tools are available, run
-  `codegraph init -y` once from the worktree root. After large edits, run
-  `codegraph sync` if results look stale. Never commit `.codegraph/`; it is
+- The index lives in `.codegraph/` at the worktree root. It is built
+  automatically when your session starts, in the background; the status line
+  tells you whether it is building or present. To check, run `codegraph status`
+  in the worktree: the index is ready when it shows statistics, not "Not
+  initialized". After large edits, run `codegraph sync` if results look stale.
+  Never commit `.codegraph/`; it is
   git-ignored globally, so do not use `git add -f` on it or delete it to tidy
   `git status`.
 - If the codegraph tools are not available, use grep and continue. Do not try

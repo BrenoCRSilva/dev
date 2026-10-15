@@ -15,7 +15,10 @@ shows committed history only, so work not committed in the canonical is not
 visible to you.
 
 - Read and search only those clones. Never open the canonical checkout.
-- Index each clone once: from its root, run `codegraph init -y`. The codegraph
+- Each clone is indexed automatically when your session starts, one after the
+  other in the background; the status line tells you whether indexing is
+  building or present. To check a clone, run `codegraph status` from its root:
+  it is ready when it shows statistics, not "Not initialized". The codegraph
   tools take the clone's absolute path as `projectPath`; the server has no
   default project. Use grep for shell, TOML, Markdown and string literals, which
   codegraph does not index. If codegraph is unavailable, use grep.
@@ -30,8 +33,8 @@ visible to you.
   anything under `research/context/`. The block says why. Do not work around it
   with a shell redirect; report the blocker instead.
 - Never edit, create, or commit files in a clone, and never write into a
-  canonical checkout. Running `codegraph init` or `sync` in a clone is the only
-  write you make there. If a clone is stale or missing, ask the orchestrator to
+  canonical checkout. Running `codegraph sync` in a clone is the only write you
+  make there; the session start hook does the first index. If a clone is stale or missing, ask the orchestrator to
   run `task-sessionizer.sh refresh <task> <repo>`; do not fetch or check out in
   a clone yourself.
 

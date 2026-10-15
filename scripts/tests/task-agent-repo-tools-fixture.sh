@@ -151,8 +151,9 @@ printf 'PASS: researcher gets codegraph, the assignment hook, its reports folder
 SETTINGS="$ROOT/env/.config/tmux/scripts/task-roles/worker.claude-settings.json"
 grep -Fq '"CODEGRAPH_TELEMETRY": "0"' "$SETTINGS" || fail 'worker settings lost CODEGRAPH_TELEMETRY=0'
 if grep -q 'PONYTAIL_' "$SETTINGS"; then fail 'worker settings still set no-op PONYTAIL_* variables'; fi
-if grep -rq 'CODEGRAPH_NO_WATCH' "$ROOT/env/.config/tmux/scripts"; then fail 'a tracked launcher file sets CODEGRAPH_NO_WATCH'; fi
-printf 'PASS: worker settings set only CODEGRAPH_TELEMETRY; nothing sets CODEGRAPH_NO_WATCH\n'
+# The index hook unsets CODEGRAPH_NO_WATCH (env -u) and never assigns it.
+if grep -rq 'CODEGRAPH_NO_WATCH=' "$ROOT/env/.config/tmux/scripts"; then fail 'a tracked launcher file sets CODEGRAPH_NO_WATCH'; fi
+printf 'PASS: worker settings set only CODEGRAPH_TELEMETRY; nothing assigns CODEGRAPH_NO_WATCH\n'
 
 # The tracked global ignore must hide a symlinked .codegraph (index kept outside
 # the worktree), which a trailing-slash pattern would not match.
