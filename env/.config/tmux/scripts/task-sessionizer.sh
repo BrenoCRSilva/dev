@@ -20,6 +20,7 @@
 #                                            end its nvim, language servers and
 #                                            herdr session; worktrees and branches stay
 #   task-sessionizer.sh list                 tasks with state and RAM
+#   task-sessionizer.sh manage <task>        the task's Manage list (also Ctrl-R in the picker)
 #
 # Picking a task opens it; picking a repo starts a new task from it.
 # Deps: git, tmux, fzf, fd (popup mode also uses omarchy-menu-*).
@@ -35,11 +36,17 @@ ICON_REPO=$''
 ICON_ADD=$''
 ICON_DONE=$''
 ICON_CONTEXT=$'󰈙'
-CREATE_LABEL="Create new task"
-ADD_LABEL="Add repo to task"
-CLOSE_LABEL="Close task"
-REPOS_LABEL="Task repos"
+# Top-level actions: label and description. Dispatch matches both, so a task
+# that happens to share a label is still a task.
+TOP_MANAGE_LABEL="Manage"
+TOP_MANAGE_DESC="manage a task's repos"
+TOP_CREATE_LABEL="Create"
+TOP_CREATE_DESC="start a new task"
+TOP_REMOVE_LABEL="Remove"
+TOP_REMOVE_DESC="close a task; worktrees and sessions go, branches stay"
 FINISH_LABEL="Finish selection"
+MANAGE_ADD_LABEL="Add repos"
+MANAGE_BACK_LABEL="Back"
 
 # Worktrees created in this run whose post-create hook still has to run.
 PENDING=()
@@ -985,18 +992,6 @@ repo_command() {
     esac
 }
 
-# Repo rows for the menus: "icon<TAB>name<TAB>name  worker|context".
-task_repo_rows() {
-    local task=$1 wt name path
-    while IFS= read -r wt; do
-        name=$(basename "$wt")
-        printf '%s\t%s\tworker\n' "$ICON_REPO" "$name"
-    done < <(task_worktrees "$task")
-    while IFS=$'\t' read -r name path; do
-        [[ -n "$name" ]] && printf '%s\t%s\tcontext\n' "$ICON_CONTEXT" "$name"
-    done < <(task_contexts "$task")
-}
-
 # --- session -----------------------------------------------------------------
 
 preserve_window_name() {
@@ -1536,7 +1531,7 @@ pick() {
             printf 'repo\t%s\t%s %s  %s\n' "$r" "$ICON_REPO" "$(basename "$r")" "$(dirname "${r/#$HOME/\~}")"
         done < <(list_repos)
     } | fzf -m --delimiter '\t' --with-nth 3 --print-query --expect=ctrl-a,ctrl-d,ctrl-r --prompt 'task or repo> ' \
-        --header $'enter: open task, or start a task from marked repos\ntab: mark repos · ctrl-a: add to task · ctrl-r: repos of selected task · ctrl-d: close selected task · or type a new task name')
+        --header $'enter: open task, or start a task from marked repos\ntab: mark repos · ctrl-a: add to task · ctrl-r: manage repos of selected task · ctrl-d: close selected task · or type a new task name')
     query=$(sed -n 1p <<< "$out")
     key=$(sed -n 2p <<< "$out")
     while IFS=$'\t' read -r kind value _; do
@@ -1556,7 +1551,7 @@ pick() {
     if [[ "$key" == ctrl-r ]]; then
         [[ -n "$task" && $task_count -eq 1 && ${#repos[@]} -eq 0 ]] ||
             die "Ctrl-R works on one selected task; select exactly one task and no repos"
-        repos_terminal "$task"
+        manage_terminal "$task"
         return
     fi
 
@@ -1584,49 +1579,151 @@ pick() {
     open_session "$task"
 }
 
-# Terminal flow for one task's repos: pick a repo, then an action. Demote and
-# remove show the --dry-run plan and ask before running.
-repos_terminal() {
-    local task=$1 rows sel name kind action dry_out
+# --- Manage: one flat list per task ----------------------------------------
+# Add repos, then Demote/Promote and Remove for each repo, then Back. Labels
+# are the dispatch keys; subtexts describe the action and show the repo's mode.
+# The Omarchy popup and the terminal picker (Ctrl-R) both use this list.
+
+manage_rows() {
+    local task=$1 wt name path total
+    total=$(task_repo_total "$task")
+    printf '%s\t%s\t%s\n' "$ICON_ADD" "$MANAGE_ADD_LABEL" "add worker or context repos to $task"
+    while IFS= read -r wt; do
+        name=$(basename "$wt")
+        printf '%s\tDemote %s\tworker: remove the worktree, keep the branch\n' "$ICON_CONTEXT" "$name"
+        ((total > 1)) && printf '%s\tRemove %s\tworker: demote, then drop it from the task\n' "$ICON_CONTEXT" "$name"
+    done < <(task_worktrees "$task")
+    while IFS=$'\t' read -r name path; do
+        [[ -n "$name" ]] || continue
+        printf '%s\tPromote %s\tcontext: make a worker worktree and agent\n' "$ICON_REPO" "$name"
+        ((total > 1)) && printf '%s\tRemove %s\tcontext: drop it from the task\n' "$ICON_CONTEXT" "$name"
+    done < <(task_contexts "$task")
+    printf '%s\t%s\treturn to the top level\n' "$ICON_DONE" "$MANAGE_BACK_LABEL"
+}
+
+# Dry run for a demote or remove. Sets PLAN_OUT (the plan), PLAN_REASON (the
+# refusal a forced run overrides, empty when none) and PLAN_FORCE (yes or no).
+# Returns 1 when even the forced dry run fails.
+manage_plan() {
+    local verb=$1 task=$2 name=$3
+    PLAN_REASON=""
+    PLAN_FORCE=no
+    if PLAN_OUT=$("$SELF" "$verb" "$task" "$name" --dry-run 2>&1); then
+        return 0
+    fi
+    PLAN_REASON=$PLAN_OUT
+    if PLAN_OUT=$("$SELF" "$verb" "$task" "$name" --dry-run --force 2>&1); then
+        PLAN_FORCE=yes
+        return 0
+    fi
+    return 1
+}
+
+# Popup: plan as rows, then Run or Cancel. A forced run names what it discards.
+manage_confirm_popup() {
+    local verb=$1 task=$2 name=$3 plan="" line rows sel action run_label=Run title
     local -a forcearg=()
-    rows=$(task_repo_rows "$task")
-    [[ -n "$rows" ]] || { echo "task $task has no repos"; return 0; }
-    sel=$(awk -F '\t' '{ print $2 "\t" $3 }' <<< "$rows" |
-        fzf --delimiter '\t' --with-nth 2 --prompt "repos in $task> ") || return 0
-    name=${sel%%$'\t'*}
-    kind=$(task_repo_lookup "$task" "$name" | cut -f1) || return 0
-    if [[ "$kind" == context ]]; then
-        action=$(printf 'promote\nremove\n' | fzf --prompt "$name (context)> ") || return 0
-    else
-        action=$(printf 'demote\nremove\n' | fzf --prompt "$name (worker)> ") || return 0
+    if ! manage_plan "$verb" "$task" "$name"; then
+        notify-send "Task sessionizer" "$(head -n1 <<< "$PLAN_OUT")"
+        return 0
     fi
-    if [[ "$action" == promote ]]; then
-        "$SELF" promote "$task" "$name"
-        return
-    fi
-    if dry_out=$("$SELF" "$action" "$task" "$name" --dry-run 2>&1); then
-        printf '%s\n' "$dry_out"
-    else
-        printf '%s\n' "$dry_out"
-        dry_out=$("$SELF" "$action" "$task" "$name" --dry-run --force 2>&1) || { printf '%s\n' "$dry_out" >&2; return 1; }
+    title="${verb^} $name in $task? Plan shown above"
+    if [[ "$PLAN_FORCE" == yes ]]; then
+        run_label="Run (force: discards uncommitted work)"
+        title="Force $verb $name in $task? Discards uncommitted work; plan shown above"
         forcearg=(--force)
-        printf 'Forcing discards the uncommitted work shown above:\n%s\n' "$dry_out"
+        plan+=$(printf '%s\t%s\n' "$ICON_CONTEXT" "$(head -n1 <<< "$PLAN_REASON")")$'\n'
     fi
-    confirm "Run $action $name in $task?" || return 0
-    "$SELF" "$action" "$task" "$name" "${forcearg[@]}"
+    while IFS= read -r line; do
+        plan+=$(printf '%s\t%s\n' "$ICON_CONTEXT" "$line")$'\n'
+    done <<< "$PLAN_OUT"
+    rows="$plan$(printf '%s\t%s\t%s %s in %s' "$ICON_DONE" "$run_label" "$verb" "$name" "$task")"$'\n'
+    rows+=$(printf '%s\tCancel\tkeep everything as it is' "$ICON_CONTEXT")
+    sel=$(menu_choose "$title" "$rows") || return 0
+    IFS=$'\t' read -r action _ <<< "$sel"
+    [[ "$action" == "$run_label" ]] || return 0
+    "$SELF" "$verb" "$task" "$name" "${forcearg[@]}"
+}
+
+# Terminal: print the plan, then ask before running.
+manage_confirm_terminal() {
+    local verb=$1 task=$2 name=$3 note=""
+    local -a forcearg=()
+    if ! manage_plan "$verb" "$task" "$name"; then
+        printf '%s\n' "$PLAN_OUT" >&2
+        return 0
+    fi
+    if [[ "$PLAN_FORCE" == yes ]]; then
+        printf '%s\nForcing discards the uncommitted work shown above:\n' "$PLAN_REASON"
+        forcearg=(--force)
+        note=" (force: discards uncommitted work)"
+    fi
+    printf '%s\n' "$PLAN_OUT"
+    confirm "Run $verb $name in $task?$note" || return 0
+    "$SELF" "$verb" "$task" "$name" "${forcearg[@]}"
+}
+
+manage_add_popup() {
+    local task=$1 mode
+    local -a selection=()
+    menu_repo_picker "$task" "Repos to add to $task" || return 0
+    for mode in "${MENU_WORKERS[@]}"; do selection+=(--worker "$mode"); done
+    for mode in "${MENU_CONTEXTS[@]}"; do selection+=(--context "$mode"); done
+    add_task_repos "$task" "${selection[@]}"
+}
+
+manage_add_terminal() {
+    local task=$1 repos=()
+    mapfile -t repos < <(fzf_repos "add to $task")
+    ((${#repos[@]})) && add_repos "$task" "" "${repos[@]}"
+}
+
+# Popup Manage list for one task. Every choice returns to this list; Back or
+# Escape returns to the top level.
+manage_popup() {
+    local task=$1 rows sel label
+    while :; do
+        rows=$(manage_rows "$task")
+        sel=$(menu_choose "Manage $task" "$rows") || return 0
+        IFS=$'\t' read -r label _ <<< "$sel"
+        case "$label" in
+            "$MANAGE_BACK_LABEL") return 0 ;;
+            "$MANAGE_ADD_LABEL") manage_add_popup "$task" ;;
+            "Promote "*) "$SELF" promote "$task" "${label#Promote }" ;;
+            "Demote "*) manage_confirm_popup demote "$task" "${label#Demote }" ;;
+            "Remove "*) manage_confirm_popup remove "$task" "${label#Remove }" ;;
+        esac
+    done
+}
+
+# Terminal Manage list (fzf). Esc returns to the picker.
+manage_terminal() {
+    local task=$1 rows sel label
+    while :; do
+        rows=$(manage_rows "$task")
+        sel=$(awk -F '\t' '{ print $2 "\t" $3 }' <<< "$rows" |
+            fzf --delimiter '\t' --with-nth 1,2 --prompt "manage $task> " --header 'enter: run · esc: leave') || return 0
+        IFS=$'\t' read -r label _ <<< "$sel"
+        case "$label" in
+            "$MANAGE_BACK_LABEL") return 0 ;;
+            "$MANAGE_ADD_LABEL") manage_add_terminal "$task" ;;
+            "Promote "*) "$SELF" promote "$task" "${label#Promote }" ;;
+            "Demote "*) manage_confirm_terminal demote "$task" "${label#Demote }" ;;
+            "Remove "*) manage_confirm_terminal remove "$task" "${label#Remove }" ;;
+        esac
+    done
 }
 
 # --- Omarchy menu picker (desktop keybind) -----------------------------------
 
-menu_task_rows() {
+menu_top_rows() {
     local t
     while IFS= read -r t; do
         printf '%s\t%s\t%s\n' "$ICON_TASK" "$t" "$(task_detail "$t")"
     done < <(list_tasks)
-    printf '%s\t%s\tpromote, demote or remove a task'"'"'s repos\n' "$ICON_REPO" "$REPOS_LABEL"
-    printf '%s\t%s\tadd worker or context repos to a task\n' "$ICON_ADD" "$ADD_LABEL"
-    printf '%s\t%s\tstart a task from repos\n' "$ICON_REPO" "$CREATE_LABEL"
-    printf '%s\t%s\tremove worktrees and sessions; branches stay\n' "$ICON_CONTEXT" "$CLOSE_LABEL"
+    printf '%s\t%s\t%s\n' "$ICON_REPO" "$TOP_MANAGE_LABEL" "$TOP_MANAGE_DESC"
+    printf '%s\t%s\t%s\n' "$ICON_ADD" "$TOP_CREATE_LABEL" "$TOP_CREATE_DESC"
+    printf '%s\t%s\t%s\n' "$ICON_CONTEXT" "$TOP_REMOVE_LABEL" "$TOP_REMOVE_DESC"
 }
 
 menu_existing_task_rows() {
@@ -1726,59 +1823,6 @@ close_task_menu() {
     fi
 }
 
-# Popup flow for one task's repo: pick it, then promote, demote or remove. Demote
-# and remove show the dry-run plan as rows and run only after Run is chosen.
-menu_task_repos() {
-    local task=$1 rows sel name kind action verb dry_out line plan=""
-    local -a forcearg=()
-    rows=$(task_repo_rows "$task")
-    [[ -n "$rows" ]] || return 0
-    sel=$(menu_choose "Repos in $task" "$rows") || return 0
-    IFS=$'\t' read -r name _ <<< "$sel"
-    kind=$(task_repo_lookup "$task" "$name" | cut -f1) || return 0
-    if [[ "$kind" == context ]]; then
-        rows=$(printf '%s\tPromote\tmake a worker worktree and agent\n%s\tRemove\tdrop it from the task\n%s\tCancel\tdo nothing' \
-            "$ICON_REPO" "$ICON_CONTEXT" "$ICON_DONE")
-    else
-        rows=$(printf '%s\tDemote\tremove the worktree; keep the branch\n%s\tRemove\tdemote, then drop it from the task\n%s\tCancel\tdo nothing' \
-            "$ICON_REPO" "$ICON_CONTEXT" "$ICON_DONE")
-    fi
-    sel=$(menu_choose "$name in $task" "$rows") || return 0
-    IFS=$'\t' read -r action _ <<< "$sel"
-    case "$action" in
-        Promote) "$SELF" promote "$task" "$name"; return ;;
-        Demote) verb=demote ;;
-        Remove) verb=remove ;;
-        *) return 0 ;;
-    esac
-    local reason="" run_label="Run" title
-    if ! dry_out=$("$SELF" "$verb" "$task" "$name" --dry-run 2>&1); then
-        reason=$dry_out
-        if dry_out=$("$SELF" "$verb" "$task" "$name" --dry-run --force 2>&1); then
-            forcearg=(--force)
-            run_label="Run (force: discards uncommitted work)"
-        else
-            notify-send "Task sessionizer" "$(head -n1 <<< "$reason")"
-            return 0
-        fi
-    fi
-    # A forced run shows the refusal it overrides as the first plan row.
-    if [[ -n "$reason" ]]; then
-        plan+=$(printf '%s\t%s\n' "$ICON_CONTEXT" "$(head -n1 <<< "$reason")")$'\n'
-    fi
-    while IFS= read -r line; do
-        plan+=$(printf '%s\t%s\n' "$ICON_CONTEXT" "$line")$'\n'
-    done <<< "$dry_out"
-    rows="$plan$(printf '%s\t%s\t%s %s in %s' "$ICON_DONE" "$run_label" "$verb" "$name" "$task")"$'\n'
-    rows+=$(printf '%s\tCancel\tkeep everything as it is' "$ICON_CONTEXT")
-    title="${verb^} $name in $task? Plan shown above"
-    [[ ${#forcearg[@]} -gt 0 ]] && title="Force ${verb} $name in $task? Discards uncommitted work; plan shown above"
-    sel=$(menu_choose "$title" "$rows") || return 0
-    IFS=$'\t' read -r action _ <<< "$sel"
-    [[ "$action" == "$run_label" ]] || return 0
-    "$SELF" "$verb" "$task" "$name" "${forcearg[@]}"
-}
-
 # Repeated single-select steps provide multi-select behavior with an explicit
 # mode per repo. A repo remains selected after its Worker/Context choice.
 menu_repo_picker() {
@@ -1812,53 +1856,66 @@ menu_repo_picker() {
     ((${#MENU_WORKERS[@]} + ${#MENU_CONTEXTS[@]} > 0))
 }
 
-pick_menu() {
-    local sel label detail task input mode
-    local -a selection=()
-    mkdir -p "$TASKS_DIR"
-    sel=$(menu_choose "Tasks" "$(menu_task_rows)") || return 0
-    IFS=$'\t' read -r label detail <<< "$sel"
-    case "$label" in
-        "$CREATE_LABEL")
-            input=$(menu_input "Name for new task") || return 0
-            task=$input
-            valid_name "$task" || die "task name must match [A-Za-z0-9._-]+ (got '$task')"
-            menu_repo_picker "$task" "Repos for $task" || return 0
-            selection=()
-            for mode in "${MENU_WORKERS[@]}"; do selection+=(--worker "$mode"); done
-            for mode in "${MENU_CONTEXTS[@]}"; do selection+=(--context "$mode"); done
-            create_task "$task" "${selection[@]}"
-            ;;
-        "$ADD_LABEL")
-            sel=$(menu_choose "Add repo to task" "$(menu_existing_task_rows)") || return 0
-            IFS=$'\t' read -r task detail <<< "$sel"
-            [[ -d "$TASKS_DIR/$task" ]] || return 0
-            menu_repo_picker "$task" "Repos to add to $task" || return 0
-            selection=()
-            for mode in "${MENU_WORKERS[@]}"; do selection+=(--worker "$mode"); done
-            for mode in "${MENU_CONTEXTS[@]}"; do selection+=(--context "$mode"); done
-            add_task_repos "$task" "${selection[@]}"
-            ;;
-        "$REPOS_LABEL")
-            sel=$(menu_choose "Task for repos" "$(menu_existing_task_rows)") || return 0
-            IFS=$'\t' read -r task detail <<< "$sel"
-            [[ -d "$TASKS_DIR/$task" ]] || return 0
-            menu_task_repos "$task"
-            return
-            ;;
-        "$CLOSE_LABEL")
-            sel=$(menu_choose "Task to close" "$(menu_existing_task_rows)") || return 0
-            IFS=$'\t' read -r task detail <<< "$sel"
-            [[ -d "$TASKS_DIR/$task" ]] || return 0
-            close_task_menu "$task"
-            return
-            ;;
-        *)
-            [[ -d "$TASKS_DIR/$label" ]] && open_session "$label"
-            return
-            ;;
+# Task picker for Manage: skipped when there is only one task.
+manage_pick_task() {
+    local -a tasks=()
+    local sel t
+    mapfile -t tasks < <(list_tasks)
+    case ${#tasks[@]} in
+        0) notify-send "Task sessionizer" "No tasks yet; create one first"; return 1 ;;
+        1) printf '%s\n' "${tasks[0]}"; return 0 ;;
     esac
+    sel=$(menu_choose "Manage which task?" "$(menu_existing_task_rows)") || return 1
+    IFS=$'\t' read -r t _ <<< "$sel"
+    [[ -d "$TASKS_DIR/$t" ]] || return 1
+    printf '%s\n' "$t"
+}
+
+create_popup() {
+    local task mode
+    local -a selection=()
+    task=$(menu_input "Name for new task") || return 0
+    valid_name "$task" || die "task name must match [A-Za-z0-9._-]+ (got '$task')"
+    menu_repo_picker "$task" "Repos for $task" || return 0
+    for mode in "${MENU_WORKERS[@]}"; do selection+=(--worker "$mode"); done
+    for mode in "${MENU_CONTEXTS[@]}"; do selection+=(--context "$mode"); done
+    create_task "$task" "${selection[@]}"
     open_session "$task"
+}
+
+remove_popup() {
+    local sel task detail
+    sel=$(menu_choose "Task to close" "$(menu_existing_task_rows)") || return 0
+    IFS=$'\t' read -r task detail <<< "$sel"
+    [[ -d "$TASKS_DIR/$task" ]] || return 0
+    close_task_menu "$task"
+}
+
+pick_menu() {
+    local sel label detail task
+    mkdir -p "$TASKS_DIR"
+    while :; do
+        sel=$(menu_choose "Tasks" "$(menu_top_rows)") || return 0
+        IFS=$'\t' read -r label detail <<< "$sel"
+        case "$label:$detail" in
+            "$TOP_MANAGE_LABEL:$TOP_MANAGE_DESC")
+                task=$(manage_pick_task) || continue
+                manage_popup "$task"
+                ;;
+            "$TOP_CREATE_LABEL:$TOP_CREATE_DESC")
+                create_popup
+                return
+                ;;
+            "$TOP_REMOVE_LABEL:$TOP_REMOVE_DESC")
+                remove_popup
+                return
+                ;;
+            *)
+                [[ -d "$TASKS_DIR/$label" ]] && open_session "$label"
+                return
+                ;;
+        esac
+    done
 }
 
 # Keep the tmux window open when something went wrong, so the message is seen.
@@ -1916,6 +1973,7 @@ case "$(basename "$0"):${1:-}" in
         close_task "$2" "${3:-}"
         ;;
     *:stop) shift; stop_command "$@" ;;
+    *:manage) [[ -n "${2:-}" ]] || die "usage: manage <task>"; valid_name "$2" || die "invalid task name: $2"; manage_terminal "$2" ;;
     *:list) list_task_resources ;;
     *:sessions) [[ "${2:-}" == popup ]] && TASK_POPUP=1; pick_session ;;
     # Used by the task picker and task/session menu rows.

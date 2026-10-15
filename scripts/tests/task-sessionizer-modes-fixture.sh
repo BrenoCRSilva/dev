@@ -69,7 +69,7 @@ cat > "$BIN/omarchy-menu-select" <<'EOF'
 #!/bin/sh
 prompt=$1
 rows=$(cat)
-[ -n "${MENU_ROWS_LOG:-}" ] && printf '%s\n' "$rows" >> "$MENU_ROWS_LOG"
+[ -n "${MENU_ROWS_LOG:-}" ] && printf -- '--- %s\n%s\n' "$prompt" "$rows" >> "$MENU_ROWS_LOG"
 printf '%s\n' "$prompt" >> "$MENU_SELECT_LOG"
 choice=$(head -n 1 "$MENU_SELECT_CHOICES")
 awk -F '\t' 'NF >= 2 { if (NF >= 3) print $2 "\t" $3; else print $2 }' <<EOF2 | grep -Fxq -- "$choice" || {
@@ -164,7 +164,7 @@ legacy_windows=$(grep 'new-window -d -t =fixture-legacy: -n ' "$TMUX_LOG" | sed 
 # Create task from the same rows and sequential choices the graphical menu
 # consumes: choose WORKER and CONTEXT repos, then finish multi-select.
 queue_file "$MENU_SELECT_CHOICES" \
-    $'Create new task\tstart a task from repos' \
+    $'Create\tstart a new task' \
     $'worker\t'"$(display_path "$repo_worker")" \
     $'WORKER\tCreate a task worktree, nvim/srv windows, and repo agent' \
     $'context\t'"$(display_path "$repo_context")" \
@@ -184,11 +184,13 @@ grep -Fq 'researcher never edits repository trees' "$task/AGENTS.md" || fail 'AG
 
 # Add another context through the menu's Add repo to task flow.
 queue_file "$MENU_SELECT_CHOICES" \
-    $'Add repo to task\tadd worker or context repos to a task' \
+    $'Manage\tmanage a task\'s repos' \
     $'fixture-menu\tworker, context (context) on fixture-menu' \
+    $'Add repos\tadd worker or context repos to fixture-menu' \
     $'added\t'"$(display_path "$repo_added")" \
     $'CONTEXT\tRead-only canonical checkout; no worktree or repo agent' \
-    $'Finish selection\t0 worker, 1 context chosen'
+    $'Finish selection\t0 worker, 1 context chosen' \
+    $'Back\treturn to the top level'
 : > "$TMP_ROOT/inputs"
 run_menu
 grep -Fq $'added\t'"$repo_added" "$task/.task-context.tsv" || fail 'Add repo to task did not record context checkout'
@@ -267,7 +269,8 @@ research_args=$("$TASK_AGENT" --dry-run --provider codex start researcher fixtur
 
 printf 'PASS: menu create/add, worker/context modes, AGENTS.md recording, research workspace, promotion, stable windows, and scoped agent launch\n'
 grep -Fxq 'Tasks' "$MENU_SELECT_LOG" || fail 'popup did not invoke the initial task menu'
-grep -Fxq 'Add repo to task' "$MENU_SELECT_LOG" || fail 'popup did not invoke the add-task picker'
+grep -Fxq 'Manage which task?' "$MENU_SELECT_LOG" || fail 'popup did not invoke the Manage task picker'
+grep -Fxq 'Manage fixture-menu' "$MENU_SELECT_LOG" || fail 'popup did not open the Manage list for the task'
 grep -Fxq 'Repos for fixture-menu' "$MENU_SELECT_LOG" || fail 'popup did not invoke the create-task repo picker'
 grep -Fxq 'Repos to add to fixture-menu' "$MENU_SELECT_LOG" || fail 'popup did not invoke the add-task repo picker'
 grep -Fxq 'Repo mode: worker' "$MENU_SELECT_LOG" || fail 'popup did not invoke the worker/context picker'
@@ -278,7 +281,7 @@ printf 'PASS: popup path invokes every Omarchy selector step; fzf remains termin
 # The Omarchy selector has no custom keybinding API, so close is an action,
 # task picker, and explicit Close/Cancel confirmation.
 queue_file "$MENU_SELECT_CHOICES" \
-    $'Close task\tremove worktrees and sessions; branches stay' \
+    $'Remove\tclose a task; worktrees and sessions go, branches stay' \
     $'fixture-menu\tworker, context, added (context) on fixture-menu' \
     $'Cancel\tLeave task unchanged'
 run_menu
@@ -288,7 +291,7 @@ grep -Fxq 'Close task fixture-menu?' "$MENU_SELECT_LOG" || fail 'popup close act
 printf 'PASS: popup close route can be cancelled safely\n'
 
 queue_file "$MENU_SELECT_CHOICES" \
-    $'Close task\tremove worktrees and sessions; branches stay' \
+    $'Remove\tclose a task; worktrees and sessions go, branches stay' \
     $'fixture-menu\trunning, worker, context, added (context) on fixture-menu' \
     $'Close task\tRemove worktrees and sessions; branches stay'
 TMUX_HAS_SESSION=fixture-menu; export TMUX_HAS_SESSION
@@ -368,18 +371,18 @@ printf 'PASS: demote closes the repo server window\n'
 # Popup: Task repos -> repo -> Demote -> Run (the plan rows precede Run).
 detail=$("$SESSIONIZER" rows | awk -F '\t' '$1 == "task" && $2 == "fixture-demote" { print $3 }')
 queue_file "$MENU_SELECT_CHOICES" \
-    $'Task repos\tpromote, demote or remove a task\'s repos' \
+    $'Manage\tmanage a task\'s repos' \
     $'fixture-demote\t'"$detail" \
-    $'added\tworker' \
-    $'Demote\tremove the worktree; keep the branch' \
-    $'Run\tdemote added in fixture-demote'
+    $'Demote added\tworker: remove the worktree, keep the branch' \
+    $'Run\tdemote added in fixture-demote' \
+    $'Back\treturn to the top level'
 run_menu
 [[ ! -e "$dtask/added" ]] || fail 'popup demote did not remove the worktree'
 grep -Fq $'added\t' "$dtask/.task-context.tsv" || fail 'popup demote did not record context'
 git -C "$repo_added" show-ref --verify --quiet refs/heads/fixture-demote || fail 'popup demote deleted the branch'
-grep -Fxq 'Repos in fixture-demote' "$MENU_SELECT_LOG" || fail 'popup did not open the task repos list'
 grep -Fxq 'Demote added in fixture-demote? Plan shown above' "$MENU_SELECT_LOG" || fail 'popup demote did not show its plan before Run'
-printf 'PASS: popup Task repos flow demotes a worker after a dry run and Run\n'
+[[ $(grep -Fxc -- '--- Manage fixture-demote' "$MENU_ROWS_LOG") -ge 2 ]] || fail 'demote did not return to the Manage list'
+printf 'PASS: Manage demote runs after a dry run and returns to the Manage list\n'
 
 # Popup demote of a dirty worktree: the forced run's Run row and title say
 # force, and the refusal it overrides is the first plan row.
@@ -388,11 +391,11 @@ printf 'dirty popup\n' >> "$dtask/worker/README.md"
 detail=$("$SESSIONIZER" rows | awk -F '\t' '$1 == "task" && $2 == "fixture-demote" { print $3 }')
 : > "$MENU_SELECT_LOG"
 queue_file "$MENU_SELECT_CHOICES" \
-    $'Task repos\tpromote, demote or remove a task\'s repos' \
+    $'Manage\tmanage a task\'s repos' \
     $'fixture-demote\t'"$detail" \
-    $'worker\tworker' \
-    $'Demote\tremove the worktree; keep the branch' \
-    $'Run (force: discards uncommitted work)\tdemote worker in fixture-demote'
+    $'Demote worker\tworker: remove the worktree, keep the branch' \
+    $'Run (force: discards uncommitted work)\tdemote worker in fixture-demote' \
+    $'Back\treturn to the top level'
 run_menu
 grep -Fxq 'Force demote worker in fixture-demote? Discards uncommitted work; plan shown above' "$MENU_SELECT_LOG" ||
     fail 'forced popup demote title does not say force'
@@ -404,8 +407,48 @@ printf 'PASS: popup forced demote warns about discarded work in its title, plan 
 
 # Popup rows show descriptions only: no internal action:/task: key or plan
 # label appears in any visible text (fields 2 and 3; field 1 is the icon).
-grep -Fq $'Task repos\tpromote, demote or remove a task\'s repos' "$MENU_ROWS_LOG" || fail 'Task repos row lacks its description'
+grep -Fq $'Manage\tmanage a task\'s repos' "$MENU_ROWS_LOG" || fail 'Manage row lacks its description'
 if awk -F '\t' '{ for (i = 2; i <= NF; i++) if ($i ~ /^action:/ || $i ~ /^task:/) found = 1 } END { exit found ? 0 : 1 }' "$MENU_ROWS_LOG"; then
     fail 'a popup row shows an internal action:/task: key as visible text'
 fi
-printf 'PASS: popup rows show no internal action: keys; Task repos carries its description\n'
+printf 'PASS: popup rows show no internal action: keys; Manage carries its description\n'
+
+# Flat Manage list for a task with one worker and one context repo, reached
+# through the top-level Manage row and the task picker.
+"$SESSIONIZER" create fixture-manage --worker "$repo_worker" --context "$repo_added" >/dev/null || fail 'manage fixture create failed'
+queue_file "$MENU_SELECT_CHOICES" \
+    $'Manage\tmanage a task\'s repos' \
+    $'fixture-manage\t'"$("$SESSIONIZER" rows | awk -F '\t' '$1 == "task" && $2 == "fixture-manage" { print $3 }')" \
+    $'Back\treturn to the top level'
+run_menu
+manage_labels=$(awk -F '\t' '$0 == "--- Manage fixture-manage" { delete rows; count = 0; on = 1; next } /^--- / { on = 0 } on { rows[++count] = $2 } END { for (i = 1; i <= count; i++) print rows[i] }' "$MENU_ROWS_LOG")
+expected_manage=$'Add repos\nDemote worker\nRemove worker\nPromote added\nRemove added\nBack'
+[[ "$manage_labels" == "$expected_manage" ]] || fail "flat Manage list is wrong: $(tr '\n' '|' <<< "$manage_labels")"
+top_labels=$(awk -F '\t' '$0 == "--- Tasks" { delete rows; count = 0; on = 1; next } /^--- / { on = 0 } on { rows[++count] = $2 } END { for (i = 1; i <= count; i++) print rows[i] }' "$MENU_ROWS_LOG")
+[[ $(tail -n 3 <<< "$top_labels") == $'Manage\nCreate\nRemove' ]] || fail 'top level does not end with Manage, Create, Remove'
+while IFS= read -r label; do
+    [[ -d "$TASKS_DIR/$label" ]] && continue
+    case "$label" in Manage|Create|Remove) ;; *) fail "top level shows a non-task, non-action row: $label" ;; esac
+done <<< "$top_labels"
+! grep -Fxq 'Task repos' <<< "$top_labels" && ! grep -Fxq 'Add repo to task' <<< "$top_labels" || fail 'top level still shows the old Task repos or Add repo rows'
+printf 'PASS: top level shows tasks plus Manage, Create and Remove; Manage lists a worker and a context repo flat\n'
+
+# One task: Manage skips the task picker.
+solo="$TMP_ROOT/solo-tasks"
+mkdir -p "$solo/solo-task"
+queue_file "$MENU_SELECT_CHOICES" \
+    $'Manage\tmanage a task\'s repos' \
+    $'Back\treturn to the top level'
+before_picker=$(grep -Fxc 'Manage which task?' "$MENU_SELECT_LOG")
+( export TASKS_DIR="$solo"; run_menu )
+[[ $(grep -Fxc 'Manage which task?' "$MENU_SELECT_LOG") -eq "$before_picker" ]] || fail 'Manage asked for a task picker with one task'
+grep -Fxq -- '--- Manage solo-task' "$MENU_ROWS_LOG" || fail 'one-task Manage did not open the task list'
+printf 'PASS: with one task, Manage opens that task without a picker\n'
+
+# Terminal Manage list: the fzf stub returns Back, so the list closes at once.
+printf 'Back\treturn to the top level\n' > "$TMP_ROOT/fzf-back"
+FZF_OUTPUT_FILE="$TMP_ROOT/fzf-back"; export FZF_OUTPUT_FILE
+"$SESSIONIZER" manage fixture-manage || fail 'terminal manage failed'
+unset FZF_OUTPUT_FILE
+grep -Fq -- '--prompt manage fixture-manage>' "$FZF_LOG" || fail 'terminal manage did not open the task list'
+printf 'PASS: terminal manage opens the task Manage list in fzf\n'
