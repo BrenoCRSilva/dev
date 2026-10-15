@@ -325,7 +325,7 @@ grep -Fq "canonical checkout \`$repo_worker\`" "$dtask/AGENTS.md" || fail 'AGENT
 
 "$SESSIONIZER" promote fixture-demote worker >/dev/null || fail 'promote after demote failed'
 [[ -e "$dtask/worker/.git" ]] || fail 'promote did not recreate the worktree'
-! grep -Fq $'worker\t' "$dtask/.task-context.tsv" || fail 'promote left worker as context'
+! grep -Fq $'worker\t' "$dtask/.task-context.tsv" 2>/dev/null || fail 'promote left worker as context'
 grep -Fq '**worker** — worktree' "$dtask/AGENTS.md" || fail 'AGENTS.md lacks promoted worker'
 printf 'PASS: demote -> promote round trip keeps the branch and both records\n'
 
