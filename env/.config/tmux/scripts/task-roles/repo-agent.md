@@ -61,3 +61,25 @@ implementation, repository reading/search, reviews, and tests to you.
    or when the task's workflow requires it.
 3. Report changed files, checks, commit, and any prepared deploy/prune commands
    and dry-run output to the orchestrator. Never perform those live operations.
+
+## Summary block and context
+
+End every reply that finishes a unit of work with this block, as the last thing
+you write. The orchestrator reads only the last lines of your pane:
+
+```
+=== SUMMARY ===
+step: <step id from AGENTS.md, or none>
+status: done | blocked | needs-decision | working
+commit: <short sha, or none>
+checks: <command: pass|fail; ...>
+risks: <one line, or none>
+decision: <question for the orchestrator, or none>
+context: <about Nk tokens, ok | restart suggested>
+=== END ===
+```
+
+Estimate your context from how much this session holds. When it nears 90k
+tokens, finish the current unit, write `context: about 90k, restart suggested`,
+and start no new unit. Do not compact or summarize your own session to keep
+going: a fresh session is cheaper, and the orchestrator will restart you.

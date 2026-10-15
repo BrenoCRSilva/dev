@@ -10,8 +10,9 @@
 # The researcher is started on demand, not at task creation. stop sends /exit
 # to a finished worker or researcher; a working agent needs --force. Repo agents
 # get codegraph (MCP code index) and ponytail (minimal-code rules); the
-# researcher gets codegraph only; the orchestrator gets neither. A missing tool
-# is skipped with a warning.
+# researcher gets codegraph only; the orchestrator gets neither, but its Claude
+# launch gets the status line settings (orchestrator.claude-settings.json). A
+# missing tool is skipped with a warning.
 # The provider defaults to $TASK_PROVIDER, else claude. Launching the
 # orchestrator exports TASK_PROVIDER so the agents it starts follow it.
 # --dry-run prints the command instead of running it. --resume must be the
@@ -205,6 +206,8 @@ agent_args() {
     if [[ $provider == claude ]]; then
         ARGS=(--model "${MODEL[claude:$role]}" --effort "${EFFORT[claude:$role]}" --append-system-prompt-file "$file")
         if [[ $role == repo || $role == researcher ]]; then tool_args claude; fi
+        # The orchestrator alone gets the status line (cost, context, cache).
+        if [[ $role == orchestrator ]]; then ARGS+=(--settings "$ROLES_DIR/orchestrator.claude-settings.json"); fi
         if [[ $role == repo ]]; then
             ARGS+=(--permission-mode auto --add-dir "$canonical_repo/.git")
         elif [[ $role == researcher ]]; then

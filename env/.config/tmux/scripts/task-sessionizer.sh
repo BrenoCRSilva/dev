@@ -31,6 +31,7 @@ TASKS_DIR="${TASKS_DIR:-$HOME/tasks}"
 REPO_ROOTS=("$HOME/Projects" "$HOME/Work")
 BASE_PORT=20000
 SELF=$(realpath "$0")
+TASK_ROLES_DIR="$(dirname "$SELF")/task-roles"
 AGENT_PICKER="$HOME/.config/tmux/scripts/agent-picker.sh"
 
 ICON_TASK=$''
@@ -733,6 +734,8 @@ task_close_issues() {
         [[ -n "${workers[$name]:-}" ]] && continue
         case "$name" in
             AGENTS.md|REPORT.md|.task-context.tsv|.task-worker-order) ;;
+            # The orchestrator writes its multi-line prompts here; close removes them.
+            prompts) ;;
             CLAUDE.md)
                 if [[ ! -L "$entry" && "$(cat "$entry" 2>/dev/null)" != "@AGENTS.md" ]]; then
                     printf '%s: custom task-root file %s\n' "$task" "$name"
@@ -752,8 +755,9 @@ task_close_issues() {
                         settings.local.json) ;;
                         settings.json)
                             settings=$(cat "$sub" 2>/dev/null)
-                            [[ "$settings" == "$CLAUDE_TASK_SETTINGS" || "$settings" == "$CLAUDE_TASK_SETTINGS_OLD" ]] || extra=yes
+                            generated_task_settings "$settings" || extra=yes
                             ;;
+                        agents) generated_agents "$sub" || extra=yes ;;
                         *) extra=yes ;;
                     esac
                 done
@@ -766,6 +770,24 @@ task_close_issues() {
 }
 
 CLAUDE_TASK_SETTINGS="{
+  \"permissions\": {
+    \"allow\": [
+      \"Bash(herdr:*)\",
+      \"Bash(herdr agent wait:*)\",
+      \"Bash(~/.config/tmux/scripts/task-agent.sh:*)\",
+      \"Bash($HOME/.config/tmux/scripts/task-agent.sh:*)\",
+      \"Bash(~/.config/tmux/scripts/task-sessionizer.sh refresh:*)\",
+      \"Bash($HOME/.config/tmux/scripts/task-sessionizer.sh refresh:*)\",
+      \"Bash(~/.config/tmux/scripts/task-sessionizer.sh promote:*)\",
+      \"Bash($HOME/.config/tmux/scripts/task-sessionizer.sh promote:*)\",
+      \"Bash(~/.config/tmux/scripts/task-sessionizer.sh demote:*)\",
+      \"Bash($HOME/.config/tmux/scripts/task-sessionizer.sh demote:*)\"
+    ]
+  }
+}"
+
+# Written by the previous version; a task created with it is still generated.
+CLAUDE_TASK_SETTINGS_V1="{
   \"permissions\": {
     \"allow\": [
       \"Bash(herdr:*)\",
@@ -782,17 +804,39 @@ CLAUDE_TASK_SETTINGS_OLD='{
   }
 }'
 
+# True when a task's .claude/settings.json is one this script wrote.
+generated_task_settings() {
+    [[ "$1" == "$CLAUDE_TASK_SETTINGS" || "$1" == "$CLAUDE_TASK_SETTINGS_V1" || "$1" == "$CLAUDE_TASK_SETTINGS_OLD" ]]
+}
+
+# True when a task's .claude/agents holds only the subagent files this script
+# wrote, unchanged. Anything else in it is the user's.
+generated_agents() {
+    local dir=$1 file
+    [[ -d "$dir" && ! -L "$dir" ]] || return 1
+    for file in "$dir"/* "$dir"/.[!.]*; do
+        [[ -e "$file" || -L "$file" ]] || continue
+        cmp -s "$file" "$TASK_ROLES_DIR/subagents/${file##*/}" || return 1
+    done
+}
+
 # Claude Code reads CLAUDE.md, not AGENTS.md. A symlink (rather than an
 # @AGENTS.md import) means repo agents pick it up from the parent folder
 # without the "external import" approval. The settings let the orchestrator
-# run herdr and task-agent.sh without asking.
+# run herdr and task-agent.sh without asking. The subagents (status-reader,
+# diff-reviewer) are copied in when absent, so a file the user edited is kept.
 write_claude_files() {
-    local dir="$TASKS_DIR/$1"
+    local dir="$TASKS_DIR/$1" agent
     [[ -e "$dir/CLAUDE.md" || -L "$dir/CLAUDE.md" ]] || ln -s AGENTS.md "$dir/CLAUDE.md"
     if [[ ! -e "$dir/.claude/settings.json" ]]; then
         mkdir -p "$dir/.claude"
         printf '%s\n' "$CLAUDE_TASK_SETTINGS" > "$dir/.claude/settings.json"
     fi
+    for agent in "$TASK_ROLES_DIR"/subagents/*.md; do
+        [[ -e "$dir/.claude/agents/${agent##*/}" ]] && continue
+        mkdir -p "$dir/.claude/agents"
+        cp "$agent" "$dir/.claude/agents/${agent##*/}"
+    done
 }
 
 # add_repos <task> <branch-or-empty> <repo>...
@@ -857,7 +901,7 @@ create_task() {
             name=$(basename "$repo")
             printf '%s: clone to research/context/%s (read-only, for the researcher)\n' "$name" "$name"
         done
-        printf 'agents-md: write AGENTS.md and its Repo modes block (no agent is started)\n'
+        printf 'agents-md: write AGENTS.md and its Repo modes block; CLAUDE.md, .claude settings and subagents if absent (no agent is started)\n'
         printf 'runtime:   task session, nvim and srv windows, post-create hooks\n'
         return 0
     fi
@@ -1434,7 +1478,7 @@ remove_task() {
         for d in "$dir/research/context"/*/; do
             [[ -d "$d" ]] && printf 'clone:     remove %s (read-only context clone)\n' "${d%/}"
         done
-        printf 'files:     remove AGENTS.md, CLAUDE.md, REPORT.md, .task-context.tsv, .task-worker-order, the task .claude settings\n'
+        printf 'files:     remove AGENTS.md, CLAUDE.md, REPORT.md, .task-context.tsv, .task-worker-order, prompts/, generated .claude settings and subagents\n'
         printf 'session:   stop herdr session and kill tmux session %s\n' "$(session_name "$task")"
         if [[ -n "$issues" && "$force" != --force ]]; then
             printf 'refused:   close would be blocked; review the items above, then close %s --force\n' "$task"
@@ -1460,10 +1504,11 @@ remove_task() {
     rm -f "$dir/REPORT.md"
     rm -f "$(task_context_file "$task")"
     rm -f "$dir/.task-worker-order"
-    rm -rf -- "$dir/research/context"
+    rm -rf -- "$dir/research/context" "$dir/prompts"
     rmdir "$dir/research" 2>/dev/null || true
     settings=$(cat "$dir/.claude/settings.json" 2>/dev/null)
-    [[ "$settings" == "$CLAUDE_TASK_SETTINGS" || "$settings" == "$CLAUDE_TASK_SETTINGS_OLD" ]] && rm -f "$dir/.claude/settings.json"
+    generated_task_settings "$settings" && rm -f "$dir/.claude/settings.json"
+    generated_agents "$dir/.claude/agents" && rm -rf -- "$dir/.claude/agents"
     rm -f "$dir/.claude/settings.local.json"
     rmdir "$dir/.claude" 2>/dev/null
     if ! rmdir "$dir" 2>/dev/null; then
