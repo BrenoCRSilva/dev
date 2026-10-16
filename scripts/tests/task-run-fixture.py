@@ -419,6 +419,59 @@ def scenario_lock_scope(tmp):
     check("herdr: the last JSON line of stderr is the reply", dispatch._reply('log line\n{"error": {"code": "x"}}\n') == {"error": {"code": "x"}})
 
 
+def scenario_t0_tiers(tmp):
+    """A bare keyword goes to Opus (keyword-safety); a privileged command in the report's text goes to the user."""
+    for name, summary, risks, rule, tier in (
+        ("t0-keyword", "We will install the hook next.", [], "keyword-safety", "opus"),
+        ("t0-sudo", "Packages are ready.", ["sudo pacman -S jq is needed"], "ask_user", "user"),
+    ):
+        root, fake, env = plan_root(tmp, name, [("t1", WORKER, [], False)])
+        body = turn_for(root, "t1")
+        body["report"]["summary"], body["report"]["risks"] = summary, risks
+        v1.set_agent(fake, WORKER, [body])
+        proc = daemon(env, root)
+        woke = cli(env, root, "wake-wait", timeout=60).stdout
+        check(f"{name}: tier {tier} with rule {rule}", woke.startswith("wake ") and f" {tier} t1 {rule}: " in woke, woke)
+        stop(proc)
+
+
+def scenario_relaunch_herdr(tmp):
+    """A herdr failure while relaunching is a launch failure (exit 28), not a herdr one (exit 16)."""
+    spec = importlib.util.spec_from_file_location("task_dispatch_relaunch", DISPATCH)
+    dispatch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dispatch)
+
+    def boom(*_args):
+        raise dispatch.Herdr("socket gone")
+
+    dispatch.herdr = boom
+    try:
+        dispatch.relaunch(tmp, WORKER)
+        check("relaunch: herdr error maps to Launch", False, "no exception")
+    except dispatch.Launch as error:
+        check("relaunch: herdr error maps to Launch", "socket gone" in str(error), str(error))
+
+
+def scenario_fail_node(tmp):
+    """A node already done cannot be failed: the refusal is printed and the daemon's loop keeps going."""
+    spec = importlib.util.spec_from_file_location("task_dispatch_failnode", DISPATCH)
+    dispatch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dispatch)
+
+    def refuse(conn, node, error):
+        raise dispatch.task_state.TransitionError(f"{node} is done, so it cannot fail")
+
+    real = dispatch.task_state.fail_internal
+    dispatch.task_state.fail_internal = refuse
+    try:
+        dispatch.fail_node(None, "d1", "boom")
+        check("fail_node: a refused fail does not raise", True)
+    except Exception as error:  # noqa: BLE001 - the check is that nothing escapes
+        check("fail_node: a refused fail does not raise", False, repr(error))
+    finally:
+        dispatch.task_state.fail_internal = real
+
+
 def main():
     with tempfile.TemporaryDirectory() as scratch:
         tmp = Path(scratch)
@@ -439,6 +492,9 @@ def main():
         scenario_checks(tmp)
         scenario_internal(tmp)
         scenario_lock_scope(tmp)
+        scenario_t0_tiers(tmp)
+        scenario_relaunch_herdr(tmp)
+        scenario_fail_node(tmp)
     if FAILURES:
         print(f"FAILED: {len(FAILURES)} checks")
         return 1

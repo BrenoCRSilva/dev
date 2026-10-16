@@ -77,6 +77,8 @@ LOG_LINE = re.compile(r"(\S+) (\S+) route=(continue|checkpoint|stopped:\w+) step
 QUEUE_FILE = re.compile(r"(\d+)-(.+)\.md")
 SLICE_MS = int(os.environ.get("TASK_DISPATCH_SLICE_MS", 10 * 60 * 1000))
 LAUNCH_WAIT_MS = 60 * 1000
+SHUTDOWN_S = 120  # how long a stopping daemon waits for launch threads (a fresh start can take LAUNCH_WAIT_MS)
+LAUNCHES = []  # the prompt threads of this daemon, joined at shutdown
 
 EMPTY = 0
 USAGE = 2
@@ -95,11 +97,12 @@ BUDGET = 25
 STALE = 26
 QUESTION = 27
 LAUNCH = 28
+KEYWORD = 29  # a bare safety keyword: Opus decides, not the user
 LAUNCHED = "launched"  # a message from the launch thread, not an exit code
 LOCKED = 23
 DAEMON_STOPPED = 1
 ASK_USER = 11
-STOP_NAMES = {NEEDS_DECISION: "needs_decision", OUT_OF_SCOPE: "out_of_scope", CHECKS_FAILED: "checks", BUDGET: "budget", 10: "escalate", ASK_USER: "ask_user", 20: "decision_unavailable", QUESTION: "question"}
+STOP_NAMES = {NEEDS_DECISION: "needs_decision", OUT_OF_SCOPE: "out_of_scope", CHECKS_FAILED: "checks", BUDGET: "budget", 10: "escalate", ASK_USER: "ask_user", 20: "decision_unavailable", QUESTION: "question", KEYWORD: "keyword-safety"}
 FAIL_NAMES = {BLOCKED: "blocked", NOT_STARTED: "not_started", TIMED_OUT: "timed_out", HERDR: "herdr", INTERNAL: "internal", NO_REPORT: "no_report", STALE: "stale_report", LAUNCH: "launch"}
 V2_COMMANDS = ("run", "wake-wait", "status", "wakes", "resolve", "pause", "resume")
 TICK_S = 1
@@ -187,6 +190,14 @@ def task_agent(*args):
 
 
 def relaunch(root, agent):
+    """session=fresh; a herdr failure on the way is a launch failure, not a herdr one."""
+    try:
+        _relaunch(root, agent)
+    except Herdr as error:
+        raise Launch(f"{agent} fresh start: {error}") from error
+
+
+def _relaunch(root, agent):
     """session=fresh: ends the agent's session and starts a new one in its pane, with no --resume. The hook is
     already installed, so the new session reads it. The start arguments are checked before the session is ended."""
     info = herdr("get", agent)["agent"]
@@ -506,6 +517,39 @@ def hook_text(root, nodes, node, attempt):
     return "\n".join(lines) + "\n"
 
 
+# Concrete privileged commands in the report's text: user tier. A bare keyword ("install" in prose) is not one.
+PRIVILEGED = [re.compile(p, re.IGNORECASE) for p in (
+    r"\bsudo\b",
+    r"\b(?:pacman|yay|paru|apt(?:-get)?|dnf|brew)\s+(?:-\S+\s+)*(?:install|-S\b|add\b)",
+    r"\b(?:pip3?|npm|pnpm|yarn|cargo|gem)\s+(?:\S+\s+)*?install\b[^\n]*(?:\s-g\b|--global\b|--system\b|\s/usr\b)",
+    r"\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b",
+    r"\bgit\s+push\b",
+    r"\b(?:apply|deploy)\.sh\b",
+)]
+
+
+def t0_safety(formula, data):
+    """The T0 safety tier of a report, or None. A safety path or a privileged command routes to the user (ASK_USER); a
+    bare keyword routes to Opus (KEYWORD, rule keyword-safety). Writes outside the worktree count as privileged."""
+    base = {"needs_decision": None, "files_changed": data.get("files_changed", []), "risks": data.get("risks", []), "summary": data.get("summary", "")}
+    path = DECIDE_MODULE.safety_hit(formula, {**base, "risks": [], "summary": ""})
+    if path:
+        return ASK_USER, f"safety: {path}"[:300]
+    texts = [*base["risks"], base["summary"], *(str(check.get("cmd", "")) for check in data.get("checks", []))]
+    outside = [p for p in base["files_changed"] if p.startswith(("/", ".."))]
+    if outside:
+        return ASK_USER, f"safety: writes outside the worktree: {', '.join(outside)}"[:300]
+    for pattern in PRIVILEGED:
+        for text in texts:
+            found = pattern.search(text)
+            if found:
+                return ASK_USER, f"safety: privileged {found.group(0)[:80]}"
+    keyword = DECIDE_MODULE.safety_hit(formula, {**base, "files_changed": []})
+    if keyword:
+        return KEYWORD, f"safety: {keyword}"[:300]
+    return None
+
+
 def evaluate(root, agent, node, scope, budget):
     """T0 rules, free and first: needs_decision, blocking questions, checks exit 0, files within scope, no safety
     paths, context and turns within budget. Then the report check and task-decide (v1). Returns (exit code, one line);
@@ -528,9 +572,9 @@ def evaluate(root, agent, node, scope, budget):
         outside = [path for path in data.get("files_changed", []) if not any(r.match(path) for r in regexes)]
         if outside:
             return OUT_OF_SCOPE, f"changed outside scope: {', '.join(outside)}"[:300]
-    hit = DECIDE_MODULE.safety_hit(DECIDE_MODULE.load_formula(FORMULA), data)
-    if hit:
-        return ASK_USER, f"safety: {hit}"[:300]
+    tiered = t0_safety(DECIDE_MODULE.load_formula(FORMULA), data)
+    if tiered:
+        return tiered
     if (data.get("context_estimate_k") or 0) > budget["prompt_k"]:
         return BUDGET, f"context estimate {data['context_estimate_k']}k is over the {budget['prompt_k']}k budget"
     if "turns" in data and data["turns"] > budget["turns"]:
@@ -589,6 +633,15 @@ def finish(conn, root, node, code, line, plan):
     return stop_node(conn, node, "stopped", STOP_NAMES.get(code, "decide"), line, "user" if code == ASK_USER else "opus")
 
 
+def fail_node(conn, node, error):
+    """fail_internal for a node the dispatcher could not run. A node already done or cancelled keeps its state, and the
+    refusal is printed instead of ending the daemon."""
+    try:
+        task_state.fail_internal(conn, node, error)
+    except task_state.TransitionError as refused:
+        print(f"internal: {node} not failed: {refused}", flush=True)
+
+
 def tick(conn, root, nodes, results):
     """Reconciles the plan, then installs and starts each ready node that is not paused. A node whose work raises fails
     failed:internal; the others still start."""
@@ -599,7 +652,7 @@ def tick(conn, root, nodes, results):
         try:
             launch(conn, root, nodes, node_id, results)
         except Exception as error:
-            task_state.fail_internal(conn, node_id, repr(error))
+            fail_node(conn, node_id, repr(error))
 
 
 def launch(conn, root, nodes, node_id, results):
@@ -614,7 +667,9 @@ def launch(conn, root, nodes, node_id, results):
     # The node is running before anything can fail, so a failed start routes it failed.
     prompt_at = time.time()
     task_state.start(conn, node_id, prompt_at=prompt_at, scope=node.scope)
-    threading.Thread(target=prompt_lane, args=(results, root, nodes, node, attempt, prompt_at), daemon=True).start()
+    thread = threading.Thread(target=prompt_lane, args=(results, root, nodes, node, attempt, prompt_at), daemon=True)
+    LAUNCHES[:] = [live for live in LAUNCHES if live.is_alive()] + [thread]
+    thread.start()
 
 
 def prompt_lane(results, root, nodes, node, attempt, prompt_at):
@@ -691,8 +746,14 @@ def daemon(root, start_ms, turn_ms):
             try:
                 finish(conn, root, node, code, line, known)
             except Exception as error:
-                task_state.fail_internal(conn, node, repr(error))
+                fail_node(conn, node, repr(error))
     finally:
+        # A launch still sending its prompt gets SHUTDOWN_S to finish, so its attempt is prompted before the daemon exits.
+        # shortcut: a launch still running after SHUTDOWN_S is left unprompted, and a restart watches it until its turn
+        # budget ends; upgrade: mark attempts prompted and re-prompt on restart.
+        deadline = time.monotonic() + SHUTDOWN_S
+        for thread in LAUNCHES:
+            thread.join(max(0, deadline - time.monotonic()))
         if conn is not None:
             conn.close()
         os.close(lock)
