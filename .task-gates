@@ -17,6 +17,7 @@ fixture-task-gates: bash scripts/tests/task-gates-fixture.sh
 fixture-task-guard: bash scripts/tests/task-guard-fixture.sh
 fixture-task-report: bash scripts/tests/task-report-fixture.sh
 fixture-task-decide: python3 -I scripts/tests/task-decide-fixture.py
+fixture-task-spend: python3 -I scripts/tests/task-spend-fixture.py
 fixture-task-sessionizer-layout: bash scripts/tests/task-sessionizer-layout-fixture.sh
 fixture-task-sessionizer-modes: bash scripts/tests/task-sessionizer-modes-fixture.sh
 fixture-task-sessionizer-sync: bash scripts/tests/task-sessionizer-sync-fixture.sh
