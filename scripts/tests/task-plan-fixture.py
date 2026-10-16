@@ -335,8 +335,14 @@ def scenario_reconcile():
         again = task_state.reconcile(conn, task_plan.load_plan(root))
         check("second reconcile raises no second wake", again["woken"] == 0 and again["edited"] == 0, again)
         wake_id = conn.execute("SELECT id FROM wakes WHERE node = 'a'").fetchone()[0]
-        task_state.resolve(conn, wake_id, "accepted the change")
-        check("resolve closes the wake", conn.execute("SELECT resolved_at FROM wakes WHERE id = ?", (wake_id,)).fetchone()[0])
+        try:
+            task_state.resolve(conn, wake_id, "continue")
+            refused = False
+        except task_state.TransitionError:
+            refused = True
+        check("an informational wake refuses continue", refused and conn.execute("SELECT resolved_at FROM wakes WHERE id = ?", (wake_id,)).fetchone()[0] is None)
+        task_state.resolve(conn, wake_id, "ack")
+        check("resolve(ack) closes the wake", conn.execute("SELECT resolved_at FROM wakes WHERE id = ?", (wake_id,)).fetchone()[0])
 
         (root / "plan/dag.toml").write_text(node("a") + node("r", "researcher"), encoding="utf-8")
         counts = task_state.reconcile(conn, task_plan.load_plan(root))
@@ -350,7 +356,7 @@ def scenario_reconcile():
         check("removed running node raises a wake and keeps running",
               counts["woken"] == 1 and task_state.snapshot(conn)["nodes"]["r"]["status"] == "running", counts)
         wake_r = conn.execute("SELECT id FROM wakes WHERE node = 'r'").fetchone()[0]
-        task_state.resolve(conn, wake_r, "keep it running")
+        task_state.resolve(conn, wake_r, "ack")
         again = task_state.reconcile(conn, task_plan.load_plan(root))
         check("a resolved removed-running wake does not repeat", again["woken"] == 0, again)
 

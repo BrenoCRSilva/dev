@@ -90,26 +90,29 @@ REQUIRES_UNMET = 21
 INTERNAL = 22
 CHECKS_FAILED = 24
 BUDGET = 25
+STALE = 26
+QUESTION = 27
 LOCKED = 23
 DAEMON_STOPPED = 1
 ASK_USER = 11
-STOP_NAMES = {NEEDS_DECISION: "needs_decision", OUT_OF_SCOPE: "out_of_scope", CHECKS_FAILED: "checks", BUDGET: "budget", 10: "escalate", ASK_USER: "ask_user", 20: "decision_unavailable"}
-FAIL_NAMES = {BLOCKED: "blocked", NOT_STARTED: "not_started", TIMED_OUT: "timed_out", HERDR: "herdr", INTERNAL: "internal", NO_REPORT: "no_report"}
+STOP_NAMES = {NEEDS_DECISION: "needs_decision", OUT_OF_SCOPE: "out_of_scope", CHECKS_FAILED: "checks", BUDGET: "budget", 10: "escalate", ASK_USER: "ask_user", 20: "decision_unavailable", QUESTION: "question"}
+FAIL_NAMES = {BLOCKED: "blocked", NOT_STARTED: "not_started", TIMED_OUT: "timed_out", HERDR: "herdr", INTERNAL: "internal", NO_REPORT: "no_report", STALE: "stale_report"}
 V2_COMMANDS = ("run", "wake-wait", "status", "wakes", "resolve", "pause", "resume")
 TICK_S = 1
 STOP_ROUTES = {NEEDS_DECISION: "stopped:needs_decision", OUT_OF_SCOPE: "stopped:out_of_scope"}
 
 
-def _glob_regex():
-    """task-decide's glob matcher, so Scope: globs and safety globs mean the same thing."""
+def _task_decide():
+    """task-decide as a module: its glob matcher, so Scope: globs and safety globs mean the same thing, and its safety rule set."""
     spec = importlib.util.spec_from_file_location("task_decide", DECIDE)
     assert spec is not None and spec.loader is not None, DECIDE
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.glob_regex
+    return module
 
 
-glob_regex = _glob_regex()
+DECIDE_MODULE = _task_decide()
+glob_regex = DECIDE_MODULE.glob_regex
 
 
 class Herdr(Exception):
@@ -500,8 +503,9 @@ def hook_text(root, nodes, node, attempt):
 
 
 def evaluate(root, agent, node, scope, budget):
-    """T0 rules, free and first: needs_decision, checks exit 0, files within scope, context within budget. Then
-    the report check and task-decide (v1). Returns (exit code, one line); 0 means continue."""
+    """T0 rules, free and first: needs_decision, blocking questions, checks exit 0, files within scope, no safety
+    paths, context and turns within budget. Then the report check and task-decide (v1). Returns (exit code, one line);
+    0 means continue."""
     report = report_path(root, agent, node)
     try:
         data = json.loads(report.read_text(encoding="utf-8"))
@@ -509,13 +513,19 @@ def evaluate(root, agent, node, scope, budget):
         return NO_REPORT, f"no readable report for {node}"
     if data.get("needs_decision"):
         return NEEDS_DECISION, f"needs_decision is set: {str(data['needs_decision'])[:200]}"
+    blocking = [str(q.get("text", ""))[:200] for q in data.get("questions", []) if q.get("blocking")]
+    if blocking:
+        return QUESTION, f"blocking question: {blocking[0]}"
     failed = [check.get("cmd", "?") for check in data.get("checks", []) if check.get("exit") != 0]
-    if failed or not data.get("checks"):
-        return CHECKS_FAILED, f"checks not all exit 0: {', '.join(failed) or 'no checks listed'}"[:300]
+    if failed:
+        return CHECKS_FAILED, f"checks not all exit 0: {', '.join(failed)}"[:300]
     regexes = [glob_regex(pattern) for pattern in scope]
     outside = [path for path in data.get("files_changed", []) if not any(r.match(path) for r in regexes)]
     if outside:
         return OUT_OF_SCOPE, f"changed outside scope: {', '.join(outside)}"[:300]
+    hit = DECIDE_MODULE.safety_hit(DECIDE_MODULE.load_formula(FORMULA), data)
+    if hit:
+        return ASK_USER, f"safety: {hit}"[:300]
     if (data.get("context_estimate_k") or 0) > budget["prompt_k"]:
         return BUDGET, f"context estimate {data['context_estimate_k']}k is over the {budget['prompt_k']}k budget"
     if "turns" in data and data["turns"] > budget["turns"]:
@@ -528,6 +538,10 @@ def turn_outcome(root, agent, node, scope, budget, since, start_ms, turn_ms):
         code, line = await_turn(agent, node, root, start_ms, turn_ms, since)
         if code is not None:
             return code, line
+        # A report from before this attempt's prompt is not this turn's: it fails the node before any evaluation.
+        report = report_path(root, agent, node)
+        if report.exists() and not fresh_report(report, since):
+            return STALE, f"report for {node} was written before its prompt"
         return evaluate(root, agent, node, scope, budget)
     except Herdr as error:
         return HERDR, f"{agent}: {error}"
@@ -548,8 +562,9 @@ def stop_node(conn, node, kind, name, reason, tier="opus"):
     task_state.wake(conn, node, tier, name, reason)
 
 
-def finish(conn, root, node, code, line):
-    """Settles a finished turn: writes the report to state if it is fresh, then routes the node by the outcome."""
+def finish(conn, root, node, code, line, plan):
+    """Settles a finished turn: writes the report to state if it is fresh, then routes the node by the outcome. A passing
+    node with review: opus also raises an Opus wake; its successors are not held for it."""
     agent = task_state.snapshot(conn)["nodes"][node]["agent"]
     if code in FAIL_NAMES:
         return stop_node(conn, node, "failed", FAIL_NAMES[code], line)
@@ -562,35 +577,47 @@ def finish(conn, root, node, code, line):
     if not task_state.settle(conn, node, str(report.relative_to(root)), mtime, data.get("head_sha")):
         return stop_node(conn, node, "failed", "stale_report", f"report for {node} was written before its prompt")
     if code == 0:
-        return task_state.route(conn, node, "continue")
+        task_state.route(conn, node, "continue")
+        if node in plan and plan[node].review == "opus":
+            task_state.wake(conn, node, "opus", "review", "review=opus: check this step before relying on it")
+        return None
     return stop_node(conn, node, "stopped", STOP_NAMES.get(code, "decide"), line, "user" if code == ASK_USER else "opus")
 
 
 def tick(conn, root, nodes, start_ms, turn_ms, results):
-    """Reconciles the plan, then installs and starts each ready node that is not paused. Checkpoints raise a wake."""
+    """Reconciles the plan, then installs and starts each ready node that is not paused. A node whose work raises fails
+    failed:internal; the others still start."""
     task_state.reconcile(conn, nodes)
     held = task_state.paused(conn)
     live = {key: node for key, node in nodes.items() if key not in held and node.agent not in held}
     for node_id in task_plan.ready(live, task_state.snapshot(conn)):
-        node = nodes[node_id]
-        if node.checkpoint:
-            task_state.wake_once(conn, node_id, "opus", "checkpoint", f"checkpoint {node_id}: review, then resolve continue")
-            continue
-        attempt = task_state.install(conn, node_id, node.budget)
-        (root / "hooks").mkdir(exist_ok=True)
-        (root / "hooks" / f"{node.agent}.md").write_text(hook_text(root, nodes, node, attempt), encoding="utf-8")
-        # The node is running before anything can fail, so a failed start routes it failed. prompt_at is taken before the
-        # relaunch: a report written during it is from this attempt, and an older one is still rejected.
-        prompt_at = time.time()
-        task_state.start(conn, node_id, prompt_at=prompt_at)
         try:
-            if node.session == "fresh":
-                relaunch(root, node.agent)
-            herdr("prompt", node.agent, f"Read {root}/hooks/{node.agent}.md and follow it. End with the SUMMARY block.")
-        except (Herdr, Launch) as error:
-            stop_node(conn, node_id, "failed", "herdr" if isinstance(error, Herdr) else "launch", str(error))
-            continue
-        spawn(results, root, node.agent, node_id, node.scope, node.budget, prompt_at, start_ms, turn_ms)
+            launch(conn, root, nodes, node_id, start_ms, turn_ms, results)
+        except Exception as error:
+            task_state.fail_internal(conn, node_id, repr(error))
+
+
+def launch(conn, root, nodes, node_id, start_ms, turn_ms, results):
+    """Installs and starts one ready node, or raises its checkpoint wake."""
+    node = nodes[node_id]
+    if node.checkpoint:
+        task_state.wake_once(conn, node_id, "opus", "checkpoint", f"checkpoint {node_id}: review, then resolve continue")
+        return
+    attempt = task_state.install(conn, node_id, node.budget)
+    (root / "hooks").mkdir(exist_ok=True)
+    (root / "hooks" / f"{node.agent}.md").write_text(hook_text(root, nodes, node, attempt), encoding="utf-8")
+    # The node is running before anything can fail, so a failed start routes it failed. prompt_at is taken before the
+    # relaunch: a report written during it is from this attempt, and an older one is still rejected.
+    prompt_at = time.time()
+    task_state.start(conn, node_id, prompt_at=prompt_at)
+    try:
+        if node.session == "fresh":
+            relaunch(root, node.agent)
+        herdr("prompt", node.agent, f"Read {root}/hooks/{node.agent}.md and follow it. End with the SUMMARY block.")
+    except (Herdr, Launch) as error:
+        stop_node(conn, node_id, "failed", "herdr" if isinstance(error, Herdr) else "launch", str(error))
+        return
+    spawn(results, root, node.agent, node_id, node.scope, node.budget, prompt_at, start_ms, turn_ms)
 
 
 def load_nodes(conn, root):
@@ -618,20 +645,25 @@ def daemon(root, start_ms, turn_ms):
     try:
         conn = task_state.connect(root)
         print(f"dispatcher started (pid {os.getpid()})", flush=True)
+        known = load_nodes(conn, root) or {}
         for row in task_state.running(conn):
             # A running node stays running across a restart: watch its turn again from its prompt time.
-            node = (load_nodes(conn, root) or {}).get(row["id"])
+            node = known.get(row["id"])
             budget = node.budget if node else task_plan.DEFAULTS["budget"]
             spawn(results, root, row["agent"], row["id"], node.scope if node else [], budget, row["prompt_at"], start_ms, turn_ms)
         while not STOP.is_set():
             nodes = load_nodes(conn, root)
             if nodes is not None:
+                known = nodes
                 tick(conn, root, nodes, start_ms, turn_ms, results)
             try:
                 node, code, line = results.get(timeout=TICK_S)
             except queue.Empty:
                 continue
-            finish(conn, root, node, code, line)
+            try:
+                finish(conn, root, node, code, line, known)
+            except Exception as error:
+                task_state.fail_internal(conn, node, repr(error))
     finally:
         if conn is not None:
             conn.close()

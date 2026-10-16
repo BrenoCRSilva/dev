@@ -256,7 +256,9 @@ def wake(conn, node_id, tier, rule, reason, pointers=None, options=None, audit=N
         return _wake(conn, node_id, tier, rule, reason, pointers, options, audit)
 
 
-RESOLUTIONS = ("continue", "retry", "skip", "cancel")
+RESOLUTIONS = ("continue", "retry", "skip", "cancel", "ack")
+# Wakes that report a change and need no node transition: only ack closes them.
+INFO_RULES = ("plan-changed", "removed-running", PLAN_RULE, "review")
 
 
 def resolve(conn, wake_id, resolution, release=False, note=""):
@@ -269,19 +271,30 @@ def resolve(conn, wake_id, resolution, release=False, note=""):
     skip: the node is done with route skipped, so its successors stay blocked. With release, route is continue,
     so they start (the node has no report).
     cancel: the node is cancelled with route cancelled. reconcile keeps it cancelled until its plan entry changes.
+    retry, skip and cancel also close the node's other open wakes, except checkpoints.
+    ack: closes the wake and changes no node. It is the only resolution for an informational wake (INFO_RULES) or
+    one with no node.
     """
+    if resolution not in RESOLUTIONS:
+        raise TransitionError(f"unknown resolution {resolution!r}")
     with transaction(conn):
         row = conn.execute("SELECT node, rule, resolved_at FROM wakes WHERE id = ?", (wake_id,)).fetchone()
         if row is None:
             raise TransitionError(f"unknown wake {wake_id}")
         if row["resolved_at"] is not None:
             raise TransitionError(f"wake {wake_id} is already resolved")
-        # A wake with no node (plan-invalid) only closes: its plan error clears when the plan loads.
-        if resolution in RESOLUTIONS and row["node"]:
-            _apply(conn, row["node"], row["rule"], resolution, release)
-        # Any other text only closes the wake: the plan-changed and removed-running wakes need no node transition.
-        conn.execute("UPDATE wakes SET resolved_at = ?, resolution = ? WHERE id = ?", (time.time(), resolution, wake_id))
         detail = f"wake {wake_id}: {resolution}" + (" (release)" if release else "") + (f": {note}" if note else "")
+        if resolution != "ack":
+            if not row["node"] or row["rule"] in INFO_RULES:
+                raise TransitionError(f"wake {wake_id} ({row['rule']}) is informational: resolve it with ack")
+            _apply(conn, row["node"], row["rule"], resolution, release)
+            if resolution != "continue":
+                closed = conn.execute(
+                    "UPDATE wakes SET resolved_at = ?, resolution = ? WHERE node = ? AND id != ? AND rule != 'checkpoint' AND resolved_at IS NULL",
+                    (time.time(), f"{resolution} (wake {wake_id})", row["node"], wake_id),
+                ).rowcount
+                detail += f"; closed {closed} other wake(s)" if closed else ""
+        conn.execute("UPDATE wakes SET resolved_at = ?, resolution = ? WHERE id = ?", (time.time(), resolution, wake_id))
         _event(conn, row["node"], "resolve", detail)
 
 
@@ -312,7 +325,24 @@ def _apply(conn, node_id, rule, resolution, release):
     else:
         if status == "running":
             raise TransitionError(f"{node_id} is running: wait for it to stop before cancelling")
+        if status == "done":
+            raise TransitionError(f"{node_id} is done, so it cannot be cancelled")
         conn.execute("UPDATE nodes SET status = 'cancelled', route = 'cancelled' WHERE id = ?", (node_id,))
+
+
+def fail_internal(conn, node_id, error):
+    """Routes a node failed:internal with the error and raises an Opus wake for it, when the dispatcher's own work raised.
+    Refused for a done or cancelled node, whose state must not change."""
+    with transaction(conn):
+        row = _row(conn, node_id)
+        if row["status"] in ("done", "cancelled"):
+            raise TransitionError(f"{node_id} is {row['status']}, so it cannot fail")
+        conn.execute(
+            "UPDATE nodes SET status = 'failed', route = 'failed:internal', reason = ?, tier = 'opus', ended_at = ? WHERE id = ?",
+            (error, time.time(), node_id),
+        )
+        _event(conn, node_id, "route", f"failed:internal: {error}")
+        _wake(conn, node_id, "opus", "internal", error)
 
 
 def plan_invalid(conn, error):

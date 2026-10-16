@@ -10,6 +10,7 @@ state that a restarted daemon finishes. Writes only inside a temporary folder.
 import importlib.util
 import json
 import os
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -95,12 +96,15 @@ def plan_root(tmp, name, nodes, session=None):
     return root, fake, env
 
 
-def turn_for(root, step, agent=WORKER, work=0.5, needs=None, report=True, turns=None):
+def turn_for(root, step, agent=WORKER, work=0.5, needs=None, report=True, turns=None, checks=None, questions=None, files=None):
     body = v1.turn(root, step, work=work, agent=agent)
     if needs and body["report"]:
         body["report"]["needs_decision"] = needs
     if turns is not None and body["report"]:
         body["report"]["turns"] = turns
+    for key, value in {"checks": checks, "questions": questions, "files_changed": files}.items():
+        if value is not None and body["report"]:
+            body["report"][key] = value
     if not report:
         body["report"] = None
     return body
@@ -134,6 +138,15 @@ def lines(path):
 
 def status(env, root):
     return cli(env, root, "status").stdout
+
+
+def state_module():
+    """task_state.py as a module, to set up wakes the way the dispatcher's own transitions would."""
+    spec = importlib.util.spec_from_file_location("task_state", DISPATCH.parent / "task_state.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def db(root, sql, args=()):
@@ -175,10 +188,18 @@ def scenario_retry(tmp):
     held = cli(env, root, "run")
     check("retry: a second run is refused while the lock is held", held.returncode == 23 and "held by pid" in held.stdout, held.stdout.strip())
     wake_id = woke.split()[1]
+    ts = state_module()
+    conn = ts.connect(root)
+    try:
+        ts.wake(conn, "r1", "opus", "review", "extra review wake")
+        ts.wake(conn, "r1", "opus", "checkpoint", "extra checkpoint wake")
+    finally:
+        conn.close()
     cli(env, root, "resolve", wake_id, "retry")
     done = wait_for(lambda: "worker-dotfiles: idle; done 1" in status(env, root))
     check("retry: the retried node finishes", done, status(env, root))
     check("retry: a second attempt ran", db(root, "SELECT attempt FROM nodes WHERE id = 'r1'") == [(2,)])
+    check("retry: closes the other open wakes but not the checkpoint", db(root, "SELECT rule FROM wakes WHERE node = 'r1' AND resolved_at IS NULL") == [("checkpoint",)], db(root, "SELECT rule, resolution FROM wakes WHERE node = 'r1'"))
     stop(proc)
 
 
@@ -192,6 +213,7 @@ def scenario_stale(tmp):
     proc = daemon(env, root)
     woke = cli(env, root, "wake-wait", timeout=60).stdout
     check("stale: a report older than the prompt is rejected", " stale_report: " in woke, woke)
+    check("stale: routed failed:stale_report", db(root, "SELECT status, route FROM nodes WHERE id = 's1'") == [("failed", "failed:stale_report")])
     stop(proc)
 
 
@@ -282,6 +304,99 @@ def scenario_sigterm(tmp):
     stop(again)
 
 
+def scenario_info(tmp):
+    """An informational wake is closed only by ack; a cancel on a done node is refused."""
+    root, fake, env = plan_root(tmp, "info", [("k1", WORKER, [], False)])
+    v1.set_agent(fake, WORKER, [turn_for(root, "k1", work=4.0)])
+    proc = daemon(env, root)
+    check("info: k1 is running", wait_for(lambda: "worker-dotfiles: running k1" in status(env, root)), status(env, root))
+    plan = root / "plan" / "dag.toml"
+    edited = plan.read_text(encoding="utf-8").replace('scope = ["env/.config/tmux/scripts/**"]', 'scope = ["env/.config/tmux/scripts/**", "scripts/**"]')
+    plan.with_suffix(".tmp").write_text(edited, encoding="utf-8")
+    plan.with_suffix(".tmp").replace(plan)
+    woke = cli(env, root, "wake-wait", timeout=60).stdout
+    check("info: a plan edit while running raises a plan-changed wake", " plan-changed: " in woke, woke)
+    wake_id = woke.split()[1]
+    refused = cli(env, root, "resolve", wake_id, "continue")
+    check("info: continue on an informational wake is refused", refused.returncode == 2 and "resolve it with ack" in refused.stdout, refused.stdout)
+    cli(env, root, "resolve", wake_id, "ack")
+    check("info: ack closes it", db(root, "SELECT resolution FROM wakes WHERE id = ?", (wake_id,)) == [("ack",)])
+    check("info: ack leaves the running node running", db(root, "SELECT status FROM nodes WHERE id = 'k1'") == [("running",)])
+    done = wait_for(lambda: "worker-dotfiles: idle; done 1" in status(env, root))
+    check("info: the node finishes after ack", done, status(env, root))
+    ts = state_module()
+    conn = ts.connect(root)
+    try:
+        wake_done = ts.wake(conn, "k1", "opus", "checkpoint", "a checkpoint on a done node")
+    finally:
+        conn.close()
+    cancel = cli(env, root, "resolve", str(wake_done), "cancel")
+    check("info: cancel on a done node is refused", cancel.returncode == 2 and "cannot be cancelled" in cancel.stdout, cancel.stdout)
+    check("info: the refused cancel leaves the node done", db(root, "SELECT status, route FROM nodes WHERE id = 'k1'") == [("done", "continue")])
+    stop(proc)
+
+
+def scenario_review(tmp):
+    """review = opus wakes Opus after a passing step, and does not hold its successor."""
+    root, fake, env = plan_root(tmp, "review", [("v1", WORKER, [], False), ("v2", WORKER, ["v1"], False)])
+    plan = root / "plan" / "dag.toml"
+    plan.write_text(plan.read_text(encoding="utf-8").replace('id = "v1"\n', 'id = "v1"\nreview = "opus"\n'), encoding="utf-8")
+    v1.set_agent(fake, WORKER, [turn_for(root, "v1"), turn_for(root, "v2")])
+    proc = daemon(env, root)
+    done = wait_for(lambda: "worker-dotfiles: idle; done 2" in status(env, root))
+    check("review: the successor runs after a review=opus step", done, status(env, root))
+    woke = cli(env, root, "wake-wait", timeout=60).stdout
+    check("review: a review=opus step raises an opus review wake", " opus v1 review: review=opus" in woke, woke)
+    cli(env, root, "resolve", woke.split()[1], "ack")
+    check("review: ack closes it and the node stays done", db(root, "SELECT status, route FROM nodes WHERE id = 'v1'") == [("done", "continue")] and db(root, "SELECT resolution FROM wakes WHERE rule = 'review'") == [("ack",)])
+    stop(proc)
+
+
+def scenario_question(tmp):
+    root, fake, env = plan_root(tmp, "question", [("q1", WORKER, [], False)])
+    v1.set_agent(fake, WORKER, [turn_for(root, "q1", questions=[{"text": "which path?", "blocking": True}])])
+    proc = daemon(env, root)
+    woke = cli(env, root, "wake-wait", timeout=60).stdout
+    check("question: a blocking question in the report stops the node for Opus", woke.startswith("wake ") and " opus q1 question: blocking question: which path?" in woke, woke)
+    check("question: routed stopped:question", db(root, "SELECT route FROM nodes WHERE id = 'q1'") == [("stopped:question",)])
+    stop(proc)
+
+
+def scenario_safety(tmp):
+    root, fake, env = plan_root(tmp, "safety", [("y1", WORKER, [], False)])
+    v1.set_agent(fake, WORKER, [turn_for(root, "y1", files=["env/.config/tmux/scripts/deploy-check.sh"])])
+    proc = daemon(env, root)
+    woke = cli(env, root, "wake-wait", timeout=60).stdout
+    check("safety: a safety path wakes the user", woke.startswith("wake ") and " user y1 ask_user: safety: **/*deploy* matches " in woke, woke)
+    stop(proc)
+
+
+def scenario_checks(tmp):
+    """An empty checks list is not a stop; the step continues."""
+    root, fake, env = plan_root(tmp, "checks", [("e1", WORKER, [], False)])
+    v1.set_agent(fake, WORKER, [turn_for(root, "e1", checks=[])])
+    proc = daemon(env, root)
+    done = wait_for(lambda: "worker-dotfiles: idle; done 1" in status(env, root))
+    check("checks: an empty checks list continues", done and db(root, "SELECT route FROM nodes WHERE id = 'e1'") == [("continue",)], status(env, root))
+    stop(proc)
+
+
+def scenario_internal(tmp):
+    """A dispatcher error while launching a node fails that node with its repr in the wake, and the others still run."""
+    root, fake, env = plan_root(tmp, "internal", [("i1", WORKER, [], False), ("i2", "orchestrator", [], False)])
+    v1.set_agent(fake, WORKER, [turn_for(root, "i1")])
+    hooks = root / "hooks"
+    if hooks.is_dir():
+        shutil.rmtree(hooks)
+    hooks.write_text("not a folder\n", encoding="utf-8")
+    proc = daemon(env, root)
+    woke = cli(env, root, "wake-wait", timeout=60).stdout
+    check("internal: a launch error fails the node with a wake", " i1 internal: " in woke and "FileExistsError" in woke, woke)
+    check("internal: the node is failed:internal after one attempt", db(root, "SELECT status, route, attempt FROM nodes WHERE id = 'i1'") == [("failed", "failed:internal", 1)], db(root, "SELECT status, route, attempt FROM nodes WHERE id = 'i1'"))
+    check("internal: the event carries the repr", any("failed:internal: " in row[0] and "FileExistsError" in row[0] for row in db(root, "SELECT detail FROM events WHERE kind = 'route' AND node = 'i1'")))
+    stop(proc)
+
+
 def main():
     with tempfile.TemporaryDirectory() as scratch:
         tmp = Path(scratch)
@@ -295,6 +410,12 @@ def main():
         scenario_turns(tmp)
         scenario_invalid(tmp)
         scenario_sigterm(tmp)
+        scenario_info(tmp)
+        scenario_review(tmp)
+        scenario_question(tmp)
+        scenario_safety(tmp)
+        scenario_checks(tmp)
+        scenario_internal(tmp)
     if FAILURES:
         print(f"FAILED: {len(FAILURES)} checks")
         return 1
