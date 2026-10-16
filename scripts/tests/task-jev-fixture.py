@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Offline checks for task_jev.py (arch v2 M3a-2): redaction of planted secrets, the request shapes, the
-field caps, the live gate, the answer parsing, the 429 retry and the CLI's dry run and gate refusal.
+"""Offline checks for task_jev.py (arch v2 M3a-2, M3d-1): redaction of planted secrets, the request bytes, the
+field caps, the live gate, the URL and redirect rules, the answer parsing, the 429 retry and the CLI's dry run.
 
-The network is a fake post function. The CLI runs only its dry run and its gate refusal, so nothing leaves
-the machine. Writes only inside a temporary folder.
+The network is a fake post function. The redirect check uses a loopback server that nothing else reaches, and the
+CLI runs only its dry run and its gate refusal. Writes only inside a temporary folder.
 """
 import importlib.util
 import json
@@ -11,7 +11,9 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.error
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +23,7 @@ _spec = importlib.util.spec_from_file_location("task_jev", SCRIPTS / "task_jev.p
 jev = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(jev)
 
+# Every planted secret carries PLANTED, so one substring check covers the whole corpus.
 PLANTED = [
     "OPENROUTER_API_KEY=sk-or-v1-PLANTEDKEY0123456789abcdef",
     "Authorization: Bearer PLANTEDBEARER987654321",
@@ -28,18 +31,28 @@ PLANTED = [
     '"api_key": "PLANTEDJSON"',
     "token ghp_PLANTEDGITHUB0123456789",
     "mail person@example.com",
+    'DB_PASSWORD="PLANTEDdb one" and TOKEN=\'PLANTEDxyz\'',
+    'API_KEY="PLANTED a b c" secret = "PLANTED a b"',
+    "password: PLANTEDhunter2 --password PLANTEDflag --token PLANTEDtok --password=PLANTEDeq",
+    "Authorization: Basic PLANTEDbasic==",
+    "https://user:PLANTEDurlpw@example.org/x and https://PLANTEDuser@example.org/y",
+    '{"token": 987654321, "api_key": "PLANTEDquoted \\" escaped"}',
+    "-----BEGIN OPENSSH PRIVATE KEY-----\nPLANTEDOPEN",
 ]
+PATHS = ["/home/otheruser/tasks/x", "/root/ops/y"]
 CHOICES = {"done_met": "yes", "risk_material": "no", "contract_change": "no", "next_ready": "yes",
            "privileged_action": "no"}
 KEY_VALUE = "sk-or-v1-KEYVALUE0123456789abcdef"
+URL = "https://openrouter.ai/api/alpha/decisions"
 
 
 def planted_report():
     return {
         "step": "m3a-2", "agent": "worker-dotfiles", "branch": "investigate-spending", "head_sha": "abc1234",
         "files_changed": ["env/.config/tmux/scripts/task_jev.py"], "checks": [{"command": "make test", "exit_code": 0}],
-        "risks": ["none"], "needs_decision": None, "context_estimate_k": 40,
-        "summary": "Done. " + " ".join(PLANTED) + f" wrote {Path.home()}/tasks/x",
+        "risks": ["none", PLANTED[-1]], "needs_decision": None, "context_estimate_k": 40,
+        "credentials": {"db_passwd": "PLANTEDtree", "retries": 3}, "auth_token": 987654321,
+        "summary": "Done. " + " ".join(PATHS + PLANTED[:-1]) + f" wrote {Path.home()}/tasks/x",
     }
 
 
@@ -61,10 +74,114 @@ def run_cli(args, env):
 
 
 def test_redaction():
-    text = jev.redact(" ".join(PLANTED) + f" and {Path.home()}/tasks")
-    for leaked in ("PLANTED", "person@example.com", str(Path.home())):
+    text = jev.redact(" ".join(PATHS + PLANTED[:-1]) + f" and {Path.home()}/tasks")
+    for leaked in ("PLANTED", "person@example.com", "987654321", "otheruser", "/root/", str(Path.home())):
         assert leaked not in text, (leaked, text)
-    assert "~/tasks" in text and "[email]" in text and "[private key]" in text
+    assert "~/tasks" in text and "[email]" in text and "[private key]" in text and "[token]" in text
+    assert "[private key]" in jev.redact(PLANTED[-1]) and "PLANTED" not in jev.redact(PLANTED[-1])
+
+
+def test_redaction_outputs():
+    cases = {
+        'DB_PASSWORD="PLANTEDdb one"': "DB_PASSWORD=[redacted]",
+        'secret = "PLANTED a b"': "secret = [redacted]",
+        "password: PLANTEDhunter2": "password: [redacted]",
+        "--token PLANTEDtok": "--token [redacted]",
+        "--password=PLANTEDeq": "--password=[redacted]",
+        "https://user:PLANTEDurlpw@example.org/x": "https://[redacted]@example.org/x",
+        "Authorization: Basic PLANTEDbasic==": "Authorization: [redacted]",
+        "/home/otheruser/tasks/x": "~/tasks/x",
+        "/root/ops/y": "~/ops/y",
+        "/rootfs/x": "/rootfs/x",
+        '{"api_key": "PLANTEDquoted \\" escaped", "n": 1}': '{"api_key": "[redacted]", "n": 1}',
+        "tokens: 500": "tokens: [redacted]",
+    }
+    for raw, expected in cases.items():
+        assert jev.redact(raw) == expected, (raw, jev.redact(raw))
+
+
+def test_tree_redaction():
+    tree = jev.redact_tree({"api_key": 123456789, "nested": {"auth_token": "PLANTEDtree", "retries": 3, "none": None},
+                            "checks": [{"password": "PLANTEDlist"}], "text": "OPENROUTER_API_KEY=PLANTEDenv"})
+    assert tree == {"api_key": "[redacted]", "nested": {"auth_token": "[redacted]", "retries": 3, "none": None},
+                    "checks": [{"password": "[redacted]"}], "text": "OPENROUTER_API_KEY=[redacted]"}, tree
+
+
+def test_clip_comes_after_redaction():
+    cap = jev.CAPS["report_field"]
+    token = "sk-or-v1-PLANTEDCLIP0123456789ab"
+    # Cut after "sk-or-v1-PLANTED": clipping first would leave an unmatched fragment that still shows the marker.
+    state = jev.build_state({"step": "s", "summary": "x" * (cap - 17) + " " + token}, "", [], "", "")
+    assert state["worker_report"]["summary"] == "x" * (cap - 17) + " [token]", state["worker_report"]["summary"]
+
+
+def test_request_bytes_hold_no_secret():
+    for shape in ("native", "chat"):
+        state = jev.build_state(planted_report(), "Goal\n" + PLANTED[1], ["env/x"],
+                                "C6: " + PLANTED[2] + "\n" + "y" * 40000, "diff " + PATHS[0] + " " + PLANTED[7],
+                                next_spec=PLANTED[8])
+        body = jev.build_body(state, jev.MODEL, shape, jev.asked_questions("next_step" in state))
+        request = jev.make_request(URL, KEY_VALUE, body)
+        data = request.data.decode("utf-8")
+        for leaked in ("PLANTED", "person@example.com", "987654321", "otheruser", "/home/", "/root/", KEY_VALUE):
+            assert leaked not in data, (shape, leaked)
+        parsed = json.loads(data)
+        if shape == "chat":
+            json.loads(parsed["messages"][0]["content"])
+        assert request.get_header("Authorization") == f"Bearer {KEY_VALUE}"
+        assert len(data) < 60000, len(data)
+
+
+def test_url_rules(tmp):
+    calls = []
+
+    def post(url, key, body):
+        calls.append(url)
+        return valid_native()
+
+    for url in ("https://openrouter.ai/api/alpha/decisions", "https://api.openrouter.ai/x"):
+        jev.check_url(url)
+    bad = ["http://openrouter.ai/x", "https://evil.example/x", "https://openrouter.ai.evil.example/x",
+           "https://evilopenrouter.ai/x", "https://openrouter.ai:8443/x", "https://user:pw@openrouter.ai/x",
+           "https://openrouter.ai@evil.example/x", "u"]
+    env = {"TASK_ROLE": "orchestrator", "TASK_JEV_LIVE": "1"}
+    for url in bad:
+        try:
+            jev.ask({}, url=url, shape="native", env=env, key_path=key_file(tmp), post=post)
+        except jev.Usage as error:
+            assert "pw" not in str(error), str(error)  # the refusal never echoes the URL, which may carry a password
+            continue
+        raise AssertionError(f"accepted {url}")
+    assert calls == [], "a refused URL still reached the network"
+
+
+def test_redirects_are_not_followed():
+    hits = []
+
+    class Redirector(BaseHTTPRequestHandler):
+        def do_POST(self):
+            hits.append(self.path)
+            self.send_response(307)
+            self.send_header("Location", "/second")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Redirector)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        try:
+            jev._post(f"http://127.0.0.1:{server.server_port}/first", KEY_VALUE, {})
+        except urllib.error.HTTPError as error:
+            assert error.code == 307, error.code
+        else:
+            raise AssertionError("a redirect was followed")
+        assert hits == ["/first"], hits
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_dry_run_is_redacted_for_both_shapes(tmp):
@@ -117,7 +234,7 @@ def test_gate_refuses_before_the_key(tmp):
     ]
     for env, path in cases:
         try:
-            jev.ask({}, url="u", shape="native", env=env, key_path=path, post=post)
+            jev.ask({}, url=URL, shape="native", env=env, key_path=path, post=post)
         except jev.Usage:
             continue
         raise AssertionError(f"gate let {env} through")
@@ -137,7 +254,7 @@ def test_answers_and_retry(tmp):
         return reply
 
     slept = []
-    result = jev.ask({}, url="u", shape="native", env={"TASK_ROLE": "orchestrator", "TASK_JEV_LIVE": "1"},
+    result = jev.ask({}, url=URL, shape="native", env={"TASK_ROLE": "orchestrator", "TASK_JEV_LIVE": "1"},
                      key_path=key, post=post, sleep=slept.append)
     assert slept == [2] and seen == [KEY_VALUE, KEY_VALUE], (slept, seen)
     assert result["answers"]["done_met"] == {"choice": "yes", "confidence": 0.9}, result
@@ -147,7 +264,7 @@ def test_answers_and_retry(tmp):
         raise urllib.error.HTTPError("u", 500, "down", {}, None)
 
     try:
-        jev.ask({}, url="u", shape="native", env={"TASK_ROLE": "orchestrator", "TASK_JEV_LIVE": "1"},
+        jev.ask({}, url=URL, shape="native", env={"TASK_ROLE": "orchestrator", "TASK_JEV_LIVE": "1"},
                 key_path=key, post=server_error, sleep=slept.append)
     except jev.JevError as error:
         assert str(error) == "HTTP 500" and KEY_VALUE not in str(error)
@@ -194,8 +311,14 @@ def main():
     with tempfile.TemporaryDirectory(prefix="jev-fixture-") as folder:
         tmp = Path(folder)
         test_redaction()
+        test_redaction_outputs()
+        test_tree_redaction()
+        test_clip_comes_after_redaction()
+        test_request_bytes_hold_no_secret()
         test_dry_run_is_redacted_for_both_shapes(tmp)
         test_gate_refuses_before_the_key(tmp)
+        test_url_rules(tmp)
+        test_redirects_are_not_followed()
         test_answers_and_retry(tmp)
         test_parse_rejects_bad_replies()
         test_cli_gate_refuses_without_network(tmp)

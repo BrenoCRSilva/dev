@@ -9,7 +9,7 @@ redacts it, and reads the five answers. Stdlib only.
 TASK_ROLE=orchestrator, TASK_JEV_LIVE=1 and ~/.config/task-agents/openrouter.env at mode 600, all checked
 before the key file is opened. The key comes from OPENROUTER_API_KEY, else the file's line; it is never
 printed or put in an error. Env: TASK_JEV_MODEL (typesafe/jev-1.14), TASK_JEV_SHAPE (native | chat),
-TASK_JEV_URL, TASK_JEV_KEYFILE.
+TASK_JEV_URL (https on openrouter.ai only), TASK_JEV_KEYFILE.
 
 Exit: 0 answers printed (or dry run); 2 usage (flags, gate, key); 3 unreadable or invalid input; 20 jev
 unavailable or its reply unusable (the caller escalates).
@@ -25,6 +25,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -35,7 +36,8 @@ ENDPOINTS = {
     "chat": "https://openrouter.ai/api/v1/chat/completions",
 }
 PROVIDER = {"zdr": True, "data_collection": "deny", "allow_fallbacks": False}
-CAPS = {"spec": 16000, "contract": 16000, "diffstat": 4000, "next_spec": 4000}  # ~12k tokens in all
+# Characters per text field (redacted first, then clipped); the worker report caps each field and each list alone.
+CAPS = {"spec": 16000, "contract": 16000, "diffstat": 4000, "next_spec": 4000, "report_field": 1000, "report_list": 20}
 RETRY_STATUS = {429, 529}
 TIMEOUT_S = 30
 USAGE_EXIT, INVALID_EXIT, SERVICE_EXIT = 2, 3, 20
@@ -66,17 +68,27 @@ QUESTIONS = {
     ),
 }
 
-# shortcut: regex redaction covers the common key shapes and KEY=VALUE, not every secret format; add a pattern
-# when a new kind of secret shows up in a report.
+# shortcut: regex redaction covers the common secret shapes, not every format; add a pattern when a new kind shows up.
+# Every pattern runs on one string (a tree leaf), never on dumped JSON, so an escaped quote stays intact.
+SECRET_WORD = r"(?:key|token|secret|passw(?:or)?d|passwd|authorization)"
+SECRET_NAME = re.compile(SECRET_WORD, re.I)  # a dict key with this in it has its value redacted whole
+VALUE = r"""(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s"',;]+)"""  # quoted (may hold spaces) or bare
 REDACTIONS = (
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), "[private key]"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"
+                r"|-----BEGIN [A-Z ]*PRIVATE KEY-----.*", re.S), "[private key]"),  # no END: to the end of the string
+    (re.compile(r"(?i)(\bauthorization[ \t]*:[ \t]*)(?:(?:basic|bearer|token|digest)[ \t]+)?[^\s\"',;]+"), r"\1[redacted]"),
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer [token]"),
     (re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_\w{20,}"
                 r"|\bAKIA[0-9A-Z]{16}\b|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAIza[\w-]{35}"), "[token]"),
-    (re.compile(r'(?i)"([^"\\]*(?:key|token|secret|passw(?:or)?d)[^"\\]*)"\s*:\s*"[^"\\]*"'), r'"\1": "[redacted]"'),
-    (re.compile(r"(?i)\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)\s*=\s*[^\s\"',;]+"),
-     r"\1=[redacted]"),
+    (re.compile(rf'(?i)"([^"\\]*{SECRET_WORD}[^"\\]*)"\s*:\s*(?:"(?:[^"\\]|\\.)*"|-?\d[\d.eE+-]*)'),
+     r'"\1": "[redacted]"'),
+    (re.compile(rf"(?i)(--[\w.-]*{SECRET_WORD}[\w.-]*)[ \t]+{VALUE}"), r"\1 [redacted]"),  # --token x
+    (re.compile(rf"(?i)(\b[\w.-]*{SECRET_WORD}[\w.-]*[ \t]*[:=][ \t]*)(?:(?:basic|bearer)[ \t]+)?{VALUE}"),
+     r"\1[redacted]"),  # KEY=value, password: value, --password=value
+    (re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^\s/@]+@"), r"\1[redacted]@"),  # user:password@ in a URL
     (re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}"), "[email]"),
+    (re.compile(r"/home/[^/\s\"']+"), "~"),
+    (re.compile(r"(?<![\w.-])/root(?![\w.-])"), "~"),
     (re.compile(re.escape(str(Path.home())) + r"(?![\w.-])"), "~"),
 )
 
@@ -100,17 +112,29 @@ def redact(text):
 
 
 def redact_tree(value):
+    """Redacts each string in a JSON-like tree, and any non-null value under a secret-ish key, whatever its type."""
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, dict):
-        return {key: redact_tree(item) for key, item in value.items()}
+        out = {}
+        for key, item in value.items():
+            secret = SECRET_NAME.search(key) is not None and item is not None
+            out[redact(key)] = "[redacted]" if secret else redact_tree(item)
+        return out
     if isinstance(value, list):
         return [redact_tree(item) for item in value]
     return value
 
 
-def redacted_json(body, indent=None):
-    return redact(json.dumps(body, ensure_ascii=False, indent=indent))
+def limit_report(value):
+    """Caps each string of the worker report, and each list, on its own."""
+    if isinstance(value, str):
+        return clip(value, CAPS["report_field"])
+    if isinstance(value, dict):
+        return {key: limit_report(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [limit_report(item) for item in value[:CAPS["report_list"]]]
+    return value
 
 
 def clip(text, cap):
@@ -134,16 +158,17 @@ def diffstat(worktree, base, head):
 
 
 def build_state(report, spec, scope, contract, diff, next_spec=""):
-    """The state the questions read, redacted. Every text field is capped so the request stays near 12k tokens."""
+    """The state the questions read. Each text is redacted before it is clipped, so a cut never leaves half a secret."""
     state = {
-        "step": {"id": report.get("step"), "spec": clip(spec, CAPS["spec"]), "scope": scope},
-        "worker_report": report,
-        "diffstat": clip(diff, CAPS["diffstat"]),
-        "contract_excerpt": clip(contract, CAPS["contract"]),
+        "step": {"id": redact_tree(report.get("step")), "spec": clip(redact(spec), CAPS["spec"]),
+                 "scope": redact_tree(scope)},
+        "worker_report": limit_report(redact_tree(report)),
+        "diffstat": clip(redact(diff), CAPS["diffstat"]),
+        "contract_excerpt": clip(redact(contract), CAPS["contract"]),
     }
     if next_spec:
-        state["next_step"] = {"spec": clip(next_spec, CAPS["next_spec"])}
-    return redact_tree(state)
+        state["next_step"] = {"spec": clip(redact(next_spec), CAPS["next_spec"])}
+    return state
 
 
 def load_state(args):
@@ -223,14 +248,37 @@ def load_key(env, key_path):
     raise Usage(f"{key_path} has no OPENROUTER_API_KEY line")
 
 
-def _post(url, key, body):
-    request = urllib.request.Request(
+def check_url(url):
+    """The key goes only to https on openrouter.ai or a subdomain, with no port or userinfo. The URL is not echoed: it
+    may carry a credential."""
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    if parts.scheme != "https" or parts.netloc != host or not (host == "openrouter.ai" or host.endswith(".openrouter.ai")):
+        raise Usage("TASK_JEV_URL must be an https URL on openrouter.ai, with no port or userinfo")
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would resend the key to wherever it points, so a 3xx is an HTTPError instead."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
+
+
+def make_request(url, key, body):
+    """The request as sent. The body is already redacted (build_state), so it is only encoded, never edited."""
+    return urllib.request.Request(
         url,
-        data=redacted_json(body).encode("utf-8"),
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         method="POST",
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=TIMEOUT_S) as reply:
+
+
+def _post(url, key, body):
+    with OPENER.open(make_request(url, key, body), timeout=TIMEOUT_S) as reply:
         raw = reply.read()
     try:
         return json.loads(raw)
@@ -284,6 +332,7 @@ def send(post, url, key, body, sleep):
 def ask(body, *, url, shape, env, key_path, post=_post, sleep=time.sleep, asked=None):
     """One request after the live gate. Returns {answers, latency_ms, input_tokens}; raises Usage or JevError."""
     live_gate(env, key_path)
+    check_url(url)
     key = load_key(env, key_path)
     started = time.monotonic()
     response = send(post, url, key, body, sleep)
@@ -385,7 +434,7 @@ def main(argv):
         asked = asked_questions("next_step" in state)
         body = build_body(state, env.get("TASK_JEV_MODEL", MODEL), shape, asked)
         if args.dry_run:
-            print(redacted_json(body, indent=2))
+            print(json.dumps(body, ensure_ascii=False, indent=2))
             return 0
         key_path = Path(env.get("TASK_JEV_KEYFILE", Path.home() / ".config/task-agents/openrouter.env"))
         result = ask(body, url=env.get("TASK_JEV_URL", ENDPOINTS[shape]), shape=shape, env=env, key_path=key_path,
