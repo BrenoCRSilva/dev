@@ -91,7 +91,7 @@ def build(base):
     ])
     write_lines(os.path.join(codex, "rollout.jsonl"), [
         {"type": "session_meta", "payload": {"session_id": "cx1", "cwd": os.path.join(t1, "dotfiles")}},
-        {"type": "turn_context", "payload": {"turn_id": "t-1", "model": "gpt-6-luna",
+        {"type": "turn_context", "payload": {"turn_id": "t-1", "model": "gpt-7-test",
                                              "cwd": os.path.join(t1, "dotfiles")}},
         {"type": "token_usage_record", "timestamp": "2026-10-15T14:00:00Z",
          "payload": {"turn_id": "t-1", "response_id": "r1",
@@ -153,9 +153,12 @@ def build_efficiency(base):
     write_lines(os.path.join(codex, "rollout.jsonl"), [
         {"type": "session_meta", "payload": {"session_id": "cx2", "cwd": dotfiles}},
         {"type": "turn_context", "payload": {"turn_id": "t-1", "model": "gpt-6-luna", "cwd": dotfiles}},
+        # The tool item sits just before the record of the response that made it.
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec", "call_id": "c1"}},
         {"type": "token_usage_record", "timestamp": "2026-10-16T10:30:00Z",
          "payload": {"turn_id": "t-1", "response_id": "r9",
-                     "usage": {"input_tokens": 300, "cached_input_tokens": 100, "output_tokens": 20}}},
+                     "usage": {"input_tokens": 300, "cached_input_tokens": 100, "output_tokens": 20,
+                               "reasoning_output_tokens": 5}}},
     ])
     return ["--claude-dir", claude, "--codex-dir", codex, "--tasks-dir", tasks]
 
@@ -191,23 +194,26 @@ def check_efficiency(env):
         # and worker turns per orchestrator turn (21 Claude worker turns + 1 Codex worker turn over 3).
         tasks = efficiency("--group", "task")
         check(len(tasks) == 1 and tasks[0]["task"] == "t2", f"task rows: {tasks}")
-        total = 0.0283 + 4.4e-6 + 0.02101 + 0.01
+        total = 0.0283 + 4.4e-6 + 0.02101 + 0.01 + 31e-6
         check(close(tasks[0]["orchestrator_usd_share"], 0.0283 / total, 1e-9), f"orchestrator share: {tasks[0]}")
         check(close(tasks[0]["worker_turns_per_orchestrator_turn"], 22 / 3, 1e-9), f"worker turns: {tasks[0]}")
 
         roles = {row["role"]: row for row in efficiency("--group", "role")}
         check(set(roles) == {"orchestrator", "worker-dotfiles", "researcher"}, f"role rows: {sorted(roles)}")
         worker = roles["worker-dotfiles"]
-        check(worker["turns"] == 22 and worker["sessions"] == 3 and worker["unpriced_turns"] == 1,
+        check(worker["turns"] == 22 and worker["sessions"] == 3 and worker["unpriced_turns"] == 0,
               f"worker-dotfiles row: {worker}")
         check(len(efficiency()) == 3, "default group is role")
         check(len(efficiency("--group", "role,task")) == 3, "role,task rows")
 
-        # Codex has no tool-call count and no price: its model row has no USD and no tool calls per turn.
+        # Codex turn: input 300 less 100 cached is 200 uncached; output 20 already holds the 5 reasoning tokens.
+        # Priced at luna's rates: 200 x 0.1 + 100 x 0.01 + 20 x 0.5 = 31 micro-USD. One function_call.
         models = {row["model"]: row for row in efficiency("--group", "model")}
         luna = models["gpt-6-luna"]
-        check(luna["cost_usd"] is None and luna["usd_per_turn"] is None and luna["tool_calls_per_turn"] is None
-              and luna["unpriced_turns"] == 1, f"gpt-6-luna row: {luna}")
+        check((luna["input_tokens"], luna["cache_read_tokens"], luna["output_tokens"]) == (200, 100, 20),
+              f"gpt-6-luna tokens: {luna}")
+        check(close(luna["cost_usd"], 31e-6) and luna["unpriced_turns"] == 0
+              and close(luna["tool_calls_per_turn"], 1.0), f"gpt-6-luna row: {luna}")
         check(models["claude-haiku-5-5"]["turns"] == 21, f"haiku turns: {models['claude-haiku-5-5']}")
 
         # --since is applied before grouping: from 10:03 the orchestrator has a2 and a3 only.
@@ -219,6 +225,8 @@ def check_efficiency(env):
         text = run(["--efficiency", "--group", "task", *dirs], env).stdout
         check("orchestrator share of USD" in text and "cache writes with no 5m/1h split: 1 response(s)" in text,
               f"text output: {text}")
+        check("USD (Codex: list-price equivalent (plan-billed))" in text and "Codex USD is a list-price equivalent"
+              in text, f"Codex labels: {text}")
         split = run(["--efficiency", "--split", "2026-10-16T10:03:00+00:00", *dirs], env).stdout.splitlines()
         heads = [line.split()[0] for line in split if line.startswith(("before ", "after "))]
         check(heads == ["before", "after"], f"split headers: {heads}")
@@ -226,6 +234,46 @@ def check_efficiency(env):
         run(["--efficiency", "--by", "task", *dirs], env, expect=2)
         run(["--group", "role", *dirs], env, expect=2)
         run(["--efficiency", "--split", "2026-10-16", "--json", *dirs], env, expect=2)
+
+
+def check_codex_fallback(env):
+    """A rollout with no token_usage_record uses its token_count events. last_token_usage is the per-call
+    delta, a repeated total is skipped, and each response takes the tool items since the previous event."""
+    with tempfile.TemporaryDirectory() as base:
+        dotfiles = os.path.join(base, "home", "tasks", "t4", "dotfiles")
+        codex = os.path.join(base, "codex")
+
+        def count(stamp, total, last):
+            return {"type": "event_msg", "timestamp": stamp,
+                    "payload": {"type": "token_count", "info": {"total_token_usage": total, "last_token_usage": last}}}
+
+        first = {"input_tokens": 500, "cached_input_tokens": 200, "cache_write_input_tokens": 0,
+                 "output_tokens": 30, "reasoning_output_tokens": 10}
+        write_lines(os.path.join(codex, "rollout.jsonl"), [
+            {"type": "session_meta", "payload": {"session_id": "cx4", "cwd": dotfiles}},
+            {"type": "turn_context", "payload": {"turn_id": "t-4", "model": "gpt-6-astra", "cwd": dotfiles}},
+            {"type": "response_item", "payload": {"type": "function_call", "name": "f", "call_id": "c1"}},
+            count("2026-10-16T10:00:00Z", {"input_tokens": 500, "cached_input_tokens": 200, "output_tokens": 40}, first),
+            # The same total again: a repeat of the event above, so it is skipped.
+            count("2026-10-16T10:00:01Z", {"input_tokens": 500, "cached_input_tokens": 200, "output_tokens": 40}, first),
+            {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "call_id": "c2"}},
+            count("2026-10-16T10:01:00Z", {"input_tokens": 700, "cached_input_tokens": 600, "output_tokens": 45},
+                  {"input_tokens": 200, "cached_input_tokens": 0, "output_tokens": 5}),
+        ])
+        rows = json.loads(run(["--efficiency", "--json", "--group", "model", "--codex-dir", codex,
+                               "--claude-dir", os.path.join(base, "none"), "--tasks-dir",
+                               os.path.join(base, "home", "tasks")], env).stdout)
+        check(len(rows) == 1 and rows[0]["model"] == "gpt-6-astra", f"fallback rows: {rows}")
+        row = rows[0]
+        # Two responses, not three: the repeat is skipped. Cached input is subtracted; reasoning is not added again.
+        check(row["turns"] == 2, f"repeat not skipped: {row}")
+        check((row["input_tokens"], row["cache_read_tokens"], row["output_tokens"]) == (500, 200, 35),
+              f"fallback tokens: {row}")
+        check(row["tool_calls_per_turn"] == 1.0, f"fallback tool items: {row}")
+        # 300 x 10 + 200 x 1.0 + 30 x 50 = 4,700 and 200 x 10 + 5 x 50 = 2,250 micro-USD.
+        check(close(row["cost_usd"], 6950e-6), f"fallback cost: {row}")
+
+    print("codex fallback: ok")
 
 
 def main():
@@ -248,7 +296,7 @@ def main():
                 dict(input_tokens=500, output_tokens=50, cost=(500 * 0.10 + 50 * 0.50) / 1e6, sessions=1, unpriced=0),
             ("2026-10-15", "t1", "worker-dotfiles", "claude-opus-5"):
                 dict(input_tokens=100, output_tokens=10, cost=(100 * 5.00 + 10 * 25.00) / 1e6, sessions=1, unpriced=0),
-            ("2026-10-15", "t1", "worker-dotfiles", "gpt-6-luna"):
+            ("2026-10-15", "t1", "worker-dotfiles", "gpt-7-test"):
                 dict(input_tokens=200, output_tokens=20, cost=0.0, sessions=1, unpriced=1, cache_read=100),
             ("2026-10-16", "t1", "researcher", "claude-sonnet-5-5"):
                 dict(input_tokens=1000, output_tokens=100, cost=(1000 * 2.00 + 100 * 10.00 + 10_000 * 0.20
@@ -270,7 +318,7 @@ def main():
 
         # Warnings go to stderr; the bad line and unpriced models are named there.
         stderr = run(["--json", *dirs], env).stderr
-        check("gpt-6-luna" in stderr and "claude-opus-5" not in stderr, f"unpriced models not named: {stderr}")
+        check("gpt-7-test" in stderr and "claude-opus-5" not in stderr, f"unpriced models not named: {stderr}")
         check("skipped 1 bad lines" in stderr, f"bad line not counted: {stderr}")
 
         # --since is inclusive and --until exclusive: 10-16 holds the orchestrator and researcher.
@@ -314,6 +362,7 @@ def main():
                              env).stdout) == [], "empty folder")
 
         check_efficiency(env)
+    check_codex_fallback(env)
 
     print("task-spend fixture: ok")
 

@@ -9,7 +9,9 @@
 Reads <claude-dir>/**/*.jsonl (subagent sidechains included) and <codex-dir>/**/*.jsonl
 when present. Read-only: writes nothing, no network. Each API response counts once:
 Claude streams one message as several records with the same message id, and the
-largest count seen for each field is kept; its tool_use blocks are counted by id.
+largest count seen for each field is kept; its tool_use blocks are counted by id. Codex responses
+come from token_usage_record (or token_count events when a rollout has none); their tool calls are
+the function_call and custom_tool_call items before each response. Cached input is priced apart.
 
 A response's task and role come from the cwd it ran in: <tasks>/<task> is the
 orchestrator, <tasks>/<task>/research the researcher, <tasks>/<task>/<repo> worker-<repo>,
@@ -44,7 +46,8 @@ import sys
 # USD per million tokens: Claude API list prices from the claude-api skill, cached 2026-10-06
 # (prompts/prices.json in the task root). A model's tiers are picked by its response's prompt
 # size (input + cache tokens): the first tier whose upto holds it; the last tier has upto null.
-# Codex models (gpt-6-*) have no price yet: unpriced until added here or passed with --prices.
+# Codex prices are list-price equivalents (plan-billed) from the same file, tiered at 272k prompt tokens.
+# codex-auto-review has no official price: it carries gpt-6-luna's rates as a placeholder.
 PRICES = {
     "claude-opus-5-5": [
         {"upto": None, "input": 4.00, "output": 20.00, "cache_read": 0.20,
@@ -68,8 +71,25 @@ PRICES = {
         {"upto": None, "input": 10.00, "output": 50.00, "cache_read": 0.25,
          "cache_write_5m": 12.50, "cache_write_1h": 20.00},
     ],
+    "gpt-6-astra": [
+        {"upto": 272000, "input": 10, "output": 50, "cache_read": 1.0, "cache_write_5m": 0, "cache_write_1h": 0},
+        {"upto": None, "input": 20, "output": 75, "cache_read": 2.0, "cache_write_5m": 0, "cache_write_1h": 0},
+    ],
+    "gpt-6.1-sol": [
+        {"upto": 272000, "input": 2, "output": 10, "cache_read": 0.1, "cache_write_5m": 0, "cache_write_1h": 0},
+        {"upto": None, "input": 4, "output": 15, "cache_read": 0.2, "cache_write_5m": 0, "cache_write_1h": 0},
+    ],
+    "gpt-6-luna": [
+        {"upto": 272000, "input": 0.1, "output": 0.5, "cache_read": 0.01, "cache_write_5m": 0, "cache_write_1h": 0},
+        {"upto": None, "input": 0.2, "output": 0.75, "cache_read": 0.02, "cache_write_5m": 0, "cache_write_1h": 0},
+    ],
+    "codex-auto-review": [
+        {"upto": 272000, "input": 0.1, "output": 0.5, "cache_read": 0.01, "cache_write_5m": 0, "cache_write_1h": 0},
+        {"upto": None, "input": 0.2, "output": 0.75, "cache_read": 0.02, "cache_write_5m": 0, "cache_write_1h": 0},
+    ],
 }
 TOKEN_FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
+CODEX_TOOL_ITEMS = ("function_call", "custom_tool_call")
 GROUPS = {"role": ("role",), "model": ("model",), "task": ("task",), "role,task": ("role", "task"),
           "session": ("session",)}
 # Session rows name the session and the task and role of its first response.
@@ -155,44 +175,74 @@ def claude_responses(root, counts):
             }
 
 
+def codex_response(path, stamp, response_id, session, model, cwd, usage, tools):
+    cached = num(usage.get("cached_input_tokens"))
+    cache_write = num(usage.get("cache_write_input_tokens"))
+    return {
+        "provider": "codex",
+        "key": response_id or f"{path}:{stamp}",
+        "ts": parse_ts(stamp),
+        "cwd": cwd,
+        "session": session or path,
+        "model": model or "unknown",
+        "sidechain": False,
+        # input_tokens includes the cached part, which is priced apart; reasoning is inside output_tokens.
+        "input": max(num(usage.get("input_tokens")) - cached, 0),
+        "output": num(usage.get("output_tokens")),
+        "cache_read": cached,
+        "cache_write_5m": cache_write,
+        "cache_write_1h": 0,
+        "write_unsplit": cache_write > 0,
+        "tool_ids": set(tools),
+    }
+
+
 def codex_responses(root, counts):
+    """Responses of each rollout. token_usage_record (one per response) is preferred. A rollout without
+    any uses its token_count events instead: last_token_usage is the per-call delta, and a repeated total
+    is skipped. A tool item sits just before its response's record, so a response takes the tool items
+    since the previous record (or token_count)."""
     for path in sorted(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True)):
-        turns, usage_records = {}, []
-        cwd, session = None, None
-        for record in read_lines(path, counts):
+        turns, records, counted = {}, [], []
+        cwd, session, model_now, cwd_now = None, None, None, None
+        pending_records, pending_counts = set(), set()
+        for number, record in enumerate(read_lines(path, counts)):
             if not isinstance(record, dict):
                 continue
             payload = as_dict(record.get("payload"))
             kind = record.get("type")
-            if kind == "session_meta":
+            if kind == "response_item" and payload.get("type") in CODEX_TOOL_ITEMS:
+                pending_records.add(f"{path}:{number}")
+                pending_counts.add(f"{path}:{number}")
+            elif kind == "session_meta":
                 cwd = payload.get("cwd") or cwd
                 session = payload.get("session_id") or payload.get("id") or session
             elif kind == "turn_context":
                 turns[payload.get("turn_id")] = (payload.get("model"), payload.get("cwd"))
+                model_now, cwd_now = payload.get("model"), payload.get("cwd")
             elif kind == "token_usage_record":
-                usage_records.append((record.get("timestamp"), payload))
-        for stamp, payload in usage_records:
-            model, turn_cwd = turns.get(payload.get("turn_id"), (None, None))
-            usage = as_dict(payload.get("usage"))
-            cached = num(usage.get("cached_input_tokens"))
-            cache_write = num(usage.get("cache_write_input_tokens"))
-            # Codex's input_tokens includes the cached part; the cache is priced apart.
-            yield {
-                "provider": "codex",
-                "key": payload.get("response_id") or f"{path}:{stamp}",
-                "ts": parse_ts(stamp),
-                "cwd": turn_cwd or cwd,
-                "session": payload.get("session_id") or session or path,
-                "model": model or "unknown",
-                "sidechain": False,
-                "input": max(num(usage.get("input_tokens")) - cached, 0),
-                "output": num(usage.get("output_tokens")),
-                "cache_read": cached,
-                "cache_write_5m": cache_write,
-                "cache_write_1h": 0,
-                "write_unsplit": cache_write > 0,
-                "tool_ids": set(),
-            }
+                records.append((record, pending_records))
+                pending_records = set()
+            elif kind == "event_msg" and payload.get("type") == "token_count":
+                counted.append((record, pending_counts, model_now, cwd_now))
+                pending_counts = set()
+        if records:
+            for record, tools in records:
+                payload = as_dict(record.get("payload"))
+                model, turn_cwd = turns.get(payload.get("turn_id"), (None, None))
+                yield codex_response(path, record.get("timestamp"), payload.get("response_id"),
+                                     payload.get("session_id") or session, model, turn_cwd or cwd,
+                                     as_dict(payload.get("usage")), tools)
+            continue
+        previous = None
+        for record, tools, model, turn_cwd in counted:
+            info = as_dict(as_dict(record.get("payload")).get("info"))
+            total = info.get("total_token_usage")
+            if not total or total == previous:
+                continue
+            previous = total
+            yield codex_response(path, record.get("timestamp"), None, session, model, turn_cwd or cwd,
+                                 as_dict(info.get("last_token_usage")), tools)
 
 
 def merge_responses(responses):
@@ -321,7 +371,6 @@ def efficiency_row(group, members):
     labels = group_labels(group)
     row = {name: members[0][name] for name in labels}
     priced = [response for response in members if response["cost"] is not None]
-    claude = [response for response in members if response["provider"] == "claude"]
     tiered = [response for response in members if response["tiered"]]
     long_tier = [response for response in tiered if response["tier"] > 0]
     tokens = {field: sum(response[field] for response in members) for field in TOKEN_FIELDS}
@@ -334,7 +383,7 @@ def efficiency_row(group, members):
         turns=len(members),
         tasks=len({response["task"] for response in members}),
         turns_per_session=ratio(len(members), len(sessions)),
-        tool_calls_per_turn=ratio(sum(len(response["tool_ids"]) for response in claude), len(claude)),
+        tool_calls_per_turn=ratio(sum(len(response["tool_ids"]) for response in members), len(members)),
         unpriced_turns=len(members) - len(priced),
         long_tier_turns=len(long_tier),
         long_tier_share=ratio(len(long_tier), len(tiered)),
@@ -431,7 +480,7 @@ EFFICIENCY_TABLES = [
         ("cache read", "cache_read_tokens", "tok"), ("write 5m", "cache_write_5m_tokens", "tok"),
         ("write 1h", "cache_write_1h_tokens", "tok"), ("output/turn", "output_per_turn", "tok"),
     ]),
-    ("USD", [
+    ("USD (Codex: list-price equivalent (plan-billed))", [
         ("USD", "cost_usd", "usd"), ("input", "usd_input", "usd"), ("output", "usd_output", "usd"),
         ("cache read", "usd_cache_read", "usd"), ("write 5m", "usd_cache_write_5m", "usd"),
         ("write 1h", "usd_cache_write_1h", "usd"), ("USD/turn", "usd_per_turn", "usd"),
@@ -447,11 +496,13 @@ TASK_TABLE = ("per task", [
     ("worker turns/orchestrator turn", "worker_turns_per_orchestrator_turn", "ratio"),
 ])
 EFFICIENCY_NOTES = [
-    "USD is a list-price estimate. Per turn, session and task it covers priced turns only (see unpriced).",
-    "tool calls/turn counts Claude turns only; Codex tool calls are not counted.",
+    "USD is a list-price estimate (Claude) or list-price equivalent (plan-billed, Codex). Per turn, session and "
+    "task it covers priced turns only (see unpriced).",
+    "tool calls/turn counts Claude tool_use blocks and Codex function_call and custom_tool_call items.",
     "prompt = input + cache read + cache write; cache hit = cache read / prompt; write share = cache write / prompt; "
     "p95 is nearest-rank.",
-    "long tier: turns priced above the first tier (Haiku prompts over 100k tokens); long share is over tiered turns.",
+    "long tier: turns priced above the first tier (Haiku over 100k prompt tokens, Codex over 272k); long share is "
+    "over tiered turns.",
     "worker turns are roles worker-<repo>; the researcher and subagents are left out.",
 ]
 
@@ -519,6 +570,10 @@ def main(argv=None):
 
     unsplit = sum(response["write_unsplit"] for response in responses)
     notes = [f"cache writes with no 5m/1h split: {unsplit} response(s), counted as 5m."] if unsplit else []
+    if any(response["provider"] == "codex" for response in responses):
+        notes.append("Codex USD is a list-price equivalent (plan-billed).")
+    if any(response["model"] == "codex-auto-review" for response in responses):
+        notes.append("codex-auto-review has no official price: it is priced at gpt-6-luna rates as a placeholder.")
     if args.efficiency:
         group = args.group or "role"
         if args.split:
