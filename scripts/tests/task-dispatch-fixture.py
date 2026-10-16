@@ -363,7 +363,7 @@ def main():
         result = run(["watch", WORKER, "--task-root", str(root)], env, root)
         expect("checkpoint marker: exit 17", result.returncode, 17)
 
-        # 12. A file outside Scope: task-decide continues, but watch stops (exit 19), logs nothing and sends nothing more.
+        # 12. A file outside Scope: task-decide continues, but watch stops (exit 19), logs stopped:out_of_scope and sends nothing more.
         root, fake, env = scenario(tmp, "out-of-scope")
         queue_step(root, 1, "6")
         queue_step(root, 2, "7")
@@ -371,12 +371,33 @@ def main():
         strayed = turn(root, "6")
         strayed["report"]["files_changed"] = ["env/.config/tmux/scripts/task-spend.py"]
         set_agent(fake, WORKER, [strayed, turn(root, "7")])
+        Mock.script = [answer(), answer()]
         orchestrator_prompt(env, WORKER, "go")
         result = run(["watch", WORKER, "--task-root", str(root)], env, root)
         expect("out of scope: exit 19", result.returncode, 19)
         check("out of scope: names the file", "task-spend.py" in result.stdout)
-        check("out of scope: nothing logged", not (root / "status.log").exists())
+        check("out of scope: logged as stopped", lines(root / "status.log")[0].split()[2:4] == ["route=stopped:out_of_scope", "step=6"])
         expect("out of scope: next step not sent", len(lines(fake / "prompts.log")), 1)
+
+        # The orchestrator accepts step 6, installs and prompts step 7, then runs watch: step 6 is not routed again.
+        shutil.copyfile(root / "queue" / WORKER / "02-7.md", root / "hooks" / f"{WORKER}.md")
+        orchestrator_prompt(env, WORKER, "Read the hook and follow it. Step 7.")
+        result = run(["watch", WORKER, "--task-root", str(root)], env, root)
+        expect("out of scope: resumed watch exits 0 when the queue is done", result.returncode, 0)
+        check("out of scope: step 6 logged once", [line.split()[3] for line in lines(root / "status.log")] == ["step=6", "step=7"])
+
+        # 12b. needs_decision: task-decide asks the user first (exit 11), so watch never reaches its exit 18 backstop.
+        # Exit 11 is not logged: the orchestrator settles it with a continue line, as in orchestrator.md.
+        root, fake, env = scenario(tmp, "needs-decision")
+        queue_step(root, 1, "6")
+        (root / "hooks").mkdir()
+        asking = turn(root, "6")
+        asking["report"]["needs_decision"] = "pick a model"
+        set_agent(fake, WORKER, [asking])
+        orchestrator_prompt(env, WORKER, "go")
+        result = run(["watch", WORKER, "--task-root", str(root)], env, root)
+        expect("needs decision: task-decide asks the user (exit 11)", result.returncode, 11)
+        check("needs decision: nothing logged", not (root / "status.log").exists())
 
         # 13. Requires: not met before step 7 is installed: exit 21, step 7 is not installed or sent.
         root, fake, env = scenario(tmp, "requires")

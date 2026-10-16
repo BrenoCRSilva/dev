@@ -22,8 +22,10 @@ A hook may carry one `Requires:` line, comma-separated: `file:<path>` (relative 
 absolute) must exist, and `report:<step>:<field>` needs the step's report to hold a non-empty field. An
 unmet item, or an unknown one, stops watch before the step is installed (exit 21).
 
-Each stop after a report (needs_decision, out-of-scope) is not logged, so a later watch routes the same
-report again: the orchestrator reads it, then prompts the agent to fix it or settles the step itself.
+A stop after a report (18 needs_decision, 19 out-of-scope) is logged as `route=stopped:<reason>`, so a later
+watch does not route that report again. task-decide asks the user on needs_decision before watch reads it,
+so 18 is a backstop there; 11 is not logged. The orchestrator then decides: accept the step, or queue a fix step with a
+new number. Either way, it installs and prompts the next queued step itself, then runs watch again.
 
 wait only waits for each named agent's current turn to settle and reports it; it routes nothing.
 
@@ -52,7 +54,7 @@ HERE = Path(__file__).resolve().parent
 DECIDE = HERE / "task-decide.py"
 REPORT_CHECK = HERE / "task-report.py"
 FORMULA = HERE / "task-roles" / "formulas" / "worker-step.toml"
-LOG_LINE = re.compile(r"(\S+) (\S+) route=(continue|checkpoint) step=(\S+)")
+LOG_LINE = re.compile(r"(\S+) (\S+) route=(continue|checkpoint|stopped:\w+) step=(\S+)")
 QUEUE_FILE = re.compile(r"(\d+)-(.+)\.md")
 
 EMPTY = 0
@@ -66,6 +68,7 @@ CHECKPOINT = 17
 NEEDS_DECISION = 18
 OUT_OF_SCOPE = 19
 REQUIRES_UNMET = 21
+STOP_ROUTES = {NEEDS_DECISION: "stopped:needs_decision", OUT_OF_SCOPE: "stopped:out_of_scope"}
 
 
 def _glob_regex():
@@ -244,6 +247,15 @@ def unmet_requires(root, agent, hook):
     return None
 
 
+def record(root, agent, step, report, route, lock):
+    """Appends the step's status.log line. A stop is logged too, so a later watch does not route the same report."""
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    head = json.loads(report.read_text(encoding="utf-8"))["head_sha"]
+    with lock:
+        with (root / "status.log").open("a", encoding="utf-8") as log:
+            log.write(f"{stamp} {agent} route={route} step={step} report={report.relative_to(root)} head_sha={head}\n")
+
+
 def drive(agent, root, start_ms, turn_ms, lock):
     """Runs one agent's queue until it is empty (EMPTY) or needs the orchestrator. Returns (code, line)."""
     steps = pending(root, agent)
@@ -259,13 +271,9 @@ def drive(agent, root, start_ms, turn_ms, lock):
         report = report_path(root, agent, step)
         stop = stop_reason(hook, report)
         if stop and stop[0] != CHECKPOINT:
+            record(root, agent, step, report, STOP_ROUTES[stop[0]], lock)
             return stop[0], f"{agent} step {step}: {stop[1]}"
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        head = json.loads(report.read_text(encoding="utf-8"))["head_sha"]
-        verb = "checkpoint" if stop else "continue"
-        with lock:
-            with (root / "status.log").open("a", encoding="utf-8") as log:
-                log.write(f"{stamp} {agent} route={verb} step={step} report={report.relative_to(root)} head_sha={head}\n")
+        record(root, agent, step, report, "checkpoint" if stop else "continue", lock)
         steps.pop(0)
         if stop:
             return CHECKPOINT, f"{agent} step {step}: {stop[1]}"

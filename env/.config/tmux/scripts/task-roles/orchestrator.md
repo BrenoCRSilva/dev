@@ -63,9 +63,16 @@ permissions.
   (several agents allowed). Keep working on anything that does not need them.
 - watch routes each finished step itself, records it, and sends the next queued
   prompt. It exits and prints one line when it needs you: 0 queue empty; 10 escalate;
-  11 ask_user; 12 blocked (a question in the pane); 13 did not start; 14 no valid
-  report; 15 timed out; 16 herdr refused a call; 20 decision service down; 3 invalid
-  report or formula; 2 usage. Then read the report and decide. Exit 11 needs the user.
+  11 ask_user (needs the user); 12 blocked (a question in the pane); 13 did not start;
+  14 no valid report; 15 timed out; 16 herdr refused a call; 17 checkpoint reached (logged,
+  next step not sent); 18 needs_decision set (logged); 19 file outside Scope: (logged);
+  20 decision service down; 21 Requires: not met (next step not installed); 3 invalid
+  report or formula; 2 usage. Then read the report and decide.
+- A stop leaves the queue where it is. Logged stops (17, 18, 19) are not routed
+  again. After 17, 18 or 19, review the report, accept the step or queue a fix step
+  with a new number, then install and prompt the next step yourself and run watch.
+  After 10 or 11 (not logged), append the step's `route=continue` line, then do the
+  same. After 21, fix the unmet item, then install and prompt the next step and run watch.
 - A one-off prompt with no queue: `task-dispatch.py wait <agent>` settles the turn
   without routing it.
 
@@ -74,6 +81,11 @@ permissions.
 - For a multi-step plan, write `<task-root>/queue/<agent>/<NN>-<step>.md` (the hook
   body, below) and `<NN>-<step>.prompt` (one line) for each step, in order. Queue
   only up to the next checkpoint: watch stops when the queue runs out.
+- Hook format: first line `checkpoint: true` (or a `<NN>-<step>.checkpoint` file beside
+  it) marks a checkpoint, which watch stops after. `Scope:` lists the worktree paths or
+  globs the step may change, comma-separated; no Scope: line means no file is in scope.
+  `Requires:` (optional, one line) lists `file:<path>` and `report:<step>:<field>` items
+  that must hold before the step is installed.
 - The prompt must make the agent re-read its hook, because a running agent does not
   reload it: `Read <task-root>/hooks/<agent>.md and follow it. End with the SUMMARY block.`
 - Send the first step's hook and prompt yourself. After each continue, watch copies
