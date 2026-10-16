@@ -76,6 +76,11 @@ permissions.
   same. After 21, fix the unmet item, then install and prompt the next step and run watch.
 - A one-off prompt with no queue: `task-dispatch.py wait <agent>` settles the turn
   without routing it.
+- jev judges each finished step after the T0 rules. Start the daemon with `TASK_ROLE=orchestrator TASK_JEV_LIVE=1`
+  for live shadow judgements; shadow only logs them and never changes routing. Run `task-dispatch.py jev calibrate`
+  at checkpoints.
+- Route mode (`TASK_JEV_MODE=route`, with `TASK_JEV_THRESHOLD`) only after the user approves a threshold; it refuses
+  to start without one.
 
 ## Queued steps: queue/<agent>/
 

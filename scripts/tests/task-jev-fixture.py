@@ -76,7 +76,7 @@ def test_dry_run_is_redacted_for_both_shapes(tmp):
     contracts.write_text("C6: " + PLANTED[2] + "\n" + "x" * 40000, encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if k not in ("TASK_ROLE", "TASK_JEV_LIVE", "TASK_JEV_SHAPE")}
     base = ["smoke", "--dry-run", "--report", str(report), "--spec", str(spec), "--contracts", str(contracts),
-            "--scope", "env/.config/tmux/scripts", "--worktree", str(tmp)]
+            "--next-spec", str(spec), "--scope", "env/.config/tmux/scripts", "--worktree", str(tmp)]
     for shape in ("native", "chat"):
         done = run_cli(base, {**env, "TASK_JEV_SHAPE": shape})
         assert done.returncode == 0, done.stderr

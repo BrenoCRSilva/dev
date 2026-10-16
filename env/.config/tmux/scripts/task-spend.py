@@ -41,6 +41,7 @@ import glob
 import json
 import math
 import os
+import sqlite3
 import sys
 
 # USD per million tokens: Claude API list prices from the claude-api skill, cached 2026-10-06
@@ -87,7 +88,12 @@ PRICES = {
         {"upto": 272000, "input": 0.1, "output": 0.5, "cache_read": 0.01, "cache_write_5m": 0, "cache_write_1h": 0},
         {"upto": None, "input": 0.2, "output": 0.75, "cache_read": 0.02, "cache_write_5m": 0, "cache_write_1h": 0},
     ],
+    # jev judgements (task_jev.py): input only, the list price task-dispatch records; output is not reported.
+    "typesafe/jev-1.14": [
+        {"upto": None, "input": 0.042, "output": 0, "cache_read": 0, "cache_write_5m": 0, "cache_write_1h": 0},
+    ],
 }
+JUDGE_PROVIDER = "jev"
 TOKEN_FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 CODEX_TOOL_ITEMS = ("function_call", "custom_tool_call")
 GROUPS = {"role": ("role",), "model": ("model",), "task": ("task",), "role,task": ("role", "task"),
@@ -243,6 +249,35 @@ def codex_responses(root, counts):
             previous = total
             yield codex_response(path, record.get("timestamp"), None, session, model, turn_cwd or cwd,
                                  as_dict(info.get("last_token_usage")), tools)
+
+
+def judgement_responses(tasks):
+    """One response per jev judgement with input tokens, read from each task root's state.db (read-only). Role judge,
+    one session per judged attempt; a task root with no judgements table gives nothing."""
+    rows = []
+    for path in sorted(glob.glob(os.path.join(tasks, "*", "state.db"))):
+        task = os.path.basename(os.path.dirname(path))
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            continue
+        try:
+            found = conn.execute(
+                "SELECT node, attempt, model, input_tokens, judged_at FROM judgements WHERE input_tokens IS NOT NULL"
+            ).fetchall()
+        except sqlite3.Error:
+            found = []
+        finally:
+            conn.close()
+        for node, attempt, model, tokens, judged_at in found:
+            key = f"{task}/{node}/{attempt}"
+            rows.append({
+                "provider": JUDGE_PROVIDER, "key": key, "session": key, "task": task, "role": "judge", "model": model,
+                "cwd": "", "sidechain": False, "tool_ids": set(), "write_unsplit": 0, "output": 0, "cache_read": 0,
+                "cache_write_5m": 0, "cache_write_1h": 0, "input": tokens,
+                "ts": datetime.datetime.fromtimestamp(judged_at, datetime.timezone.utc).astimezone() if judged_at else None,
+            })
+    return rows
 
 
 def merge_responses(responses):
@@ -546,10 +581,10 @@ def main(argv=None):
         parser.error(f"--prices: {error}")
 
     counts = collections.Counter()
+    tasks = real_path(args.tasks_dir)
     merged = merge_responses(
         list(claude_responses(args.claude_dir, counts)) + list(codex_responses(args.codex_dir, counts))
-    )
-    tasks = real_path(args.tasks_dir)
+    ) + judgement_responses(tasks)
     responses = []
     for response in merged:
         if not sum(response[field] for field in TOKEN_FIELDS):
@@ -562,7 +597,8 @@ def main(argv=None):
         if args.until and ts >= args.until:
             continue
         response["date"] = ts.astimezone().date().isoformat() if ts else "-"
-        response["task"], response["role"] = attribute(response["cwd"], response["sidechain"], tasks)
+        if response["provider"] != JUDGE_PROVIDER:
+            response["task"], response["role"] = attribute(response["cwd"], response["sidechain"], tasks)
         response["cost_by_kind"], response["tier"] = price_turn(response, prices)
         response["cost"] = sum(response["cost_by_kind"].values()) if response["cost_by_kind"] else None
         response["tiered"] = len(prices.get(response["model"]) or ()) > 1
@@ -570,6 +606,8 @@ def main(argv=None):
 
     unsplit = sum(response["write_unsplit"] for response in responses)
     notes = [f"cache writes with no 5m/1h split: {unsplit} response(s), counted as 5m."] if unsplit else []
+    if any(response["provider"] == JUDGE_PROVIDER for response in responses):
+        notes.append("jev judgements (role judge): input tokens only, from each task's state.db; jev output is not counted.")
     if any(response["provider"] == "codex" for response in responses):
         notes.append("Codex USD is a list-price equivalent (plan-billed).")
     if any(response["model"] == "codex-auto-review" for response in responses):

@@ -160,26 +160,32 @@ def load_state(args):
     return build_state(report, spec, args.scope, contract, diff, next_spec)
 
 
-# Each question's favourable answer: the route continues only when all five are favourable (arch v2 §5).
+# Each question's favourable answer: the route continues only when every asked question is favourable (arch v2 §5).
 FAVORABLE = {"done_met": "yes", "risk_material": "no", "contract_change": "no", "next_ready": "yes", "privileged_action": "no"}
 
 
+def asked_questions(has_next):
+    """next_ready is asked only when there is a next step to judge against; with no successor it is left out."""
+    return [qid for qid in QUESTIONS if has_next or qid != "next_ready"]
+
+
 def derive_route(answers, threshold):
-    """continue when every answer is favourable and every confidence is at least threshold, else escalate. No answers
-    (jev failed) escalate."""
+    """continue when every asked answer is favourable and every confidence is at least threshold, else escalate. No
+    answers (jev failed) escalate."""
     if answers is None:
         return "escalate"
-    favorable = all(answers[qid]["choice"] == choice for qid, choice in FAVORABLE.items())
+    favorable = all(answers[qid]["choice"] == FAVORABLE[qid] for qid in answers)
     confident = all(answer["confidence"] >= threshold for answer in answers.values())
     return "continue" if favorable and confident else "escalate"
 
 
-def build_body(state, model, shape):
+def build_body(state, model, shape, asked=None):
+    asked = list(QUESTIONS) if asked is None else asked
     body = {
         "model": model,
         "state": state,
-        "questions": {qid: {"type": "choice", "instructions": text, "criteria": criteria}
-                      for qid, (text, criteria) in QUESTIONS.items()},
+        "questions": {qid: {"type": "choice", "instructions": QUESTIONS[qid][0], "criteria": QUESTIONS[qid][1]}
+                      for qid in asked},
     }
     if shape == "chat":
         body = {"model": model, "messages": [{"role": "user", "content": json.dumps(body, ensure_ascii=False)}]}
@@ -232,8 +238,9 @@ def _post(url, key, body):
         raise JevError("reply is not JSON")
 
 
-def parse_answers(response, shape):
-    """{qid: {choice, confidence}} for every question, or JevError."""
+def parse_answers(response, shape, asked=None):
+    """{qid: {choice, confidence}} for every asked question, or JevError."""
+    asked = list(QUESTIONS) if asked is None else asked
     if shape == "chat":
         # shortcut: a fenced JSON reply is not unwrapped, so it escalates; add the unwrap when chat is used.
         try:
@@ -244,7 +251,8 @@ def parse_answers(response, shape):
     if not isinstance(answers, dict):
         raise JevError("reply has no answers object")
     parsed = {}
-    for qid, (_, criteria) in QUESTIONS.items():
+    for qid in asked:
+        criteria = QUESTIONS[qid][1]
         answer = answers.get(qid)
         if not isinstance(answer, dict) or not isinstance(answer.get("choice"), str) or answer["choice"] not in criteria:
             raise JevError(f"{qid}: no valid choice")
@@ -273,13 +281,13 @@ def send(post, url, key, body, sleep):
         raise JevError(type(error).__name__)
 
 
-def ask(body, *, url, shape, env, key_path, post=_post, sleep=time.sleep):
+def ask(body, *, url, shape, env, key_path, post=_post, sleep=time.sleep, asked=None):
     """One request after the live gate. Returns {answers, latency_ms, input_tokens}; raises Usage or JevError."""
     live_gate(env, key_path)
     key = load_key(env, key_path)
     started = time.monotonic()
     response = send(post, url, key, body, sleep)
-    answers = parse_answers(response, shape)
+    answers = parse_answers(response, shape, asked)
     usage = response.get("usage") if isinstance(response, dict) else None
     tokens = usage.get("prompt_tokens", usage.get("input_tokens")) if isinstance(usage, dict) else None
     return {"answers": answers, "latency_ms": round((time.monotonic() - started) * 1000), "input_tokens": tokens}
@@ -321,8 +329,7 @@ def calibrate(root, as_json, out):
     false_continue = sum(route == "continue" and not accepted_now for _, route, accepted_now in final)
     buckets = {qid: {} for qid in QUESTIONS}
     for answers, _, accepted_now in final:
-        for qid in QUESTIONS:
-            answer = answers[qid]
+        for qid, answer in answers.items():  # next_ready is absent when the attempt had no next step
             key = min(int(answer["confidence"] * 10), 9) / 10
             count, agree = buckets[qid].get(key, (0, 0))
             agreed = (answer["choice"] == FAVORABLE[qid]) == accepted_now
@@ -374,12 +381,15 @@ def main(argv):
     try:
         if shape not in SHAPES:
             raise Usage(f"TASK_JEV_SHAPE must be native or chat, not {shape}")
-        body = build_body(load_state(args), env.get("TASK_JEV_MODEL", MODEL), shape)
+        state = load_state(args)
+        asked = asked_questions("next_step" in state)
+        body = build_body(state, env.get("TASK_JEV_MODEL", MODEL), shape, asked)
         if args.dry_run:
             print(redacted_json(body, indent=2))
             return 0
         key_path = Path(env.get("TASK_JEV_KEYFILE", Path.home() / ".config/task-agents/openrouter.env"))
-        result = ask(body, url=env.get("TASK_JEV_URL", ENDPOINTS[shape]), shape=shape, env=env, key_path=key_path)
+        result = ask(body, url=env.get("TASK_JEV_URL", ENDPOINTS[shape]), shape=shape, env=env, key_path=key_path,
+                     asked=asked)
     except Usage as error:
         print(f"task-dispatch jev: {error}", file=sys.stderr)
         return USAGE_EXIT

@@ -627,9 +627,11 @@ def ask_jev(root, plan, node_id, agent, data):
         task_jev.diffstat(Path(match[1]), "main", data.get("head_sha") or "HEAD") if match else "unavailable: no worktree",
         read_or_empty(root / successor.spec) if successor else "",
     )
-    body = task_jev.build_body(state, model, shape)
+    asked = task_jev.asked_questions("next_step" in state)
+    body = task_jev.build_body(state, model, shape, asked)
     result = task_jev.ask(body, url=env.get("TASK_JEV_URL", task_jev.ENDPOINTS.get(shape, "")), shape=shape, env=env,
-                          key_path=Path(env.get("TASK_JEV_KEYFILE", Path.home() / ".config/task-agents/openrouter.env")))
+                          key_path=Path(env.get("TASK_JEV_KEYFILE", Path.home() / ".config/task-agents/openrouter.env")),
+                          asked=asked)
     tokens = result["input_tokens"]
     return {"model": model, "request_hash": hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest(),
             "answers": result["answers"], "latency_ms": result["latency_ms"], "input_tokens": tokens,
