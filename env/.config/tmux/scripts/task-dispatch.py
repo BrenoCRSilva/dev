@@ -3,6 +3,10 @@
 
     task-dispatch.py watch <agent>... [--task-root <dir>]
     task-dispatch.py wait <agent>... [--task-root <dir>]
+    task-dispatch.py plan check|reconcile [--task-root <dir>]
+
+plan check validates plan/dag.toml (C5) and prints `ok N nodes`, or one line per error and exit 2. plan
+reconcile applies the plan to state.db (C6) and prints the counts. Neither runs a step.
 
 watch runs as the orchestrator (TASK_ROLE=orchestrator) in the background. For each agent it takes the
 first queued step not yet in <task-root>/status.log, waits for that step's turn to start and then settle
@@ -55,6 +59,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.append(str(HERE))
+import task_plan  # noqa: E402 (sibling modules, found through the path above)
+import task_state  # noqa: E402
 DECIDE = HERE / "task-decide.py"
 REPORT_CHECK = HERE / "task-report.py"
 FORMULA = HERE / "task-roles" / "formulas" / "worker-step.toml"
@@ -351,7 +358,34 @@ def wait(agents, root, start_ms, turn_ms):
     return EMPTY, "; ".join(f"{agent}: settled" for agent in agents)
 
 
+def plan_main(argv):
+    """`plan check` validates plan/dag.toml; `plan reconcile` brings state.db in line with it (C5, C6)."""
+    parser = argparse.ArgumentParser(prog="task-dispatch.py plan", description="Check the plan graph, or reconcile the runtime state with it.")
+    parser.add_argument("command", choices=["check", "reconcile"])
+    parser.add_argument("--task-root", type=Path, default=Path.cwd())
+    args = parser.parse_args(argv)
+    try:
+        nodes = task_plan.load_plan(args.task_root)
+    except task_plan.PlanError as error:
+        for line in error.errors:
+            print(line)
+        return USAGE
+    if args.command == "check":
+        print(f"ok {len(nodes)} nodes")
+        return 0
+    conn = task_state.connect(args.task_root)
+    try:
+        counts = task_state.reconcile(conn, nodes)
+    finally:
+        conn.close()
+    print("reconcile: " + ", ".join(f"{key} {value}" for key, value in counts.items()))
+    return 0
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["plan"]:
+        return plan_main(argv[1:])
     parser = argparse.ArgumentParser(description="Wait for worker turns and route finished steps.")
     parser.add_argument("command", choices=["watch", "wait"])
     parser.add_argument("agents", nargs="+")
