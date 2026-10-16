@@ -7,20 +7,36 @@
 watch runs as the orchestrator (TASK_ROLE=orchestrator) in the background. For each agent it takes the
 first queued step not yet in <task-root>/status.log, waits for that step's turn to start and then settle
 (herdr's own agent wait; no early return on an idle agent), checks the report with task-report.py and
-routes it with task-decide.py (worker-step formula, TASK_DECIDE_LIVE=1). On route continue it appends one
-line to status.log, copies the next queued hook to hooks/<agent>.md, sends the next prompt and keeps
-watching. Queue files are queue/<agent>/<NN>-<step>.md (hook body) and .prompt (one line).
+routes it with task-decide.py (worker-step formula, TASK_DECIDE_LIVE=1). Then it stops, without sending
+anything more, when the report needs a decision (needs_decision set) or changes a file outside the hook's
+Scope: line (no Scope: line means no file is in scope), or when the step is a checkpoint. Otherwise it
+appends one line to status.log, copies the next queued hook to hooks/<agent>.md, sends the next prompt and
+keeps watching. Queue files are queue/<agent>/<NN>-<step>.md (hook body) and .prompt (one line).
+
+A hook is a checkpoint when its first line is `checkpoint: true`, or it opens with front matter that holds
+that line, or a `<NN>-<step>.checkpoint` marker sits beside it. A checkpoint step is logged as
+`route=checkpoint` and counts as done: watch stops after its report (exit 17), and the orchestrator
+installs and prompts the next step itself, then runs watch again.
+
+A hook may carry one `Requires:` line, comma-separated: `file:<path>` (relative to the task root unless
+absolute) must exist, and `report:<step>:<field>` needs the step's report to hold a non-empty field. An
+unmet item, or an unknown one, stops watch before the step is installed (exit 21).
+
+Each stop after a report (needs_decision, out-of-scope) is not logged, so a later watch routes the same
+report again: the orchestrator reads it, then prompts the agent to fix it or settles the step itself.
 
 wait only waits for each named agent's current turn to settle and reports it; it routes nothing.
 
 Exit codes: 0 queue empty (watch) or settled (wait); 2 usage; 3 invalid formula or report; 10 escalate;
 11 ask_user; 12 agent blocked; 13 agent did not start the step; 14 no valid report for the step; 15 turn
-timed out; 16 herdr refused or failed a call; 20 decision service unavailable. The 2, 3, 10, 11 and 20
-codes come from task-decide. Env: TASK_DISPATCH_START_MS (wait for a turn to start, default 30000),
-TASK_DISPATCH_TURN_MS (wait for it to settle, default 4 hours). TASK_SESSION names the herdr session.
-Stdlib only.
+timed out; 16 herdr refused or failed a call; 17 checkpoint reached; 18 report sets needs_decision;
+19 report changed a file outside Scope:; 20 decision service unavailable; 21 Requires: not met.
+The 2, 3, 10, 11 and 20 codes come from task-decide. Env: TASK_DISPATCH_START_MS (wait for a turn to start,
+default 30000), TASK_DISPATCH_TURN_MS (wait for it to settle, default 4 hours). TASK_SESSION names the
+herdr session. Stdlib only.
 """
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -36,7 +52,7 @@ HERE = Path(__file__).resolve().parent
 DECIDE = HERE / "task-decide.py"
 REPORT_CHECK = HERE / "task-report.py"
 FORMULA = HERE / "task-roles" / "formulas" / "worker-step.toml"
-LOG_LINE = re.compile(r"(\S+) (\S+) route=continue step=(\S+)")
+LOG_LINE = re.compile(r"(\S+) (\S+) route=(continue|checkpoint) step=(\S+)")
 QUEUE_FILE = re.compile(r"(\d+)-(.+)\.md")
 
 EMPTY = 0
@@ -46,6 +62,22 @@ NOT_STARTED = 13
 NO_REPORT = 14
 TIMED_OUT = 15
 HERDR = 16
+CHECKPOINT = 17
+NEEDS_DECISION = 18
+OUT_OF_SCOPE = 19
+REQUIRES_UNMET = 21
+
+
+def _glob_regex():
+    """task-decide's glob matcher, so Scope: globs and safety globs mean the same thing."""
+    spec = importlib.util.spec_from_file_location("task_decide", DECIDE)
+    assert spec is not None and spec.loader is not None, DECIDE
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.glob_regex
+
+
+glob_regex = _glob_regex()
 
 
 class Herdr(Exception):
@@ -143,7 +175,7 @@ def recorded(root, agent):
     if not log.exists():
         return set()
     matches = (LOG_LINE.match(line) for line in log.read_text(encoding="utf-8").splitlines())
-    return {m[3] for m in matches if m and m[2] == agent}
+    return {m[4] for m in matches if m and m[2] == agent}
 
 
 def pending(root, agent):
@@ -151,9 +183,72 @@ def pending(root, agent):
     return [item for item in queued(root, agent) if item[0] not in done]
 
 
+def checkpoint_marked(hook):
+    """True when the hook's first line, or its front matter, says checkpoint: true, or a .checkpoint marker sits beside it."""
+    if hook.with_suffix(".checkpoint").exists():
+        return True
+    lines = hook.read_text(encoding="utf-8").splitlines()
+    head = lines[1 : lines.index("---", 1)] if lines[:1] == ["---"] and "---" in lines[1:] else lines[:1]
+    return any(re.fullmatch(r"checkpoint:\s*true", line.strip()) for line in head)
+
+
+def scope_regexes(hook):
+    """The worktree paths the hook's Scope: line allows. A plain path also covers the files under it."""
+    match = re.search(r"^Scope:\s*(.*)$", hook.read_text(encoding="utf-8"), re.M)
+    regexes = []
+    for item in (match[1].split(",") if match else []):
+        item = item.strip().strip("`").rstrip("/")
+        if not item or item == "none":
+            continue
+        if re.search(r"[*?]", item):
+            regexes.append(glob_regex(item))
+        else:
+            regexes += [glob_regex(item), glob_regex(item + "/**/*")]
+    return regexes
+
+
+def stop_reason(hook, report):
+    """Why watch stops after this step's report, as (code, why), or None to continue."""
+    data = json.loads(report.read_text(encoding="utf-8"))
+    if data.get("needs_decision"):
+        return NEEDS_DECISION, f"needs_decision is set: {str(data['needs_decision'])[:200]}"
+    regexes = scope_regexes(hook)
+    outside = [path for path in data.get("files_changed", []) if not any(r.match(path) for r in regexes)]
+    if outside:
+        return OUT_OF_SCOPE, f"changed outside Scope: {', '.join(outside)}"[:300]
+    if checkpoint_marked(hook):
+        return CHECKPOINT, "checkpoint step: review it, then install and prompt the next step, then run watch"
+    return None
+
+
+def unmet_requires(root, agent, hook):
+    """The first Requires: item of the hook that does not hold, as text, or None when all hold (or none is set)."""
+    match = re.search(r"^Requires:\s*(.+)$", hook.read_text(encoding="utf-8"), re.M)
+    for item in (match[1].split(",") if match else []):
+        item = item.strip().strip("`")
+        if not item:
+            continue
+        if item.startswith("file:"):
+            path = Path(item[5:])
+            held = (path if path.is_absolute() else root / path).exists()
+        elif item.startswith("report:"):
+            step, _, field = item[7:].partition(":")
+            try:
+                held = bool(json.loads(report_path(root, agent, step).read_text(encoding="utf-8")).get(field))
+            except (OSError, ValueError, AttributeError):
+                held = False
+        else:
+            return f"unknown Requires item {item}"
+        if not held:
+            return f"Requires {item} is not met"
+    return None
+
+
 def drive(agent, root, start_ms, turn_ms, lock):
     """Runs one agent's queue until it is empty (EMPTY) or needs the orchestrator. Returns (code, line)."""
     steps = pending(root, agent)
+    if steps and (why := unmet_requires(root, agent, steps[0][1])):
+        return REQUIRES_UNMET, f"{agent} step {steps[0][0]}: {why}"
     while steps:
         step, hook, prompt = steps[0]
         code, line = await_turn(agent, step, root, start_ms, turn_ms)
@@ -161,13 +256,23 @@ def drive(agent, root, start_ms, turn_ms, lock):
             code, line = route(agent, step, root)
         if code != 0:
             return code, f"{agent} step {step}: {line}"
+        report = report_path(root, agent, step)
+        stop = stop_reason(hook, report)
+        if stop and stop[0] != CHECKPOINT:
+            return stop[0], f"{agent} step {step}: {stop[1]}"
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        head = json.loads(report.read_text(encoding="utf-8"))["head_sha"]
+        verb = "checkpoint" if stop else "continue"
         with lock:
             with (root / "status.log").open("a", encoding="utf-8") as log:
-                log.write(f"{stamp} {agent} {line}\n")
+                log.write(f"{stamp} {agent} route={verb} step={step} report={report.relative_to(root)} head_sha={head}\n")
         steps.pop(0)
+        if stop:
+            return CHECKPOINT, f"{agent} step {step}: {stop[1]}"
         if steps:
             step, hook, prompt = steps[0]
+            if why := unmet_requires(root, agent, hook):
+                return REQUIRES_UNMET, f"{agent} step {step}: {why}"
             shutil.copyfile(hook, root / "hooks" / f"{agent}.md")
             herdr("prompt", agent, " ".join(prompt.read_text(encoding="utf-8").split()))
     return EMPTY, f"{agent}: queue empty"
