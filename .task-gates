@@ -21,6 +21,7 @@ fixture-task-report: bash scripts/tests/task-report-fixture.sh
 fixture-task-decide: python3 -I scripts/tests/task-decide-fixture.py
 fixture-task-jev: python3 -I scripts/tests/task-jev-fixture.py
 fixture-task-jev-route: python3 -I scripts/tests/task-jev-route-fixture.py
+fixture-task-jev-base: python3 -I scripts/tests/task-jev-base-fixture.py
 fixture-task-dispatch: python3 -I scripts/tests/task-dispatch-fixture.py
 fixture-task-plan: python3 -I scripts/tests/task-plan-fixture.py
 fixture-task-run: python3 -I scripts/tests/task-run-fixture.py

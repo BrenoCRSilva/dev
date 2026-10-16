@@ -63,6 +63,10 @@ MIGRATIONS = {
         """DELETE FROM judgements WHERE rowid NOT IN (SELECT MAX(rowid) FROM judgements GROUP BY node, attempt)""",
         """CREATE UNIQUE INDEX judgements_attempt ON judgements (node, attempt)""",
     ],
+    7: [
+        # The worktree HEAD when the attempt started: the base of its diffstat for jev (NULL before this migration).
+        """ALTER TABLE attempts ADD COLUMN start_sha TEXT""",
+    ],
 }
 PLAN_RULE = "plan-invalid"
 
@@ -128,6 +132,23 @@ def _version(conn):
 def report_accepted(report_mtime, prompt_at):
     """A report counts only if it was written after the prompt it answers (C6)."""
     return prompt_at is not None and report_mtime > prompt_at
+
+
+def start_sha_of(task_root, node_id):
+    """The start sha of the node's current attempt, or None when none is stored or there is no state db yet."""
+    path = Path(task_root) / "state.db"
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(path, timeout=10)
+    try:
+        row = conn.execute(
+            "SELECT a.start_sha FROM nodes n JOIN attempts a ON a.node = n.id AND a.attempt = n.attempt WHERE n.id = ?", (node_id,)
+        ).fetchone()
+    except sqlite3.Error:  # a state db from before migration 7 has no start_sha column
+        return None
+    finally:
+        conn.close()
+    return row[0] if row else None
 
 
 def snapshot(conn):
@@ -211,9 +232,10 @@ def install(conn, node_id, budget):
         return attempt
 
 
-def start(conn, node_id, session_id=None, prompt_at=None, scope=None):
+def start(conn, node_id, session_id=None, prompt_at=None, scope=None, start_sha=None):
     """ready -> running. prompt_at is when the prompt goes out (now by default); scope is the attempt's Scope list, kept
-    so a restarted dispatcher checks the attempt against what it was started with. One running node per agent."""
+    so a restarted dispatcher checks the attempt against what it was started with; start_sha is the worktree HEAD then
+    (jev's diff base). One running node per agent."""
     now = time.time()
     prompt_at = now if prompt_at is None else prompt_at
     with transaction(conn):
@@ -225,8 +247,8 @@ def start(conn, node_id, session_id=None, prompt_at=None, scope=None):
             raise TransitionError(f"{row['agent']} is already running {busy['id']}")
         conn.execute("UPDATE nodes SET status = 'running', started_at = ?, ended_at = NULL WHERE id = ?", (now, node_id))
         conn.execute(
-            "UPDATE attempts SET session_id = ?, prompt_at = ?, started_at = ?, scope = ? WHERE node = ? AND attempt = ?",
-            (session_id, prompt_at, now, None if scope is None else json.dumps(scope), node_id, row["attempt"]),
+            "UPDATE attempts SET session_id = ?, prompt_at = ?, started_at = ?, scope = ?, start_sha = ? WHERE node = ? AND attempt = ?",
+            (session_id, prompt_at, now, None if scope is None else json.dumps(scope), start_sha, node_id, row["attempt"]),
         )
         _event(conn, node_id, "start", f"attempt {row['attempt']}")
 

@@ -605,6 +605,12 @@ def jev_settings(env=os.environ):
     return mode, threshold
 
 
+def worktree_of(root, agent):
+    """The worktree path the AGENTS.md Repo modes line names for the agent, or None."""
+    match = re.search(r"worktree `([^`]+)`", repo_line(root, agent))
+    return Path(match[1]) if match else None
+
+
 def repo_line(root, agent):
     """The AGENTS.md Repo modes line that names the agent, or '' when there is none."""
     try:
@@ -650,13 +656,13 @@ def ask_jev(root, plan, node_id, agent, data):
     successor = next((other for other in plan.values() if node_id in other.after and other.spec), None)
     spec = read_or_empty(root / node.spec) if node and node.spec else ""
     next_spec = read_or_empty(root / successor.spec) if successor else ""
-    match = re.search(r"worktree `([^`]+)`", repo_line(root, agent))
-    base = task_jev.default_base(Path(match[1])) if match else None
-    diff = task_jev.diffstat(Path(match[1]), base, data.get("head_sha") or "HEAD") if match and base else ""
+    worktree = worktree_of(root, agent)
+    base = task_jev.default_base(worktree, task_state.start_sha_of(root, node_id)) if worktree else None
+    diff = task_jev.diffstat(worktree, base, data.get("head_sha") or "HEAD") if worktree and base else ""
     gaps = [label for label, missing in (
         ("node not in plan", node is None), ("spec unreadable or empty", node is not None and node.spec and not spec),
-        ("successor spec missing", successor is not None and not next_spec), ("no worktree", not match),
-        ("diff base unknown", bool(match) and base is None), ("diffstat unavailable", diff.startswith("unavailable")),
+        ("successor spec missing", successor is not None and not next_spec), ("no worktree", worktree is None),
+        ("diff base unknown", worktree is not None and base is None), ("diffstat unavailable", diff.startswith("unavailable")),
     ) if missing]
     if gaps:
         raise task_jev.InputError("fail closed: " + ", ".join(gaps))
@@ -842,7 +848,8 @@ def launch(conn, root, nodes, node_id, results):
     attempt = task_state.install(conn, node_id, node.budget)
     # The node is running before anything can fail, so a failed start routes it failed.
     prompt_at = time.time()
-    task_state.start(conn, node_id, prompt_at=prompt_at, scope=node.scope)
+    worktree = worktree_of(root, node.agent)
+    task_state.start(conn, node_id, prompt_at=prompt_at, scope=node.scope, start_sha=task_jev.head_of(worktree) if worktree else None)
     thread = threading.Thread(target=prompt_lane, args=(results, root, nodes, node, attempt, prompt_at), daemon=True)
     LAUNCHES[:] = [live for live in LAUNCHES if live.is_alive()] + [thread]
     thread.start()

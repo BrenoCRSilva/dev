@@ -150,14 +150,29 @@ def read_text(path, what):
         raise InputError(f"cannot read {what} {path}: {error}")
 
 
-def default_base(worktree):
-    """The remote's default branch as a ref (origin/main), or None when origin's HEAD is not set."""
+def git_out(worktree, *args):
+    """stdout of one git call in the worktree, or None when git fails or cannot run."""
     try:
-        done = subprocess.run(["git", "-C", str(worktree), "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
-                              capture_output=True, text=True, timeout=30)
+        done = subprocess.run(["git", "-C", str(worktree), *args], capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return done.stdout.strip() or None if done.returncode == 0 else None
+
+
+def head_of(worktree):
+    """The worktree's HEAD sha, or None."""
+    return git_out(worktree, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+
+
+def default_base(worktree, start_sha=None):
+    """The diff base: the attempt's start sha, else the remote's default branch (origin/main), else a local main or master.
+    None when none resolves, so the caller fails closed."""
+    if start_sha:
+        return start_sha
+    remote = git_out(worktree, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    if remote:
+        return remote
+    return next((name for name in ("main", "master") if git_out(worktree, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}")), None)
 
 
 def diffstat(worktree, base, head):
