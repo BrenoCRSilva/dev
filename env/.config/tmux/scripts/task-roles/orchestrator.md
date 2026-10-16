@@ -58,12 +58,29 @@ permissions.
 
 ## Waiting for agents
 
-- Do not poll. After you start or prompt an agent, run one background wait for it:
-  `herdr agent wait <name>` (for example `worker-dotfiles`; no `--until`: it
-  returns when the agent is idle, done or blocked). Keep working on anything
-  that does not need that agent in the meantime. No loops and no sleeps.
-- When a wait returns, read the agent's result (next section). A blocked agent
-  has a question: answer it if the plan already decides it, otherwise ask the user.
+- Do not poll and do not wait per agent. Queue the steps (next section), send the
+  first prompt, then run one background `python3 ~/.config/tmux/scripts/task-dispatch.py watch <agent>...`
+  (several agents allowed). Keep working on anything that does not need them.
+- watch routes each finished step itself, records it, and sends the next queued
+  prompt. It exits and prints one line when it needs you: 0 queue empty; 10 escalate;
+  11 ask_user; 12 blocked (a question in the pane); 13 did not start; 14 no valid
+  report; 15 timed out; 16 herdr refused a call; 20 decision service down; 3 invalid
+  report or formula; 2 usage. Then read the report and decide. Exit 11 needs the user.
+- A one-off prompt with no queue: `task-dispatch.py wait <agent>` settles the turn
+  without routing it.
+
+## Queued steps: queue/<agent>/
+
+- For a multi-step plan, write `<task-root>/queue/<agent>/<NN>-<step>.md` (the hook
+  body, below) and `<NN>-<step>.prompt` (one line) for each step, in order. Queue
+  only up to the next checkpoint: watch stops when the queue runs out.
+- The prompt must make the agent re-read its hook, because a running agent does not
+  reload it: `Read <task-root>/hooks/<agent>.md and follow it. End with the SUMMARY block.`
+- Send the first step's hook and prompt yourself. After each continue, watch copies
+  the next hook to `hooks/<agent>.md` and sends its prompt.
+- status.log in the task root gets one line per continued step. Batch AGENTS.md
+  updates from it at checkpoints. If you settle a step yourself, append its line
+  there (`<ts> <agent> route=continue step=<id> ...`) so watch moves on.
 
 ## Assignments: write hooks/<agent>.md before sending work
 
@@ -100,7 +117,7 @@ permissions.
 
 ## Routing a finished step: task-decide
 
-- After a worker's report passes `task-report.py check`, run this once, in one Bash call:
+- watch routes queued steps. For any other finished step, after its report passes `task-report.py check`, run this once, in one Bash call:
   `TASK_DECIDE_LIVE=1 python3 ~/.config/tmux/scripts/task-decide.py --formula ~/.config/tmux/scripts/task-roles/formulas/worker-step.toml --report <task-root>/reports/<agent>/<step>.json --step <step>`
 - Read only its exit code and its one-line stdout. Exit 0 (continue): record the step in `AGENTS.md` and carry on with the plan, without an Opus turn. Exit 10 (escalate), 11 (ask_user), 20 (service failed; treat as escalate) or 3 (invalid formula or report): wake up and decide from the report and `<task-root>/decisions/<agent>/<step>.json`. Exit 11 needs the user: ask at a checkpoint.
 - Exit 2 is a refusal or a flag error. The live gate refuses unless TASK_ROLE is orchestrator, TASK_DECIDE_LIVE=1 is set, and the key file is mode 600. Tell the user what refused it; do not retry blindly. Do not open the key file or pass a key yourself.

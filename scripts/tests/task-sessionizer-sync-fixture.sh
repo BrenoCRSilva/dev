@@ -169,7 +169,7 @@ dry=$("$SESSIONIZER" sync legacy --dry-run) || fail "dry run failed: $dry"
 [[ "$(tree_state "$legacy")" == "$legacy_before" ]] || fail 'dry run changed the task folder'
 [[ "$(canon_state "$worker_repo")" == "$canonical_before" ]] || fail 'dry run wrote the worker canonical .git'
 [[ ! -e "$legacy/research/context/ctx" ]] || fail 'dry run made a context clone'
-grep -Fq 'planned: settings.json: +15 allow rule(s)' <<< "$dry" || fail "dry run did not plan the settings rules: $dry"
+grep -Fq 'planned: settings.json: +17 allow rule(s)' <<< "$dry" || fail "dry run did not plan the settings rules: $dry"
 grep -Fq 'planned: .claude/agents: copy diff-reviewer.md status-reader.md' <<< "$dry" || fail "dry run did not plan the subagents: $dry"
 grep -Fq 'planned: hooks/: create' <<< "$dry" || fail 'dry run did not plan hooks/'
 grep -Fq 'planned: reports/: create' <<< "$dry" || fail 'dry run did not plan reports/'
@@ -192,7 +192,7 @@ printf 'PASS: dry run plans every change, reports the rest, and changes nothing\
 
 # --- real run ---------------------------------------------------------------
 real=$("$SESSIONIZER" sync legacy) || fail "sync failed: $real"
-grep -Fq 'made: settings.json: +15 allow rule(s)' <<< "$real" || fail "sync did not add the rules: $real"
+grep -Fq 'made: settings.json: +17 allow rule(s)' <<< "$real" || fail "sync did not add the rules: $real"
 grep -Fq 'legacy: 6 change(s) made; 0 for review; 3 report(s)' <<< "$real" || fail "sync summary is wrong: $real"
 
 settings="$legacy/.claude/settings.json"
@@ -211,6 +211,8 @@ expected_rules=(
     "Bash($HOME/.config/tmux/scripts/task-decide.py:*)"
     "Bash(python3 ~/.config/tmux/scripts/task-decide.py:*)"
     "Bash(python3 $HOME/.config/tmux/scripts/task-decide.py:*)"
+    "Bash(python3 ~/.config/tmux/scripts/task-dispatch.py:*)"
+    "Bash(python3 $HOME/.config/tmux/scripts/task-dispatch.py:*)"
     "Bash(~/.config/tmux/scripts/task-sessionizer.sh sync:*)"
     "Bash($HOME/.config/tmux/scripts/task-sessionizer.sh sync:*)"
     "Bash(~/.config/tmux/scripts/task-gates.sh:*)"
@@ -284,7 +286,7 @@ grep -Fq 'made: AGENTS.md Notes: replace the earlier generated text' <<< "$v1_ou
 [[ "$(cat "$TASKS_DIR/v1notes/AGENTS.md")" == "$(printf '# v1notes\n\n%s\n' "$current_notes")" ]] || fail 'version-1 Notes were not replaced by the current text'
 bare_out=$("$SESSIONIZER" sync bare)
 grep -Fq 'made: .claude/settings.json: create from the current template' <<< "$bare_out" || fail "missing settings not created: $bare_out"
-jq -e '.permissions.allow | length == 18 and .[0] == "Bash(herdr:*)" and (.[15] | endswith("task-sessionizer.sh sync:*)"))' \
+jq -e '.permissions.allow | length == 20 and .[0] == "Bash(herdr:*)" and (.[17] | endswith("task-sessionizer.sh sync:*)"))' \
     "$TASKS_DIR/bare/.claude/settings.json" >/dev/null || fail 'created settings are not the template'
 [[ -L "$TASKS_DIR/bare/CLAUDE.md" ]] || fail 'CLAUDE.md link was not created'
 printf 'PASS: current Notes are left alone, marker-less and version-1 Notes are updated, and a missing settings file is created\n'
@@ -300,7 +302,7 @@ custom_out=$("$SESSIONIZER" sync custom)
 grep -Fq 'Bash(git status:*)' "$custom/.claude/settings.json" || fail 'custom rule was removed'
 jq -e '.permissions.allow | index("Bash(git status:*)") == 1 and index("Bash(herdr:*)") == 0' "$custom/.claude/settings.json" >/dev/null ||
     fail 'custom rule moved'
-jq -e '.permissions.allow | length == 19' "$custom/.claude/settings.json" >/dev/null || fail 'custom settings did not gain the template rules'
+jq -e '.permissions.allow | length == 21' "$custom/.claude/settings.json" >/dev/null || fail 'custom settings did not gain the template rules'
 grep -Fq 'custom: 5 change(s) made; 2 for review; 0 report(s)' <<< "$custom_out" || fail "custom summary is wrong: $custom_out"
 close_custom=$("$SESSIONIZER" close custom --dry-run 2>&1 || true)
 grep -Fq 'custom task-root data in .claude' <<< "$close_custom" || fail "close does not flag the custom rule: $close_custom"
