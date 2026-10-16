@@ -176,7 +176,7 @@ def scenario_dag(tmp):
     check("dag: resolve continue releases n4", done, status(env, root))
     check("dag: checkpoint routed continue", db(root, "SELECT status, route FROM nodes WHERE id = 'n3'") == [("done", "continue")])
     out = stop(proc)
-    check("dag: SIGTERM stops the daemon cleanly", "dispatcher stopped" in out and not (root / "dispatch.lock").exists(), out)
+    check("dag: SIGTERM stops the daemon cleanly", "dispatcher stopped" in out and "dispatcher: not running" in cli(env, root, "status").stdout, out)
 
 
 def scenario_retry(tmp):
@@ -397,6 +397,28 @@ def scenario_internal(tmp):
     stop(proc)
 
 
+def scenario_lock_scope(tmp):
+    """The dispatch.lock flock: a garbled file nothing holds is stale, and a second taker is refused. A plain Scope
+    path covers the files under it. herdr's reply is the last JSON line of stderr when a log line precedes it."""
+    spec = importlib.util.spec_from_file_location("task_dispatch", DISPATCH)
+    dispatch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dispatch)
+    root = tmp / "lock"
+    root.mkdir()
+    (root / "dispatch.lock").write_text("garbage\n", encoding="utf-8")
+    check("lock: a garbled file nothing holds is not held", dispatch.lock_holder(root) is None)
+    fd = dispatch.take_lock(root)
+    check("lock: taken over a garbled file", fd is not None)
+    check("lock: the holder's pid is written", dispatch.lock_holder(root) == os.getpid())
+    check("lock: a second taker is refused", dispatch.take_lock(root) is None)
+    os.close(fd)
+    check("lock: released when its fd closes", dispatch.lock_holder(root) is None)
+    regexes = dispatch.scope_regexes(["docs/", "src/*.py"])
+    check("scope: a plain dir covers its files", any(r.match("docs/a.md") for r in regexes))
+    check("scope: a glob covers its matches only", any(r.match("src/a.py") for r in regexes) and not any(r.match("lib/x.py") for r in regexes))
+    check("herdr: the last JSON line of stderr is the reply", dispatch._reply('log line\n{"error": {"code": "x"}}\n') == {"error": {"code": "x"}})
+
+
 def main():
     with tempfile.TemporaryDirectory() as scratch:
         tmp = Path(scratch)
@@ -416,6 +438,7 @@ def main():
         scenario_safety(tmp)
         scenario_checks(tmp)
         scenario_internal(tmp)
+        scenario_lock_scope(tmp)
     if FAILURES:
         print(f"FAILED: {len(FAILURES)} checks")
         return 1

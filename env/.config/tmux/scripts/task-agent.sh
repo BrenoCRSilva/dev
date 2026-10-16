@@ -383,7 +383,7 @@ agent_args() {
 # when herdr cannot say.
 pane_cwd() {
     local cwd
-    cwd=$(herdr pane get "$pane" 2>/dev/null | jq -r '.result.pane.cwd // empty' 2>/dev/null) || cwd=
+    cwd=$(herdr_cmd pane get "$pane" 2>/dev/null | jq -r '.result.pane.cwd // empty' 2>/dev/null) || cwd=
     [[ -n "$cwd" ]] || return 0
     realpath -e "$cwd" 2>/dev/null || true
 }
@@ -472,10 +472,15 @@ if [[ $role == orchestrator ]]; then
     if [[ $provider == claude ]]; then cmd=(env "${ORCHESTRATOR_ENV[@]}" "${cmd[@]}"); fi
 else
     if [[ $provider == claude ]]; then trust_pane_cwd; fi
-    cmd=(herdr agent start "$name" --kind "$provider" --pane "$pane" --timeout 60000 -- "${ARGS[@]}")
+    cmd=(herdr_cmd agent start "$name" --kind "$provider" --pane "$pane" --timeout 60000 -- "${ARGS[@]}")
 fi
 
 if [[ $dry_run == yes ]]; then
+    # Print the herdr call as it runs, with the session flag herdr_cmd would add.
+    if [[ ${cmd[0]} == herdr_cmd ]]; then
+        cmd[0]=herdr
+        [[ -n ${TASK_SESSION:-} ]] && cmd=(herdr --session "$TASK_SESSION" "${cmd[@]:1}")
+    fi
     printf '%q ' "${cmd[@]}"
     printf '\n'
     exit 0

@@ -6,6 +6,7 @@
 # researcher launches pass a trust override for the pane's cwd; the
 # orchestrator's launch loads no MCP server (strict empty config) and no repo tool.
 set -euo pipefail
+unset TASK_SESSION
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TASK_AGENT="$ROOT/env/.config/tmux/scripts/task-agent.sh"
@@ -73,6 +74,8 @@ alias_out=$("$TASK_AGENT" --dry-run --provider claude start repo dotfiles fixtur
 grep -Fq "'start repo' is deprecated; use 'start worker dotfiles' (its agent is worker-dotfiles)" "$ERR" ||
     fail 'start repo does not warn that it is deprecated'
 [[ "$alias_out" == *'herdr agent start worker-dotfiles'* ]] || fail 'start repo does not name the agent worker-dotfiles'
+session_out=$(TASK_SESSION=fixture-session "$TASK_AGENT" --dry-run --provider claude start worker dotfiles fixture-pane "$REPO" 2>/dev/null)
+[[ "$session_out" == *'herdr --session fixture-session agent start worker-dotfiles'* ]] || fail 'start does not honour TASK_SESSION'
 printf 'PASS: start repo still works, with a deprecation warning, as start worker\n'
 
 # Codex trust needs the pane's cwd; without it, a dry run says so and a real

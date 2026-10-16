@@ -45,6 +45,10 @@ MIGRATIONS = {
     3: [
         """CREATE TABLE plan_state (id INTEGER PRIMARY KEY CHECK (id = 1), error TEXT)""",
     ],
+    4: [
+        # JSON list; NULL for attempts started before this migration.
+        """ALTER TABLE attempts ADD COLUMN scope TEXT""",
+    ],
 }
 PLAN_RULE = "plan-invalid"
 
@@ -193,8 +197,9 @@ def install(conn, node_id, budget):
         return attempt
 
 
-def start(conn, node_id, session_id=None, prompt_at=None):
-    """ready -> running. prompt_at is when the prompt goes out (now by default). One running node per agent."""
+def start(conn, node_id, session_id=None, prompt_at=None, scope=None):
+    """ready -> running. prompt_at is when the prompt goes out (now by default); scope is the attempt's Scope list, kept
+    so a restarted dispatcher checks the attempt against what it was started with. One running node per agent."""
     now = time.time()
     prompt_at = now if prompt_at is None else prompt_at
     with transaction(conn):
@@ -206,8 +211,8 @@ def start(conn, node_id, session_id=None, prompt_at=None):
             raise TransitionError(f"{row['agent']} is already running {busy['id']}")
         conn.execute("UPDATE nodes SET status = 'running', started_at = ?, ended_at = NULL WHERE id = ?", (now, node_id))
         conn.execute(
-            "UPDATE attempts SET session_id = ?, prompt_at = ?, started_at = ? WHERE node = ? AND attempt = ?",
-            (session_id, prompt_at, now, node_id, row["attempt"]),
+            "UPDATE attempts SET session_id = ?, prompt_at = ?, started_at = ?, scope = ? WHERE node = ? AND attempt = ?",
+            (session_id, prompt_at, now, None if scope is None else json.dumps(scope), node_id, row["attempt"]),
         )
         _event(conn, node_id, "start", f"attempt {row['attempt']}")
 
@@ -384,9 +389,11 @@ def open_wakes(conn):
 
 
 def running(conn):
-    """The running nodes with their attempt's prompt time, so a restarted dispatcher can watch them again."""
+    """The running nodes with their attempt's prompt time, budget and scope, so a restarted dispatcher can watch them
+    again as they were started (scope is NULL for an attempt from before migration 4)."""
     return conn.execute(
-        "SELECT n.id, n.agent, a.prompt_at FROM nodes n JOIN attempts a ON a.node = n.id AND a.attempt = n.attempt WHERE n.status = 'running'"
+        "SELECT n.id, n.agent, a.prompt_at, a.budget_turns, a.budget_prompt_k, a.scope FROM nodes n "
+        "JOIN attempts a ON a.node = n.id AND a.attempt = n.attempt WHERE n.status = 'running'"
     ).fetchall()
 
 

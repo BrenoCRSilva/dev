@@ -50,6 +50,7 @@ written after its prompt; the first step's prompt time is the hook's install tim
 herdr session. Stdlib only.
 """
 import argparse
+import fcntl
 import importlib.util
 import json
 import os
@@ -75,6 +76,7 @@ FORMULA = HERE / "task-roles" / "formulas" / "worker-step.toml"
 LOG_LINE = re.compile(r"(\S+) (\S+) route=(continue|checkpoint|stopped:\w+) step=(\S+)")
 QUEUE_FILE = re.compile(r"(\d+)-(.+)\.md")
 SLICE_MS = int(os.environ.get("TASK_DISPATCH_SLICE_MS", 10 * 60 * 1000))
+LAUNCH_WAIT_MS = 60 * 1000
 
 EMPTY = 0
 USAGE = 2
@@ -92,11 +94,13 @@ CHECKS_FAILED = 24
 BUDGET = 25
 STALE = 26
 QUESTION = 27
+LAUNCH = 28
+LAUNCHED = "launched"  # a message from the launch thread, not an exit code
 LOCKED = 23
 DAEMON_STOPPED = 1
 ASK_USER = 11
 STOP_NAMES = {NEEDS_DECISION: "needs_decision", OUT_OF_SCOPE: "out_of_scope", CHECKS_FAILED: "checks", BUDGET: "budget", 10: "escalate", ASK_USER: "ask_user", 20: "decision_unavailable", QUESTION: "question"}
-FAIL_NAMES = {BLOCKED: "blocked", NOT_STARTED: "not_started", TIMED_OUT: "timed_out", HERDR: "herdr", INTERNAL: "internal", NO_REPORT: "no_report", STALE: "stale_report"}
+FAIL_NAMES = {BLOCKED: "blocked", NOT_STARTED: "not_started", TIMED_OUT: "timed_out", HERDR: "herdr", INTERNAL: "internal", NO_REPORT: "no_report", STALE: "stale_report", LAUNCH: "launch"}
 V2_COMMANDS = ("run", "wake-wait", "status", "wakes", "resolve", "pause", "resume")
 TICK_S = 1
 STOP_ROUTES = {NEEDS_DECISION: "stopped:needs_decision", OUT_OF_SCOPE: "stopped:out_of_scope"}
@@ -128,12 +132,15 @@ class Launch(Exception):
 
 
 def _reply(text):
-    """The JSON object in text, or None when there is none."""
-    try:
-        reply = json.loads(text)
-    except ValueError:
-        return None
-    return reply if isinstance(reply, dict) else None
+    """The JSON object in text: the whole text, else its last line that is one (herdr may log before its reply)."""
+    for candidate in [text, *reversed(text.splitlines())]:
+        try:
+            reply = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(reply, dict):
+            return reply
+    return None
 
 
 def herdr(*args):
@@ -193,6 +200,9 @@ def relaunch(root, agent):
         raise Launch(f"{agent} cannot start a fresh session; use session = \"continue\"")
     task_agent("stop", agent)
     task_agent(*start)
+    # The fresh session must be idle before it is prompted: one that is not in time fails the launch.
+    if wait_status(agent, "idle", LAUNCH_WAIT_MS) != "idle":
+        raise Launch(f"{agent} is not idle {LAUNCH_WAIT_MS // 1000} s after its fresh start")
 
 
 def wait_status(agent, until, timeout_ms):
@@ -297,11 +307,10 @@ def checkpoint_marked(hook):
     return any(re.fullmatch(r"checkpoint:\s*true", line.strip()) for line in head)
 
 
-def scope_regexes(hook):
-    """The worktree paths the hook's Scope: line allows. A plain path also covers the files under it."""
-    match = re.search(r"^Scope:\s*(.*)$", hook.read_text(encoding="utf-8"), re.M)
+def scope_regexes(scope):
+    """The worktree paths a Scope list allows. A plain path also covers the files under it, as in v1."""
     regexes = []
-    for item in (match[1].split(",") if match else []):
+    for item in scope:
         item = item.strip().strip("`").rstrip("/")
         if not item or item == "none":
             continue
@@ -312,12 +321,18 @@ def scope_regexes(hook):
     return regexes
 
 
+def hook_scope(hook):
+    """The items of a hook's Scope: line."""
+    match = re.search(r"^Scope:\s*(.*)$", hook.read_text(encoding="utf-8"), re.M)
+    return match[1].split(",") if match else []
+
+
 def stop_reason(hook, report):
     """Why watch stops after this step's report, as (code, why), or None to continue."""
     data = json.loads(report.read_text(encoding="utf-8"))
     if data.get("needs_decision"):
         return NEEDS_DECISION, f"needs_decision is set: {str(data['needs_decision'])[:200]}"
-    regexes = scope_regexes(hook)
+    regexes = scope_regexes(hook_scope(hook))
     outside = [path for path in data.get("files_changed", []) if not any(r.match(path) for r in regexes)]
     if outside:
         return OUT_OF_SCOPE, f"changed outside Scope: {', '.join(outside)}"[:300]
@@ -441,48 +456,37 @@ def wait(agents, root, start_ms, turn_ms):
 STOP = threading.Event()
 
 
-def pid_alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
 def lock_holder(root):
-    """The pid holding dispatch.lock, -1 when the file is there but empty, None when no live holder."""
-    path = root / "dispatch.lock"
+    """The pid holding dispatch.lock, -1 when it is held but the pid is not written yet, None when nothing holds it.
+    The flock is the lock: an empty or garbled file that nothing holds is stale."""
     try:
-        text = path.read_text(encoding="utf-8").strip()
-    except OSError:
+        fd = os.open(root / "dispatch.lock", os.O_RDONLY)
+    except FileNotFoundError:
         return None
-    if not text:
-        return -1
     try:
-        pid = int(text)
-    except ValueError:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            text = os.pread(fd, 32, 0).decode(errors="replace").strip()
+            return int(text) if text.isdigit() else -1
         return None
-    return pid if pid_alive(pid) else None
+    finally:
+        os.close(fd)
 
 
 def take_lock(root):
-    """Writes dispatch.lock with this pid. Returns None on success, else the live holder (-1 when its pid is unknown).
-    A lock whose pid is dead is stale and is replaced."""
-    path = root / "dispatch.lock"
-    while True:
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            holder = lock_holder(root)
-            if holder is not None:
-                return holder
-            path.unlink(missing_ok=True)
-            continue
-        os.write(fd, f"{os.getpid()}\n".encode())
+    """Takes an exclusive flock on dispatch.lock and writes this pid in it. Returns the fd, which the daemon keeps open
+    (closing it, or the process ending, releases the lock), or None when another dispatcher holds it. The file is never
+    unlinked, so no process can lock a file another has already replaced."""
+    fd = os.open(root / "dispatch.lock", os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
         os.close(fd)
         return None
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    return fd
 
 
 def hook_text(root, nodes, node, attempt):
@@ -519,10 +523,11 @@ def evaluate(root, agent, node, scope, budget):
     failed = [check.get("cmd", "?") for check in data.get("checks", []) if check.get("exit") != 0]
     if failed:
         return CHECKS_FAILED, f"checks not all exit 0: {', '.join(failed)}"[:300]
-    regexes = [glob_regex(pattern) for pattern in scope]
-    outside = [path for path in data.get("files_changed", []) if not any(r.match(path) for r in regexes)]
-    if outside:
-        return OUT_OF_SCOPE, f"changed outside scope: {', '.join(outside)}"[:300]
+    if scope is not None:  # None: the node is gone from the plan, so there is no scope to check against
+        regexes = scope_regexes(scope)
+        outside = [path for path in data.get("files_changed", []) if not any(r.match(path) for r in regexes)]
+        if outside:
+            return OUT_OF_SCOPE, f"changed outside scope: {', '.join(outside)}"[:300]
     hit = DECIDE_MODULE.safety_hit(DECIDE_MODULE.load_formula(FORMULA), data)
     if hit:
         return ASK_USER, f"safety: {hit}"[:300]
@@ -584,7 +589,7 @@ def finish(conn, root, node, code, line, plan):
     return stop_node(conn, node, "stopped", STOP_NAMES.get(code, "decide"), line, "user" if code == ASK_USER else "opus")
 
 
-def tick(conn, root, nodes, start_ms, turn_ms, results):
+def tick(conn, root, nodes, results):
     """Reconciles the plan, then installs and starts each ready node that is not paused. A node whose work raises fails
     failed:internal; the others still start."""
     task_state.reconcile(conn, nodes)
@@ -592,32 +597,42 @@ def tick(conn, root, nodes, start_ms, turn_ms, results):
     live = {key: node for key, node in nodes.items() if key not in held and node.agent not in held}
     for node_id in task_plan.ready(live, task_state.snapshot(conn)):
         try:
-            launch(conn, root, nodes, node_id, start_ms, turn_ms, results)
+            launch(conn, root, nodes, node_id, results)
         except Exception as error:
             task_state.fail_internal(conn, node_id, repr(error))
 
 
-def launch(conn, root, nodes, node_id, start_ms, turn_ms, results):
-    """Installs and starts one ready node, or raises its checkpoint wake."""
+def launch(conn, root, nodes, node_id, results):
+    """Installs and starts one ready node, or raises its checkpoint wake. This thread does the state writes: the install,
+    then the start with prompt_at, taken before the relaunch so a report written during it is from this attempt. The
+    hook, relaunch and prompt run in a thread for the node, which reports through results."""
     node = nodes[node_id]
     if node.checkpoint:
         task_state.wake_once(conn, node_id, "opus", "checkpoint", f"checkpoint {node_id}: review, then resolve continue")
         return
     attempt = task_state.install(conn, node_id, node.budget)
-    (root / "hooks").mkdir(exist_ok=True)
-    (root / "hooks" / f"{node.agent}.md").write_text(hook_text(root, nodes, node, attempt), encoding="utf-8")
-    # The node is running before anything can fail, so a failed start routes it failed. prompt_at is taken before the
-    # relaunch: a report written during it is from this attempt, and an older one is still rejected.
+    # The node is running before anything can fail, so a failed start routes it failed.
     prompt_at = time.time()
-    task_state.start(conn, node_id, prompt_at=prompt_at)
+    task_state.start(conn, node_id, prompt_at=prompt_at, scope=node.scope)
+    threading.Thread(target=prompt_lane, args=(results, root, nodes, node, attempt, prompt_at), daemon=True).start()
+
+
+def prompt_lane(results, root, nodes, node, attempt, prompt_at):
+    """Writes the node's hook, relaunches its agent if the session is fresh, and prompts it. Puts (node, LAUNCHED, the
+    watch's arguments) on results once the prompt is sent, or (node, code, line) when the launch fails."""
     try:
+        (root / "hooks").mkdir(exist_ok=True)
+        (root / "hooks" / f"{node.agent}.md").write_text(hook_text(root, nodes, node, attempt), encoding="utf-8")
         if node.session == "fresh":
             relaunch(root, node.agent)
         herdr("prompt", node.agent, f"Read {root}/hooks/{node.agent}.md and follow it. End with the SUMMARY block.")
-    except (Herdr, Launch) as error:
-        stop_node(conn, node_id, "failed", "herdr" if isinstance(error, Herdr) else "launch", str(error))
-        return
-    spawn(results, root, node.agent, node_id, node.scope, node.budget, prompt_at, start_ms, turn_ms)
+    except Herdr as error:
+        return results.put((node.id, HERDR, str(error)))
+    except Launch as error:
+        return results.put((node.id, LAUNCH, str(error)))
+    except Exception as error:
+        return results.put((node.id, INTERNAL, f"internal: {node.id}: {error!r}"))
+    results.put((node.id, LAUNCHED, (node.agent, node.scope, node.budget, prompt_at)))
 
 
 def load_nodes(conn, root):
@@ -633,9 +648,10 @@ def load_nodes(conn, root):
 
 
 def daemon(root, start_ms, turn_ms):
-    held = take_lock(root)
-    if held is not None:
-        print(f"dispatch.lock held by pid {held}" if held > 0 else "dispatch.lock held (pid unknown)")
+    lock = take_lock(root)
+    if lock is None:
+        held = lock_holder(root)
+        print(f"dispatch.lock held by pid {held}" if held and held > 0 else "dispatch.lock held (pid unknown)")
         return LOCKED
     STOP.clear()
     signal.signal(signal.SIGTERM, lambda *_: STOP.set())
@@ -645,20 +661,32 @@ def daemon(root, start_ms, turn_ms):
     try:
         conn = task_state.connect(root)
         print(f"dispatcher started (pid {os.getpid()})", flush=True)
-        known = load_nodes(conn, root) or {}
+        nodes = load_nodes(conn, root)
+        known = nodes or {}
         for row in task_state.running(conn):
-            # A running node stays running across a restart: watch its turn again from its prompt time.
+            # A running node stays running across a restart: watch its turn again from its prompt time, with the budget
+            # and scope its attempt started with. A node gone from the plan has no scope to check (None skips it).
             node = known.get(row["id"])
-            budget = node.budget if node else task_plan.DEFAULTS["budget"]
-            spawn(results, root, row["agent"], row["id"], node.scope if node else [], budget, row["prompt_at"], start_ms, turn_ms)
+            if nodes is not None and node is None:
+                scope = None
+            elif row["scope"] is not None:
+                scope = json.loads(row["scope"])
+            else:
+                scope = node.scope if node else None  # an attempt from before migration 4
+            budget = {"turns": row["budget_turns"], "prompt_k": row["budget_prompt_k"]}
+            spawn(results, root, row["agent"], row["id"], scope, budget, row["prompt_at"], start_ms, turn_ms)
         while not STOP.is_set():
             nodes = load_nodes(conn, root)
             if nodes is not None:
                 known = nodes
-                tick(conn, root, nodes, start_ms, turn_ms, results)
+                tick(conn, root, nodes, results)
             try:
                 node, code, line = results.get(timeout=TICK_S)
             except queue.Empty:
+                continue
+            if code == LAUNCHED:
+                agent, scope, budget, since = line
+                spawn(results, root, agent, node, scope, budget, since, start_ms, turn_ms)
                 continue
             try:
                 finish(conn, root, node, code, line, known)
@@ -667,8 +695,7 @@ def daemon(root, start_ms, turn_ms):
     finally:
         if conn is not None:
             conn.close()
-        if lock_holder(root) == os.getpid():
-            (root / "dispatch.lock").unlink(missing_ok=True)
+        os.close(lock)
     print("dispatcher stopped", flush=True)
     return EMPTY
 
@@ -705,7 +732,7 @@ def status_main(root):
     except task_plan.PlanError as error:
         print(f"plan: INVALID {error.errors[0]}")
     holder = lock_holder(root)
-    print(f"dispatcher: running pid {holder}" if holder else "dispatcher: stopped")
+    print(f"dispatcher: running pid {holder}" if holder else "dispatcher: not running")
     conn = task_state.connect(root)
     try:
         rows = [dict(row) for row in conn.execute("SELECT * FROM nodes ORDER BY rowid")]
