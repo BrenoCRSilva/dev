@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Spend per role for the task agents (contract C1), from Claude Code and Codex transcripts.
+"""Spend and efficiency for the task agents (contracts C1 and C2), from Claude Code and Codex transcripts.
 
     task-spend.py [--since WHEN] [--until WHEN] [--by day|task] [--json]
                   [--split WHEN] [--prices FILE]
+                  [--efficiency [--group role|model|task|role,task|session]]
                   [--claude-dir DIR] [--codex-dir DIR] [--tasks-dir DIR]
 
 Reads <claude-dir>/**/*.jsonl (subagent sidechains included) and <codex-dir>/**/*.jsonl
 when present. Read-only: writes nothing, no network. Each API response counts once:
 Claude streams one message as several records with the same message id, and the
-largest count seen for each field is kept.
+largest count seen for each field is kept; its tool_use blocks are counted by id.
 
 A response's task and role come from the cwd it ran in: <tasks>/<task> is the
 orchestrator, <tasks>/<task>/research the researcher, <tasks>/<task>/<repo> worker-<repo>,
@@ -22,6 +23,13 @@ WHEN is YYYY-MM-DD or an ISO date-time with optional zone; zone-less values are 
 --since is inclusive, --until exclusive. --by task sums over days. --split WHEN prints, per
 role, the active days, sessions and USD per day and per session before and after WHEN
 (text only). --json prints the rows as a list.
+
+--efficiency prints, per group, sessions, turns (API responses), tasks, tokens and USD by
+kind (cache writes split 5m and 1h), USD per turn, session and task, prompt size per turn
+(input + cache read + cache write), cache hit and write share, tool calls per turn and the
+share of turns in a price tier above the first. The task group adds the orchestrator's share
+of task USD and worker turns per orchestrator turn. With --split it prints the tables before
+and after WHEN (text only).
 """
 import argparse
 import collections
@@ -29,34 +37,43 @@ import datetime
 import functools
 import glob
 import json
+import math
 import os
 import sys
 
-# USD per million tokens. Cache read is 0.05x input; cache write is 1.25x (5m) or 2x (1h),
-# as the Anthropic pricing page states. A model's tiers are picked by its response's prompt
+# USD per million tokens: Claude API list prices from the claude-api skill, cached 2026-10-06
+# (prompts/prices.json in the task root). A model's tiers are picked by its response's prompt
 # size (input + cache tokens): the first tier whose upto holds it; the last tier has upto null.
-# Known ids' prices are copied from scripts/agent-usage.py (retrieved 2026-10-15); verify.
-# TODO: claude-opus-5 has no price. Codex models (gpt-6-*) have none either: unpriced until
-# added here or passed with --prices.
+# Codex models (gpt-6-*) have no price yet: unpriced until added here or passed with --prices.
 PRICES = {
     "claude-opus-5-5": [
         {"upto": None, "input": 4.00, "output": 20.00, "cache_read": 0.20,
          "cache_write_5m": 5.00, "cache_write_1h": 8.00},
     ],
+    "claude-opus-5": [
+        {"upto": None, "input": 5.00, "output": 25.00, "cache_read": 0.50,
+         "cache_write_5m": 6.25, "cache_write_1h": 10.00},
+    ],
     "claude-sonnet-5-5": [
-        {"upto": None, "input": 2.00, "output": 10.00, "cache_read": 0.10,
+        {"upto": None, "input": 2.00, "output": 10.00, "cache_read": 0.20,
          "cache_write_5m": 2.50, "cache_write_1h": 4.00},
     ],
     "claude-haiku-5-5": [
-        {"upto": 100_000, "input": 0.10, "output": 0.50, "cache_read": 0.005,
+        {"upto": 100_000, "input": 0.10, "output": 0.50, "cache_read": 0.01,
          "cache_write_5m": 0.125, "cache_write_1h": 0.20},
-        {"upto": None, "input": 0.50, "output": 2.50, "cache_read": 0.025,
+        {"upto": None, "input": 0.50, "output": 2.50, "cache_read": 0.05,
          "cache_write_5m": 0.625, "cache_write_1h": 1.00},
     ],
-    "claude-opus-5": None,
+    "claude-fable-5-1": [
+        {"upto": None, "input": 10.00, "output": 50.00, "cache_read": 0.25,
+         "cache_write_5m": 12.50, "cache_write_1h": 20.00},
+    ],
 }
 TOKEN_FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
-TEXT_COLUMNS = ("date", "task", "role", "model")
+GROUPS = {"role": ("role",), "model": ("model",), "task": ("task",), "role,task": ("role", "task"),
+          "session": ("session",)}
+# Session rows name the session and the task and role of its first response.
+LABELS = {"session": ("session", "task", "role")}
 
 
 def parse_when(text):
@@ -110,8 +127,16 @@ def claude_responses(root, counts):
             split = as_dict(usage.get("cache_creation"))
             write_5m = num(split.get("ephemeral_5m_input_tokens"))
             write_1h = num(split.get("ephemeral_1h_input_tokens"))
-            if not write_5m and not write_1h:
+            unsplit = not write_5m and not write_1h and num(usage.get("cache_creation_input_tokens")) > 0
+            if unsplit:
                 write_5m = num(usage.get("cache_creation_input_tokens"))
+            blocks = message.get("content")
+            content = blocks if isinstance(blocks, list) else []
+            tool_ids = {
+                block.get("id") or f"{path}:{number}:{index}"
+                for index, block in enumerate(content)
+                if isinstance(block, dict) and block.get("type") == "tool_use"
+            }
             yield {
                 "provider": "claude",
                 "key": message.get("id") or f"{path}:{number}",
@@ -125,6 +150,8 @@ def claude_responses(root, counts):
                 "cache_read": num(usage.get("cache_read_input_tokens")),
                 "cache_write_5m": write_5m,
                 "cache_write_1h": write_1h,
+                "write_unsplit": unsplit,
+                "tool_ids": tool_ids,
             }
 
 
@@ -148,6 +175,7 @@ def codex_responses(root, counts):
             model, turn_cwd = turns.get(payload.get("turn_id"), (None, None))
             usage = as_dict(payload.get("usage"))
             cached = num(usage.get("cached_input_tokens"))
+            cache_write = num(usage.get("cache_write_input_tokens"))
             # Codex's input_tokens includes the cached part; the cache is priced apart.
             yield {
                 "provider": "codex",
@@ -160,8 +188,10 @@ def codex_responses(root, counts):
                 "input": max(num(usage.get("input_tokens")) - cached, 0),
                 "output": num(usage.get("output_tokens")),
                 "cache_read": cached,
-                "cache_write_5m": num(usage.get("cache_write_input_tokens")),
+                "cache_write_5m": cache_write,
                 "cache_write_1h": 0,
+                "write_unsplit": cache_write > 0,
+                "tool_ids": set(),
             }
 
 
@@ -177,6 +207,7 @@ def merge_responses(responses):
         for field in TOKEN_FIELDS:
             kept[field] = max(kept[field], response[field])
         kept["ts"] = kept["ts"] or response["ts"]
+        kept["tool_ids"] |= response["tool_ids"]
     return list(merged.values())
 
 
@@ -202,13 +233,16 @@ def attribute(cwd, sidechain, tasks):
     return task, role
 
 
-def cost_of(response, prices):
-    """USD for one response at its price tier, or None when its model has no price."""
-    prompt = response["input"] + response["cache_read"] + response["cache_write_5m"] + response["cache_write_1h"]
-    for tier in prices.get(response["model"]) or ():
-        if tier["upto"] is None or prompt <= tier["upto"]:
-            return sum(response[field] * tier[field] for field in TOKEN_FIELDS) / 1_000_000
-    return None
+def prompt_size(response):
+    return response["input"] + response["cache_read"] + response["cache_write_5m"] + response["cache_write_1h"]
+
+
+def price_turn(response, prices):
+    """(USD by token kind, tier index) for one response, or (None, None) when its model has no price."""
+    for index, tier in enumerate(prices.get(response["model"]) or ()):
+        if tier["upto"] is None or prompt_size(response) <= tier["upto"]:
+            return {field: response[field] * tier[field] / 1_000_000 for field in TOKEN_FIELDS}, index
+    return None, None
 
 
 def load_prices(path):
@@ -274,51 +308,174 @@ def split_rows(responses, when):
     return rows
 
 
-def fmt(value):
+def ratio(top, bottom):
+    return top / bottom if bottom else None
+
+
+def group_labels(group):
+    return LABELS[group] if group in LABELS else GROUPS[group]
+
+
+def efficiency_row(group, members):
+    """C2 figures for one group of responses. USD per turn, session and task use the priced turns."""
+    labels = group_labels(group)
+    row = {name: members[0][name] for name in labels}
+    priced = [response for response in members if response["cost"] is not None]
+    claude = [response for response in members if response["provider"] == "claude"]
+    tiered = [response for response in members if response["tiered"]]
+    long_tier = [response for response in tiered if response["tier"] > 0]
+    tokens = {field: sum(response[field] for response in members) for field in TOKEN_FIELDS}
+    prompts = sorted(prompt_size(response) for response in members)
+    prompt_total = sum(prompts)
+    sessions = {(response["provider"], response["session"]) for response in members}
+    cost = sum(response["cost"] for response in priced) if priced else None
+    row.update(
+        sessions=len(sessions),
+        turns=len(members),
+        tasks=len({response["task"] for response in members}),
+        turns_per_session=ratio(len(members), len(sessions)),
+        tool_calls_per_turn=ratio(sum(len(response["tool_ids"]) for response in claude), len(claude)),
+        unpriced_turns=len(members) - len(priced),
+        long_tier_turns=len(long_tier),
+        long_tier_share=ratio(len(long_tier), len(tiered)),
+        long_tier_usd=sum(response["cost"] for response in long_tier) if long_tier else None,
+        output_per_turn=ratio(tokens["output"], len(members)),
+        prompt_avg=ratio(prompt_total, len(members)),
+        prompt_p95=prompts[max(0, math.ceil(0.95 * len(prompts)) - 1)],
+        cache_hit=ratio(tokens["cache_read"], prompt_total),
+        write_share=ratio(tokens["cache_write_5m"] + tokens["cache_write_1h"], prompt_total),
+        cost_usd=cost,
+        usd_per_turn=ratio(cost, len(priced)),
+        usd_per_session=ratio(cost, len({(response["provider"], response["session"]) for response in priced})),
+        usd_per_task=ratio(cost, len({response["task"] for response in priced})),
+        unsplit_write_turns=sum(response["write_unsplit"] for response in members),
+    )
+    for field in TOKEN_FIELDS:
+        row[f"{field}_tokens"] = tokens[field]
+        row[f"usd_{field}"] = sum(response["cost_by_kind"][field] for response in priced) if priced else None
+    if group == "task":
+        orchestrator = sum(response["cost"] for response in priced if response["role"] == "orchestrator")
+        row["orchestrator_usd_share"] = ratio(orchestrator, cost)
+        row["worker_turns_per_orchestrator_turn"] = ratio(
+            sum(response["role"].startswith("worker-") for response in members),
+            sum(response["role"] == "orchestrator" for response in members),
+        )
+    return row
+
+
+def efficiency_rows(responses, group):
+    groups = collections.defaultdict(list)
+    for response in responses:
+        groups[tuple(response[name] for name in GROUPS[group])].append(response)
+    return [efficiency_row(group, members) for _, members in sorted(groups.items())]
+
+
+def cell(value, kind):
     if value is None:
         return "-"
-    if isinstance(value, float):
-        return f"{value:,.4f}"
-    if isinstance(value, int):
+    if kind == "text":
+        return str(value)
+    if kind == "int":
         return f"{value:,}"
-    return str(value)
+    if kind == "tok":
+        if value >= 1_000_000:
+            return f"{value / 1_000_000:.2f}M"
+        if value >= 1_000:
+            return f"{value / 1_000:.1f}k"
+        return f"{value:,.0f}"
+    if kind == "usd":
+        return f"${value:,.2f}"
+    if kind == "usd4":
+        return f"{value:,.4f}"
+    if kind == "pct":
+        return f"{value:.1%}"
+    if kind == "ratio":
+        return f"{value:,.2f}"
+    raise ValueError(kind)
 
 
 def print_table(columns, rows, out):
-    """columns: (header, key) pairs. Text columns are left-aligned, numbers right-aligned."""
-    cells = [[header for header, _ in columns]]
-    cells += [[fmt(row.get(key)) for _, key in columns] for row in rows]
+    """columns: (header, key, kind) triples. Text columns are left-aligned, the rest right-aligned."""
+    cells = [[header for header, _, _ in columns]]
+    cells += [[cell(row.get(key), kind) for _, key, kind in columns] for row in rows]
     widths = [max(len(line[i]) for line in cells) for i in range(len(columns))]
     for line in cells:
         justified = [
-            cell.ljust(width) if key in TEXT_COLUMNS else cell.rjust(width)
-            for (_, key), cell, width in zip(columns, line, widths)
+            text.ljust(width) if kind == "text" else text.rjust(width)
+            for (_, _, kind), text, width in zip(columns, line, widths)
         ]
         print("  ".join(justified).rstrip(), file=out)
 
 
 ROW_COLUMNS = [
-    ("date", "date"), ("task", "task"), ("role", "role"), ("model", "model"), ("sessions", "sessions"),
-    ("input", "input_tokens"), ("output", "output_tokens"), ("cache read", "cache_read_tokens"),
-    ("cache write", "cache_write_tokens"), ("USD", "cost_usd"), ("unpriced", "unpriced_turns"),
+    ("date", "date", "text"), ("task", "task", "text"), ("role", "role", "text"), ("model", "model", "text"),
+    ("sessions", "sessions", "int"), ("input", "input_tokens", "int"), ("output", "output_tokens", "int"),
+    ("cache read", "cache_read_tokens", "int"), ("cache write", "cache_write_tokens", "int"),
+    ("USD", "cost_usd", "usd4"), ("unpriced", "unpriced_turns", "int"),
 ]
-SPLIT_COLUMNS = [("role", "role")] + [
-    (f"{period} {name}", f"{period}_{key}")
+SPLIT_COLUMNS = [("role", "role", "text")] + [
+    (f"{period} {name}", f"{period}_{key}", kind)
     for period in ("before", "after")
-    for name, key in (("days", "days"), ("sessions", "sessions"), ("USD/day", "usd_per_day"),
-                      ("USD/session", "usd_per_session"))
+    for name, key, kind in (("days", "days", "int"), ("sessions", "sessions", "int"),
+                            ("USD/day", "usd_per_day", "usd4"), ("USD/session", "usd_per_session", "usd4"))
 ]
+EFFICIENCY_TABLES = [
+    ("volume", [
+        ("sessions", "sessions", "int"), ("turns", "turns", "int"), ("tasks", "tasks", "int"),
+        ("turns/session", "turns_per_session", "ratio"), ("tool calls/turn", "tool_calls_per_turn", "ratio"),
+        ("unpriced", "unpriced_turns", "int"), ("long-tier turns", "long_tier_turns", "int"),
+        ("long share", "long_tier_share", "pct"), ("long-tier USD", "long_tier_usd", "usd"),
+    ]),
+    ("tokens", [
+        ("input", "input_tokens", "tok"), ("output", "output_tokens", "tok"),
+        ("cache read", "cache_read_tokens", "tok"), ("write 5m", "cache_write_5m_tokens", "tok"),
+        ("write 1h", "cache_write_1h_tokens", "tok"), ("output/turn", "output_per_turn", "tok"),
+    ]),
+    ("USD", [
+        ("USD", "cost_usd", "usd"), ("input", "usd_input", "usd"), ("output", "usd_output", "usd"),
+        ("cache read", "usd_cache_read", "usd"), ("write 5m", "usd_cache_write_5m", "usd"),
+        ("write 1h", "usd_cache_write_1h", "usd"), ("USD/turn", "usd_per_turn", "usd"),
+        ("USD/session", "usd_per_session", "usd"), ("USD/task", "usd_per_task", "usd"),
+    ]),
+    ("prompt per turn", [
+        ("avg", "prompt_avg", "tok"), ("p95", "prompt_p95", "tok"),
+        ("cache hit", "cache_hit", "pct"), ("write share", "write_share", "pct"),
+    ]),
+]
+TASK_TABLE = ("per task", [
+    ("orchestrator share of USD", "orchestrator_usd_share", "pct"),
+    ("worker turns/orchestrator turn", "worker_turns_per_orchestrator_turn", "ratio"),
+])
+EFFICIENCY_NOTES = [
+    "USD is a list-price estimate. Per turn, session and task it covers priced turns only (see unpriced).",
+    "tool calls/turn counts Claude turns only; Codex tool calls are not counted.",
+    "prompt = input + cache read + cache write; cache hit = cache read / prompt; write share = cache write / prompt; "
+    "p95 is nearest-rank.",
+    "long tier: turns priced above the first tier (Haiku prompts over 100k tokens); long share is over tiered turns.",
+    "worker turns are roles worker-<repo>; the researcher and subagents are left out.",
+]
+
+
+def print_efficiency(rows, group, out):
+    labels = group_labels(group)
+    tables = EFFICIENCY_TABLES + ([TASK_TABLE] if group == "task" else [])
+    for title, columns in tables:
+        print(title, file=out)
+        print_table([(name, name, "text") for name in labels] + columns, rows, out)
+        print(file=out)
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Spend per role for the task agents (contract C1).")
+    parser = argparse.ArgumentParser(description="Spend and efficiency for the task agents (contracts C1, C2).")
     parser.add_argument("--since", type=parse_when, help="responses at or after this time")
     parser.add_argument("--until", type=parse_when, help="responses before this time (exclusive)")
-    parser.add_argument("--by", choices=["day", "task"], default="day",
-                        help="rows per day, or per task over all days (date is then '-')")
+    parser.add_argument("--by", choices=["day", "task"],
+                        help="rows per day (default), or per task over all days (date is then '-')")
     parser.add_argument("--split", type=parse_when, metavar="WHEN",
-                        help="per-role averages before and after WHEN (text only)")
+                        help="per-role averages before and after WHEN; with --efficiency, the tables (text only)")
     parser.add_argument("--json", action="store_true", help="print the rows as a JSON list")
+    parser.add_argument("--efficiency", action="store_true", help="efficiency tables instead of spend rows")
+    parser.add_argument("--group", choices=sorted(GROUPS), help="efficiency rows per group (default role)")
     parser.add_argument("--prices", metavar="FILE", help="JSON object of model -> tiers (or null), overriding PRICES")
     parser.add_argument("--claude-dir", default=os.path.expanduser("~/.claude/projects"))
     parser.add_argument("--codex-dir", default=os.path.expanduser("~/.codex/sessions"))
@@ -328,6 +485,10 @@ def main(argv=None):
         parser.error("--since must be before --until")
     if args.split and args.json:
         parser.error("--split prints text only")
+    if args.by and args.efficiency:
+        parser.error("--by applies to spend rows, not --efficiency")
+    if args.group and not args.efficiency:
+        parser.error("--group needs --efficiency")
     try:
         prices = load_prices(args.prices) if args.prices else PRICES
     except (OSError, ValueError) as error:
@@ -351,20 +512,46 @@ def main(argv=None):
             continue
         response["date"] = ts.astimezone().date().isoformat() if ts else "-"
         response["task"], response["role"] = attribute(response["cwd"], response["sidechain"], tasks)
-        response["cost"] = cost_of(response, prices)
+        response["cost_by_kind"], response["tier"] = price_turn(response, prices)
+        response["cost"] = sum(response["cost_by_kind"].values()) if response["cost_by_kind"] else None
+        response["tiered"] = len(prices.get(response["model"]) or ()) > 1
         responses.append(response)
 
-    if args.split:
+    unsplit = sum(response["write_unsplit"] for response in responses)
+    notes = [f"cache writes with no 5m/1h split: {unsplit} response(s), counted as 5m."] if unsplit else []
+    if args.efficiency:
+        group = args.group or "role"
+        if args.split:
+            timed = [response for response in responses if response["ts"] is not None]
+            for label, picked in (
+                ("before", [response for response in timed if response["ts"] < args.split]),
+                ("after", [response for response in timed if response["ts"] >= args.split]),
+            ):
+                print(f"{label} {args.split.isoformat()}")
+                print_efficiency(efficiency_rows(picked, group), group, sys.stdout)
+        elif args.json:
+            json.dump(efficiency_rows(responses, group), sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        else:
+            print_efficiency(efficiency_rows(responses, group), group, sys.stdout)
+        if not args.json:
+            for note in EFFICIENCY_NOTES + notes:
+                print(f"* {note}")
+    elif args.split:
         timed = [response for response in responses if response["ts"] is not None]
         print(f"split at {args.split.isoformat()}: before is earlier, after is from that time")
         print_table(SPLIT_COLUMNS, split_rows(timed, args.split), sys.stdout)
+        for note in notes:
+            print(f"* {note}")
     elif args.json:
-        json.dump(rows_by(responses, args.by), sys.stdout, indent=2)
+        json.dump(rows_by(responses, args.by or "day"), sys.stdout, indent=2)
         sys.stdout.write("\n")
     else:
-        rows = rows_by(responses, args.by)
+        rows = rows_by(responses, args.by or "day")
         print_table(ROW_COLUMNS, rows + [{"date": "total", "task": "", "role": "", "model": "", **fold(responses)}],
                     sys.stdout)
+        for note in notes:
+            print(f"* {note}")
 
     unpriced = sorted({response["model"] for response in responses if response["cost"] is None})
     if unpriced:

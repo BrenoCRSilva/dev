@@ -4,7 +4,9 @@
 Expected values are worked out by hand from the PRICES table. Covers streamed-message
 dedup, role attribution from cwd, a subagent sidechain, the Haiku prompt-size tier, an
 unpriced model, a Codex rollout, a bad line, --since/--until, --by task, --split, the
---json and --prices options and their refusals. Writes only inside a temporary folder.
+--json and --prices options and their refusals. The --efficiency checks cover tool-call
+counting, the 5m/1h cache-write split with an unsplit write, prompt-size ratios and p95,
+the task view and the unpriced Codex turn. Writes only inside a temporary folder.
 Run: python3 -I scripts/tests/task-spend-fixture.py
 """
 import json
@@ -53,8 +55,8 @@ def run(args, env, expect=0):
     return result
 
 
-def close(a, b):
-    return abs(a - b) < 1e-9
+def close(a, b, tol=1e-9):
+    return abs(a - b) < tol
 
 
 def build(base):
@@ -98,6 +100,134 @@ def build(base):
     return {"--claude-dir": claude, "--codex-dir": codex, "--tasks-dir": tasks}
 
 
+def usage(input_tokens, output_tokens, cache_read=0, split=None, cache_write=0):
+    """A message usage block; split=(5m, 1h) adds the cache_creation breakdown."""
+    block = {"input_tokens": input_tokens, "output_tokens": output_tokens,
+             "cache_read_input_tokens": cache_read, "cache_creation_input_tokens": cache_write}
+    if split is not None:
+        block["cache_creation"] = {"ephemeral_5m_input_tokens": split[0], "ephemeral_1h_input_tokens": split[1]}
+    return block
+
+
+def message(msg_id, model, stamp, cwd, session, block, content=()):
+    return {"type": "assistant", "timestamp": stamp, "cwd": cwd, "sessionId": session,
+            "message": {"id": msg_id, "model": model, "usage": block, "content": list(content)}}
+
+
+def tool_use(tool_id):
+    return {"type": "tool_use", "id": tool_id}
+
+
+def build_efficiency(base):
+    """Synthetic logs for --efficiency; returns the flags the CLI is pointed at."""
+    tasks = os.path.join(base, "home", "tasks")
+    t2 = os.path.join(tasks, "t2")
+    dotfiles = os.path.join(t2, "dotfiles")
+    claude = os.path.join(base, "claude")
+    codex = os.path.join(base, "codex")
+    write_lines(os.path.join(claude, "e", "o1.jsonl"), [
+        # a1 is streamed as three records: a text block, then two tool calls. Output keeps the largest count.
+        message("a1", "claude-opus-5-5", "2026-10-16T10:00:00Z", t2, "o1", usage(100, 10, 1000, (500, 200), 700),
+                [{"type": "text"}]),
+        message("a1", "claude-opus-5-5", "2026-10-16T10:00:01Z", t2, "o1", usage(100, 20, 1000, (500, 200), 700),
+                [tool_use("u1")]),
+        message("a1", "claude-opus-5-5", "2026-10-16T10:00:02Z", t2, "o1", usage(100, 50, 1000, (500, 200), 700),
+                [tool_use("u2")]),
+        message("a2", "claude-opus-5-5", "2026-10-16T10:05:00Z", t2, "o1", usage(200, 20, 3000, (0, 0))),
+        # a3 has no cache_creation split, so its 4000 cache-write tokens count as 5m.
+        message("a3", "claude-opus-5-5", "2026-10-16T10:10:00Z", t2, "o1", usage(50, 30, 0, None, 4000),
+                [tool_use("u3")]),
+    ])
+    write_lines(os.path.join(claude, "e", "w1.jsonl"), [
+        message("b1", "claude-haiku-5-5", "2026-10-16T10:01:00Z", dotfiles, "w1", usage(10, 5, 90), [tool_use("v1")]),
+    ])
+    # Twenty turns with prompts of 1000 to 20000 tokens: the nearest-rank p95 is the 19th, 19000.
+    write_lines(os.path.join(claude, "e", "w2.jsonl"), [
+        message(f"w{k}", "claude-haiku-5-5", f"2026-10-16T11:{k:02d}:00Z", dotfiles, "w2", usage(1000 * k, 1))
+        for k in range(1, 21)
+    ])
+    write_lines(os.path.join(claude, "e", "r1.jsonl"), [
+        message("c1", "claude-sonnet-5-5", "2026-10-16T12:00:00Z", os.path.join(t2, "research"), "r1",
+                usage(1000, 100, 10_000, (2000, 0), 2000)),
+    ])
+    write_lines(os.path.join(codex, "rollout.jsonl"), [
+        {"type": "session_meta", "payload": {"session_id": "cx2", "cwd": dotfiles}},
+        {"type": "turn_context", "payload": {"turn_id": "t-1", "model": "gpt-6-luna", "cwd": dotfiles}},
+        {"type": "token_usage_record", "timestamp": "2026-10-16T10:30:00Z",
+         "payload": {"turn_id": "t-1", "response_id": "r9",
+                     "usage": {"input_tokens": 300, "cached_input_tokens": 100, "output_tokens": 20}}},
+    ])
+    return ["--claude-dir", claude, "--codex-dir", codex, "--tasks-dir", tasks]
+
+
+def check_efficiency(env):
+    with tempfile.TemporaryDirectory() as base:
+        dirs = build_efficiency(base)
+
+        def efficiency(*args):
+            return json.loads(run(["--efficiency", "--json", *args, *dirs], env).stdout)
+
+        # Session o1: 3 turns, 3 tool calls, tokens and USD per kind. Opus 5.5: a1 0.0057, a2 0.0018, a3 0.0208.
+        sessions = {row["session"]: row for row in efficiency("--group", "session")}
+        o1 = sessions["o1"]
+        check(o1["turns"] == 3 and o1["sessions"] == 1 and o1["tasks"] == 1, f"o1 counts: {o1}")
+        check(close(o1["tool_calls_per_turn"], 1.0), f"o1 tool calls per turn: {o1['tool_calls_per_turn']}")
+        check((o1["input_tokens"], o1["output_tokens"], o1["cache_read_tokens"], o1["cache_write_5m_tokens"],
+               o1["cache_write_1h_tokens"]) == (350, 100, 4000, 4500, 200), f"o1 tokens: {o1}")
+        check(close(o1["cost_usd"], 0.0283) and close(o1["usd_cache_write_5m"], 0.0225)
+              and close(o1["usd_cache_write_1h"], 0.0016), f"o1 USD by kind: {o1}")
+        check(close(o1["usd_per_turn"], 0.0283 / 3), f"o1 USD per turn: {o1['usd_per_turn']}")
+        check(close(o1["prompt_avg"], 9050 / 3) and o1["prompt_p95"] == 4050, f"o1 prompt size: {o1}")
+        check(close(o1["cache_hit"], 4000 / 9050) and close(o1["write_share"], 4700 / 9050), f"o1 ratios: {o1}")
+        check(o1["unsplit_write_turns"] == 1 and o1["unpriced_turns"] == 0, f"o1 unsplit/unpriced: {o1}")
+
+        # Session w2: 20 turns; prompt average 10,500 and p95 19,000; Haiku cost 0.02101 (all input, bar 20 output).
+        w2 = sessions["w2"]
+        check(w2["turns"] == 20 and w2["prompt_p95"] == 19000 and close(w2["prompt_avg"], 10_500),
+              f"w2 prompt size: {w2}")
+        check(close(w2["cost_usd"], 0.02101) and w2["cache_hit"] == 0, f"w2 cost: {w2}")
+
+        # Task view: orchestrator share of USD over the priced turns (o1 + b1 + w2 + c1; the Codex turn is unpriced),
+        # and worker turns per orchestrator turn (21 Claude worker turns + 1 Codex worker turn over 3).
+        tasks = efficiency("--group", "task")
+        check(len(tasks) == 1 and tasks[0]["task"] == "t2", f"task rows: {tasks}")
+        total = 0.0283 + 4.4e-6 + 0.02101 + 0.01
+        check(close(tasks[0]["orchestrator_usd_share"], 0.0283 / total, 1e-9), f"orchestrator share: {tasks[0]}")
+        check(close(tasks[0]["worker_turns_per_orchestrator_turn"], 22 / 3, 1e-9), f"worker turns: {tasks[0]}")
+
+        roles = {row["role"]: row for row in efficiency("--group", "role")}
+        check(set(roles) == {"orchestrator", "worker-dotfiles", "researcher"}, f"role rows: {sorted(roles)}")
+        worker = roles["worker-dotfiles"]
+        check(worker["turns"] == 22 and worker["sessions"] == 3 and worker["unpriced_turns"] == 1,
+              f"worker-dotfiles row: {worker}")
+        check(len(efficiency()) == 3, "default group is role")
+        check(len(efficiency("--group", "role,task")) == 3, "role,task rows")
+
+        # Codex has no tool-call count and no price: its model row has no USD and no tool calls per turn.
+        models = {row["model"]: row for row in efficiency("--group", "model")}
+        luna = models["gpt-6-luna"]
+        check(luna["cost_usd"] is None and luna["usd_per_turn"] is None and luna["tool_calls_per_turn"] is None
+              and luna["unpriced_turns"] == 1, f"gpt-6-luna row: {luna}")
+        check(models["claude-haiku-5-5"]["turns"] == 21, f"haiku turns: {models['claude-haiku-5-5']}")
+
+        # --since is applied before grouping: from 10:03 the orchestrator has a2 and a3 only.
+        since = json.loads(run(["--efficiency", "--json", "--group", "role", "--since", "2026-10-16T10:03:00+00:00",
+                                *dirs], env).stdout)
+        check({row["role"]: row["turns"] for row in since}["orchestrator"] == 2, f"since: {since}")
+
+        # Text: the task view, the unsplit footnote, and --split printing a before and an after table.
+        text = run(["--efficiency", "--group", "task", *dirs], env).stdout
+        check("orchestrator share of USD" in text and "cache writes with no 5m/1h split: 1 response(s)" in text,
+              f"text output: {text}")
+        split = run(["--efficiency", "--split", "2026-10-16T10:03:00+00:00", *dirs], env).stdout.splitlines()
+        heads = [line.split()[0] for line in split if line.startswith(("before ", "after "))]
+        check(heads == ["before", "after"], f"split headers: {heads}")
+
+        run(["--efficiency", "--by", "task", *dirs], env, expect=2)
+        run(["--group", "role", *dirs], env, expect=2)
+        run(["--efficiency", "--split", "2026-10-16", "--json", *dirs], env, expect=2)
+
+
 def main():
     env = {**os.environ, "TZ": "UTC"}
     with tempfile.TemporaryDirectory() as base:
@@ -117,11 +247,11 @@ def main():
             ("2026-10-15", "t1", "subagent", "claude-haiku-5-5"):
                 dict(input_tokens=500, output_tokens=50, cost=(500 * 0.10 + 50 * 0.50) / 1e6, sessions=1, unpriced=0),
             ("2026-10-15", "t1", "worker-dotfiles", "claude-opus-5"):
-                dict(input_tokens=100, output_tokens=10, cost=0.0, sessions=1, unpriced=1),
+                dict(input_tokens=100, output_tokens=10, cost=(100 * 5.00 + 10 * 25.00) / 1e6, sessions=1, unpriced=0),
             ("2026-10-15", "t1", "worker-dotfiles", "gpt-6-luna"):
                 dict(input_tokens=200, output_tokens=20, cost=0.0, sessions=1, unpriced=1, cache_read=100),
             ("2026-10-16", "t1", "researcher", "claude-sonnet-5-5"):
-                dict(input_tokens=1000, output_tokens=100, cost=(1000 * 2.00 + 100 * 10.00 + 10_000 * 0.10
+                dict(input_tokens=1000, output_tokens=100, cost=(1000 * 2.00 + 100 * 10.00 + 10_000 * 0.20
                                                                  + 2000 * 2.50) / 1e6,
                      sessions=1, unpriced=0, cache_read=10_000, cache_write=2000),
             ("2026-10-15", "-", "other", "claude-haiku-5-5"):
@@ -140,7 +270,7 @@ def main():
 
         # Warnings go to stderr; the bad line and unpriced models are named there.
         stderr = run(["--json", *dirs], env).stderr
-        check("claude-opus-5" in stderr and "gpt-6-luna" in stderr, f"unpriced models not named: {stderr}")
+        check("gpt-6-luna" in stderr and "claude-opus-5" not in stderr, f"unpriced models not named: {stderr}")
         check("skipped 1 bad lines" in stderr, f"bad line not counted: {stderr}")
 
         # --since is inclusive and --until exclusive: 10-16 holds the orchestrator and researcher.
@@ -161,7 +291,7 @@ def main():
         lines = {line.split()[0]: line.split() for line in split[2:] if line.strip()}
         check(lines["orchestrator"][5:] == ["1", "1", "0.0625", "0.0625"], f"split orchestrator: {lines}")
         check(lines["researcher"][1:5] == ["0", "0", "-", "-"], f"split researcher before: {lines}")
-        check(lines["researcher"][5:] == ["1", "1", "0.0090", "0.0090"], f"split researcher after: {lines}")
+        check(lines["researcher"][5:] == ["1", "1", "0.0100", "0.0100"], f"split researcher after: {lines}")
         run(["--split", "2026-10-16", "--json", *dirs], env, expect=2)
 
         # --prices overrides a model: opus-5 gets 1.00 input and 2.00 output per million.
@@ -182,6 +312,8 @@ def main():
         os.makedirs(empty)
         check(json.loads(run(["--json", "--claude-dir", empty, "--codex-dir", empty, "--tasks-dir", empty],
                              env).stdout) == [], "empty folder")
+
+        check_efficiency(env)
 
     print("task-spend fixture: ok")
 
