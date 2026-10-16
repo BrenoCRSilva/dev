@@ -114,8 +114,8 @@ def cli(env, root, *args, timeout=60):
     return subprocess.run([sys.executable, str(DISPATCH), *args, "--task-root", str(root)], capture_output=True, text=True, env=env, timeout=timeout)
 
 
-def daemon(env, root):
-    return subprocess.Popen([sys.executable, str(DISPATCH), "run", "--task-root", str(root)], env=env, stdout=subprocess.PIPE, text=True)
+def daemon(env, root, script=DISPATCH):
+    return subprocess.Popen([sys.executable, str(script), "run", "--task-root", str(root)], env=env, stdout=subprocess.PIPE, text=True)
 
 
 def stop(proc):
@@ -435,6 +435,107 @@ def scenario_t0_tiers(tmp):
         stop(proc)
 
 
+# The real task-dispatch.py with jev's ask replaced by a fake, so route mode runs offline. The fake answers favourably
+# (FAVORABLE) at FAKE_JEV_CONF, flips FAKE_JEV_FLIP to its other choice, and logs each request it is asked.
+JEV_DAEMON = r'''#!/usr/bin/env python3
+import importlib.util, json, os, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("task_dispatch", os.environ["FAKE_DISPATCH"])
+dispatch = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(dispatch)
+task_jev = dispatch.task_jev
+
+
+def fake_ask(body, *, url, shape, env, key_path, asked=None, **_):
+    with (Path(os.environ["FAKE_JEV_DIR"]) / "jev.log").open("a", encoding="utf-8") as log:
+        log.write(json.dumps(sorted(body["questions"])) + "\n")
+    flip = os.environ.get("FAKE_JEV_FLIP")
+    answers = {}
+    for qid in asked:
+        choice = task_jev.FAVORABLE[qid]
+        if qid == flip:
+            choice = next(c for c in task_jev.QUESTIONS[qid][1] if c != task_jev.FAVORABLE[qid])
+        answers[qid] = {"choice": choice, "confidence": float(os.environ.get("FAKE_JEV_CONF", "0.9"))}
+    return {"answers": answers, "latency_ms": 5, "input_tokens": 1000}
+
+
+task_jev.ask = fake_ask
+sys.exit(dispatch.main(sys.argv[1:]))
+'''
+
+
+def git_worktree(folder):
+    """A git worktree whose HEAD is the base commit, with a change commit one ahead: (folder, change sha). The launch
+    records the base as the attempt's start sha, so the report's head is the change and the diffstat is not empty."""
+    folder.mkdir(parents=True)
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(folder), "-c", "user.name=t", "-c", "user.email=t@example.org", *args],
+                              check=True, capture_output=True, text=True).stdout.strip()
+    git("init", "-q", "-b", "main")
+    git("commit", "-q", "--allow-empty", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    git("update-ref", "refs/remotes/origin/main", base)
+    git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    (folder / "env/.config/tmux/scripts").mkdir(parents=True)
+    (folder / "env/.config/tmux/scripts/task-x.py").write_text("x = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "change")
+    change = git("rev-parse", "HEAD")
+    git("checkout", "-q", "--detach", base)
+    return folder, change
+
+
+def keyword_daemon(tmp, name, mode_env, jev_env, context_k=30, turns=None):
+    """A daemon whose one node reports a bare keyword ("install") and the given budget fields, with jev faked."""
+    root, fake, env = plan_root(tmp, name, [("k1", WORKER, [], False)])
+    worktree, change = git_worktree(tmp / name / "worktree")
+    (root / "AGENTS.md").write_text(f"# t\n\n- **dotfiles** — worktree `{worktree}`; canonical checkout `{worktree}`; agent `{WORKER}`.\n", encoding="utf-8")
+    body = turn_for(root, "k1", files=["env/.config/tmux/scripts/task-x.py"], turns=turns)
+    body["report"].update(summary="We will install the hook next.", head_sha=change, context_estimate_k=context_k)
+    v1.set_agent(fake, WORKER, [body])
+    wrapper = fake / "jev-daemon.py"
+    wrapper.write_text(JEV_DAEMON, encoding="utf-8")
+    for key in ("TASK_JEV_MODE", "TASK_JEV_THRESHOLD", "TASK_JEV_LIVE"):
+        env.pop(key, None)
+    env.update(mode_env, FAKE_DISPATCH=str(DISPATCH), FAKE_JEV_DIR=str(fake), **jev_env)
+    return root, fake, env, daemon(env, root, wrapper)
+
+
+def scenario_keyword_path(tmp):
+    """Part A of M3e: a bare keyword reaches Opus (keyword-safety), never the user. An over-budget report stops on budget
+    before jev is asked. Route mode clears the keyword only when every answer is favourable at or above the threshold."""
+    cases = (
+        # name, mode env, jev env, extra fields, expected outcome, expected derived route (None: jev not asked)
+        ("kw-shadow", {"TASK_JEV_MODE": "shadow"}, {}, {}, "keyword", "continue"),
+        ("kw-shadow-unfav", {"TASK_JEV_MODE": "shadow"}, {"FAKE_JEV_FLIP": "done_met"}, {}, "keyword", "escalate"),
+        ("kw-route-clear", {"TASK_JEV_MODE": "route", "TASK_JEV_THRESHOLD": "0.8"}, {}, {}, "done", "continue"),
+        ("kw-route-edge", {"TASK_JEV_MODE": "route", "TASK_JEV_THRESHOLD": "0.8"}, {"FAKE_JEV_CONF": "0.8"}, {}, "done", "continue"),
+        ("kw-route-unfav", {"TASK_JEV_MODE": "route", "TASK_JEV_THRESHOLD": "0.8"}, {"FAKE_JEV_FLIP": "risk_material"}, {}, "keyword", "escalate"),
+        ("kw-route-low", {"TASK_JEV_MODE": "route", "TASK_JEV_THRESHOLD": "0.8"}, {"FAKE_JEV_CONF": "0.5"}, {}, "keyword", "escalate"),
+        ("kw-budget-ctx", {"TASK_JEV_MODE": "route", "TASK_JEV_THRESHOLD": "0.8"}, {}, {"context_k": 95}, "budget", None),
+        ("kw-budget-turns", {"TASK_JEV_MODE": "route", "TASK_JEV_THRESHOLD": "0.8"}, {}, {"turns": 99}, "budget", None),
+    )
+    for name, mode_env, jev_env, extra, outcome, derived in cases:
+        root, fake, env, proc = keyword_daemon(tmp, name, mode_env, jev_env, **extra)
+        if outcome == "done":
+            done = wait_for(lambda: "worker-dotfiles: idle; done 1" in status(env, root))
+            check(f"{name}: a favourable, confident gate clears the keyword and the node continues", done and db(root, "SELECT route FROM nodes WHERE id = 'k1'") == [("continue",)], status(env, root))
+            check(f"{name}: no wake is raised", not db(root, "SELECT 1 FROM wakes"))
+        else:
+            woke = cli(env, root, "wake-wait", timeout=60).stdout
+            rule = "keyword-safety" if outcome == "keyword" else "budget"
+            check(f"{name}: a {rule} wake goes to Opus, not the user", woke.startswith("wake ") and f" opus k1 {rule}: " in woke, woke)
+            if outcome == "budget":
+                check(f"{name}: budget is named as the reason", "over the 90k budget" in woke or "over the 60-turn budget" in woke, woke)
+        judged = db(root, "SELECT mode, derived_route FROM judgements WHERE node = 'k1'")
+        check(f"{name}: jev is asked only when the keyword or the gate needs it", bool(judged) == (derived is not None), str(judged))
+        if derived is not None:
+            check(f"{name}: the judgement derives {derived}", judged == [(mode_env["TASK_JEV_MODE"], derived)], str(judged))
+        stop(proc)
+        check(f"{name}: jev was asked once per judged attempt", len(lines(fake / "jev.log")) == (0 if derived is None else 1), str(lines(fake / "jev.log")))
+
+
 def scenario_relaunch_herdr(tmp):
     """A herdr failure while relaunching is a launch failure (exit 28), not a herdr one (exit 16)."""
     spec = importlib.util.spec_from_file_location("task_dispatch_relaunch", DISPATCH)
@@ -493,6 +594,7 @@ def main():
         scenario_internal(tmp)
         scenario_lock_scope(tmp)
         scenario_t0_tiers(tmp)
+        scenario_keyword_path(tmp)
         scenario_relaunch_herdr(tmp)
         scenario_fail_node(tmp)
     if FAILURES:
