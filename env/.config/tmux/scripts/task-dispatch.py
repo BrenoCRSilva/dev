@@ -5,6 +5,11 @@
     task-dispatch.py wait <agent>... [--task-root <dir>]
     task-dispatch.py plan check|reconcile [--task-root <dir>]
 
+run, wake-wait, status, wakes, resolve <wake> continue|retry|skip|cancel [--note] [--release], pause|resume <agent|node>
+are the dispatcher commands (C7): run is the background daemon, which installs, starts and evaluates ready nodes
+and raises wakes. Its exit codes: 1 daemon stopped (wake-wait), 23 dispatch.lock held, 2 a refused resolve or pause.
+    task-dispatch.py run|status|wakes|wake-wait|resolve|pause|resume [--task-root <dir>]
+
 plan check validates plan/dag.toml (C5) and prints `ok N nodes`, or one line per error and exit 2. plan
 reconcile applies the plan to state.db (C6) and prints the counts. Neither runs a step.
 
@@ -50,6 +55,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -82,6 +88,15 @@ NEEDS_DECISION = 18
 OUT_OF_SCOPE = 19
 REQUIRES_UNMET = 21
 INTERNAL = 22
+CHECKS_FAILED = 24
+BUDGET = 25
+LOCKED = 23
+DAEMON_STOPPED = 1
+ASK_USER = 11
+STOP_NAMES = {NEEDS_DECISION: "needs_decision", OUT_OF_SCOPE: "out_of_scope", CHECKS_FAILED: "checks", BUDGET: "budget", 10: "escalate", ASK_USER: "ask_user", 20: "decision_unavailable"}
+FAIL_NAMES = {BLOCKED: "blocked", NOT_STARTED: "not_started", TIMED_OUT: "timed_out", HERDR: "herdr", INTERNAL: "internal", NO_REPORT: "no_report"}
+V2_COMMANDS = ("run", "wake-wait", "status", "wakes", "resolve", "pause", "resume")
+TICK_S = 1
 STOP_ROUTES = {NEEDS_DECISION: "stopped:needs_decision", OUT_OF_SCOPE: "stopped:out_of_scope"}
 
 
@@ -359,6 +374,299 @@ def wait(agents, root, start_ms, turn_ms):
     return EMPTY, "; ".join(f"{agent}: settled" for agent in agents)
 
 
+# --- dispatcher daemon (C7, arch v2 §4-§6) ---------------------------------------
+# One thread per running node waits for its turn and evaluates it (T0 rules, then task-decide). Threads do no
+# state writes: they put (node, code, line) on a queue, and only the main loop writes state.db, one transaction
+# per transition. A node is pending, ready, running, done, stopped, failed or cancelled (state.db). A checkpoint
+# node is never installed: when ready it raises one 'checkpoint' wake, and `resolve continue` passes it.
+# `resolve` applies to the wake's node: continue (checkpoint passes; a stopped or failed node with an accepted report
+# is accepted), retry (stopped or failed back to pending, a new attempt), skip (done with route skipped, or
+# continue with --release so successors start), cancel (cancelled, kept until its plan entry changes).
+# pause and resume hold back installs for an agent or a node. Session fresh: START prompts the live session;
+# a stop-and-start of the agent is not wired yet (see the M2 report).
+
+STOP = threading.Event()
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def lock_holder(root):
+    """The pid holding dispatch.lock, -1 when the file is there but empty, None when no live holder."""
+    path = root / "dispatch.lock"
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text:
+        return -1
+    try:
+        pid = int(text)
+    except ValueError:
+        return None
+    return pid if pid_alive(pid) else None
+
+
+def take_lock(root):
+    """Writes dispatch.lock with this pid. Returns None on success, else the live holder (-1 when its pid is unknown).
+    A lock whose pid is dead is stale and is replaced."""
+    path = root / "dispatch.lock"
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            holder = lock_holder(root)
+            if holder is not None:
+                return holder
+            path.unlink(missing_ok=True)
+            continue
+        os.write(fd, f"{os.getpid()}\n".encode())
+        os.close(fd)
+        return None
+
+
+def hook_text(root, nodes, node, attempt):
+    """The pointer-sized hook for a node's attempt: spec, report, scope, contracts and the reports it depends on."""
+    lines = [
+        f"# {node.id} (attempt {attempt})",
+        f"Spec: {root / node.spec}" if node.spec else "Spec: none",
+        f"Report: reports/{node.agent}/{node.id}.json",
+        f"Scope: {', '.join(node.scope) or 'none'}",
+        f"Contracts: {', '.join(node.contracts) or 'none'}",
+    ]
+    for dep in node.after:
+        if dep.startswith("q:"):
+            lines.append(f"After: research/answers/{dep[2:]}.md")
+        else:
+            lines.append(f"After: reports/{nodes[dep].agent}/{dep}.json")
+    return "\n".join(lines) + "\n"
+
+
+def evaluate(root, agent, node, scope, budget):
+    """T0 rules, free and first: needs_decision, checks exit 0, files within scope, context within budget. Then
+    the report check and task-decide (v1). Returns (exit code, one line); 0 means continue."""
+    report = report_path(root, agent, node)
+    try:
+        data = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return NO_REPORT, f"no readable report for {node}"
+    if data.get("needs_decision"):
+        return NEEDS_DECISION, f"needs_decision is set: {str(data['needs_decision'])[:200]}"
+    failed = [check.get("cmd", "?") for check in data.get("checks", []) if check.get("exit") != 0]
+    if failed or not data.get("checks"):
+        return CHECKS_FAILED, f"checks not all exit 0: {', '.join(failed) or 'no checks listed'}"[:300]
+    regexes = [glob_regex(pattern) for pattern in scope]
+    outside = [path for path in data.get("files_changed", []) if not any(r.match(path) for r in regexes)]
+    if outside:
+        return OUT_OF_SCOPE, f"changed outside scope: {', '.join(outside)}"[:300]
+    if (data.get("context_estimate_k") or 0) > budget["prompt_k"]:
+        return BUDGET, f"context estimate {data['context_estimate_k']}k is over the {budget['prompt_k']}k budget"
+    return route(agent, node, root)
+
+
+def turn_outcome(root, agent, node, scope, budget, since, start_ms, turn_ms):
+    try:
+        code, line = await_turn(agent, node, root, start_ms, turn_ms, since)
+        if code is not None:
+            return code, line
+        return evaluate(root, agent, node, scope, budget)
+    except Herdr as error:
+        return HERDR, f"{agent}: {error}"
+    except Exception as error:
+        return INTERNAL, f"internal: {node}: {error!r}"
+
+
+def spawn(results, root, agent, node, scope, budget, since, start_ms, turn_ms):
+    def lane():
+        results.put((node, *turn_outcome(root, agent, node, scope, budget, since, start_ms, turn_ms)))
+
+    threading.Thread(target=lane, daemon=True).start()
+
+
+def stop_node(conn, node, kind, name, reason, tier="opus"):
+    """Routes the running node stopped or failed, and raises the wake for Opus (or the user) that says why."""
+    task_state.route(conn, node, f"{kind}:{name}", reason, tier)
+    task_state.wake(conn, node, tier, name, reason)
+
+
+def finish(conn, root, node, code, line):
+    """Settles a finished turn: writes the report to state if it is fresh, then routes the node by the outcome."""
+    agent = task_state.snapshot(conn)["nodes"][node]["agent"]
+    if code in FAIL_NAMES:
+        return stop_node(conn, node, "failed", FAIL_NAMES[code], line)
+    report = report_path(root, agent, node)
+    try:
+        data = json.loads(report.read_text(encoding="utf-8"))
+        mtime = report.stat().st_mtime
+    except (OSError, ValueError):
+        return stop_node(conn, node, "failed", "no_report", f"no readable report for {node}")
+    if not task_state.settle(conn, node, str(report.relative_to(root)), mtime, data.get("head_sha")):
+        return stop_node(conn, node, "failed", "stale_report", f"report for {node} was written before its prompt")
+    if code == 0:
+        return task_state.route(conn, node, "continue")
+    return stop_node(conn, node, "stopped", STOP_NAMES.get(code, "decide"), line, "user" if code == ASK_USER else "opus")
+
+
+def tick(conn, root, nodes, start_ms, turn_ms, results):
+    """Reconciles the plan, then installs and starts each ready node that is not paused. Checkpoints raise a wake."""
+    task_state.reconcile(conn, nodes)
+    held = task_state.paused(conn)
+    live = {key: node for key, node in nodes.items() if key not in held and node.agent not in held}
+    for node_id in task_plan.ready(live, task_state.snapshot(conn)):
+        node = nodes[node_id]
+        if node.checkpoint:
+            task_state.wake_once(conn, node_id, "opus", "checkpoint", f"checkpoint {node_id}: review, then resolve continue")
+            continue
+        attempt = task_state.install(conn, node_id, node.budget)
+        (root / "hooks").mkdir(exist_ok=True)
+        (root / "hooks" / f"{node.agent}.md").write_text(hook_text(root, nodes, node, attempt), encoding="utf-8")
+        prompt_at = time.time()
+        task_state.start(conn, node_id, prompt_at=prompt_at)
+        try:
+            herdr("prompt", node.agent, f"Read {root}/hooks/{node.agent}.md and follow it. End with the SUMMARY block.")
+        except Herdr as error:
+            stop_node(conn, node_id, "failed", "herdr", str(error))
+            continue
+        spawn(results, root, node.agent, node_id, node.scope, node.budget, prompt_at, start_ms, turn_ms)
+
+
+def load_nodes(root):
+    """The plan's nodes, or None while plan/dag.toml is invalid (the tick is skipped; `status` shows nothing new)."""
+    try:
+        return task_plan.load_plan(root)
+    except task_plan.PlanError:
+        return None
+
+
+def daemon(root, start_ms, turn_ms):
+    held = take_lock(root)
+    if held is not None:
+        print(f"dispatch.lock held by pid {held}" if held > 0 else "dispatch.lock held (pid unknown)")
+        return LOCKED
+    STOP.clear()
+    signal.signal(signal.SIGTERM, lambda *_: STOP.set())
+    signal.signal(signal.SIGINT, lambda *_: STOP.set())
+    results = queue.Queue()
+    conn = None
+    try:
+        conn = task_state.connect(root)
+        print(f"dispatcher started (pid {os.getpid()})", flush=True)
+        for row in task_state.running(conn):
+            # A running node stays running across a restart: watch its turn again from its prompt time.
+            node = load_nodes(root).get(row["id"])
+            budget = node.budget if node else task_plan.DEFAULTS["budget"]
+            spawn(results, root, row["agent"], row["id"], node.scope if node else [], budget, row["prompt_at"], start_ms, turn_ms)
+        while not STOP.is_set():
+            nodes = load_nodes(root)
+            if nodes is not None:
+                tick(conn, root, nodes, start_ms, turn_ms, results)
+            try:
+                node, code, line = results.get(timeout=TICK_S)
+            except queue.Empty:
+                continue
+            finish(conn, root, node, code, line)
+    finally:
+        if conn is not None:
+            conn.close()
+        if lock_holder(root) == os.getpid():
+            (root / "dispatch.lock").unlink(missing_ok=True)
+    print("dispatcher stopped", flush=True)
+    return EMPTY
+
+
+def wake_line(row):
+    return f"wake {row['id']} {row['tier']} {row['node']} {row['rule']}: {row['reason']}"
+
+
+def wake_wait(root, poll_s=1.0):
+    while True:
+        conn = task_state.connect(root)
+        try:
+            rows = task_state.open_wakes(conn)
+        finally:
+            conn.close()
+        if rows:
+            print(wake_line(rows[0]))
+            return EMPTY
+        if lock_holder(root) is None:
+            print("dispatcher stopped: no wake")
+            return DAEMON_STOPPED
+        time.sleep(poll_s)
+
+
+def status_main(root):
+    holder = lock_holder(root)
+    print(f"dispatcher: running pid {holder}" if holder else "dispatcher: stopped")
+    conn = task_state.connect(root)
+    try:
+        rows = [dict(row) for row in conn.execute("SELECT * FROM nodes ORDER BY rowid")]
+        held = task_state.paused(conn)
+        wakes = len(task_state.open_wakes(conn))
+    finally:
+        conn.close()
+    for agent in sorted({row["agent"] for row in rows}):
+        mine = [row for row in rows if row["agent"] == agent]
+        running = [f"{row['id']} (attempt {row['attempt']})" for row in mine if row["status"] == "running"]
+        counts = {}
+        for row in mine:
+            counts[row["status"]] = counts.get(row["status"], 0) + 1
+        tail = " [paused]" if agent in held else ""
+        print(f"{agent}: {'running ' + ', '.join(running) if running else 'idle'}; " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())) + tail)
+    print(f"counts: {len(rows)} nodes, {wakes} open wakes")
+    return EMPTY
+
+
+def v2_main(argv):
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--task-root", type=Path, default=Path.cwd())
+    parser = argparse.ArgumentParser(prog="task-dispatch.py", description="Run the dispatcher and read or resolve its wakes (C7).")
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("run", "wake-wait", "status", "wakes"):
+        sub.add_parser(name, parents=[common])
+    resolve_parser = sub.add_parser("resolve", parents=[common])
+    resolve_parser.add_argument("wake", type=int)
+    resolve_parser.add_argument("resolution", choices=task_state.RESOLUTIONS)
+    resolve_parser.add_argument("--note", default="")
+    resolve_parser.add_argument("--release", action="store_true")
+    for name in ("pause", "resume"):
+        sub.add_parser(name, parents=[common]).add_argument("target")
+    args = parser.parse_args(argv)
+    root = args.task_root
+    if args.command == "run":
+        start_ms = int(os.environ.get("TASK_DISPATCH_START_MS", 30000))
+        turn_ms = int(os.environ.get("TASK_DISPATCH_TURN_MS", 4 * 60 * 60 * 1000))
+        return daemon(root, start_ms, turn_ms)
+    if args.command == "wake-wait":
+        return wake_wait(root)
+    if args.command == "status":
+        return status_main(root)
+    conn = task_state.connect(root)
+    try:
+        if args.command == "wakes":
+            for row in task_state.open_wakes(conn):
+                print(wake_line(row))
+            return EMPTY
+        if args.command == "resolve":
+            task_state.resolve(conn, args.wake, args.resolution, release=args.release, note=args.note)
+            print(f"resolved wake {args.wake}: {args.resolution}")
+            return EMPTY
+        task_state.pause(conn, args.target, paused=args.command == "pause")
+        print(f"{args.command}d {args.target}")
+        return EMPTY
+    except (sqlite3.Error, task_state.TransitionError) as error:
+        print(f"refused: {error}")
+        return USAGE
+    finally:
+        conn.close()
+
+
 def plan_main(argv):
     """`plan check` validates plan/dag.toml; `plan reconcile` brings state.db in line with it (C5, C6)."""
     parser = argparse.ArgumentParser(prog="task-dispatch.py plan", description="Check the plan graph, or reconcile the runtime state with it.")
@@ -391,6 +699,8 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["plan"]:
         return plan_main(argv[1:])
+    if argv[:1] and argv[0] in V2_COMMANDS:
+        return v2_main(argv)
     parser = argparse.ArgumentParser(description="Wait for worker turns and route finished steps.")
     parser.add_argument("command", choices=["watch", "wait"])
     parser.add_argument("agents", nargs="+")

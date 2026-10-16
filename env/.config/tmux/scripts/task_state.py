@@ -39,6 +39,9 @@ MIGRATIONS = {
         """CREATE TABLE questions (
             qid TEXT PRIMARY KEY, node TEXT, text TEXT, blocking INTEGER, status TEXT, answer_path TEXT)""",
     ],
+    2: [
+        """CREATE TABLE pauses (target TEXT PRIMARY KEY, created_at REAL NOT NULL)""",
+    ],
 }
 
 
@@ -50,7 +53,15 @@ def connect(task_root):
     """The task's state.db, in WAL mode and migrated to the current schema. Waits up to 10 s for a lock."""
     conn = sqlite3.connect(Path(task_root) / "state.db", timeout=10, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+    # The journal-mode change can return "locked" at once on a new file, so it is retried (the busy timeout does not cover it).
+    for attempt in range(50):
+        try:
+            mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            break
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error) or attempt == 49:
+                raise
+            time.sleep(0.1)
     if mode != "wal":
         warnings.warn(f"state.db journal mode is {mode}, not wal: readers and writers may block each other", RuntimeWarning, stacklevel=2)
     migrate(conn)
@@ -124,9 +135,9 @@ def reconcile(conn, nodes):
                     (node_id, node.agent, node.plan_hash),
                 )
                 counts["added"] += 1
-            elif row["status"] == "cancelled":
+            elif row["status"] == "cancelled" and (row["route"] != "cancelled" or row["plan_hash"] != node.plan_hash):
                 conn.execute(
-                    "UPDATE nodes SET agent = ?, status = 'pending', plan_hash = ? WHERE id = ?",
+                    "UPDATE nodes SET agent = ?, status = 'pending', plan_hash = ?, route = NULL WHERE id = ?",
                     (node.agent, node.plan_hash, node_id),
                 )
                 counts["added"] += 1
@@ -241,18 +252,95 @@ def wake(conn, node_id, tier, rule, reason, pointers=None, options=None, audit=N
         return _wake(conn, node_id, tier, rule, reason, pointers, options, audit)
 
 
-def resolve(conn, wake_id, resolution):
-    """Closes the wake. Resolving a checkpoint wake with continue passes the checkpoint (see _pass_checkpoint)."""
+RESOLUTIONS = ("continue", "retry", "skip", "cancel")
+
+
+def resolve(conn, wake_id, resolution, release=False, note=""):
+    """Closes the wake and applies the resolution to its node. Refused with TransitionError, and nothing written, when it cannot apply.
+
+    continue: a checkpoint passes (done, route continue); a stopped or failed node whose report was accepted is
+    accepted (done, route continue).
+    retry: a stopped or failed node goes back to pending, so its next install is a new attempt; route, report,
+    head_sha and ended_at are cleared.
+    skip: the node is done with route skipped, so its successors stay blocked. With release, route is continue,
+    so they start (the node has no report).
+    cancel: the node is cancelled with route cancelled. reconcile keeps it cancelled until its plan entry changes.
+    """
     with transaction(conn):
         row = conn.execute("SELECT node, rule, resolved_at FROM wakes WHERE id = ?", (wake_id,)).fetchone()
         if row is None:
             raise TransitionError(f"unknown wake {wake_id}")
         if row["resolved_at"] is not None:
             raise TransitionError(f"wake {wake_id} is already resolved")
+        if resolution in RESOLUTIONS:
+            _apply(conn, row["node"], row["rule"], resolution, release)
+        # Any other text only closes the wake: the plan-changed and removed-running wakes need no node transition.
         conn.execute("UPDATE wakes SET resolved_at = ?, resolution = ? WHERE id = ?", (time.time(), resolution, wake_id))
-        if row["rule"] == "checkpoint" and resolution == "continue":
-            _pass_checkpoint(conn, row["node"])
-        _event(conn, row["node"], "resolve", f"wake {wake_id}: {resolution}")
+        detail = f"wake {wake_id}: {resolution}" + (" (release)" if release else "") + (f": {note}" if note else "")
+        _event(conn, row["node"], "resolve", detail)
+
+
+def _apply(conn, node_id, rule, resolution, release):
+    row = _row(conn, node_id)
+    status = row["status"]
+    if resolution == "continue":
+        if rule == "checkpoint":
+            _pass_checkpoint(conn, node_id)
+        elif status in ("stopped", "failed") and row["report"] is not None:
+            conn.execute("UPDATE nodes SET status = 'done', route = 'continue', ended_at = COALESCE(ended_at, ?) WHERE id = ?", (time.time(), node_id))
+        else:
+            raise TransitionError(f"{node_id} is {status} with no accepted report, so there is nothing to continue")
+    elif resolution == "retry":
+        if status not in ("stopped", "failed"):
+            raise TransitionError(f"{node_id} is {status}, not stopped or failed")
+        conn.execute(
+            "UPDATE nodes SET status = 'pending', route = NULL, report = NULL, head_sha = NULL, ended_at = NULL, tier = NULL, reason = NULL WHERE id = ?",
+            (node_id,),
+        )
+    elif resolution == "skip":
+        if status in ("running", "done"):
+            raise TransitionError(f"{node_id} is {status}, so it cannot be skipped")
+        conn.execute(
+            "UPDATE nodes SET status = 'done', route = ?, ended_at = ? WHERE id = ?",
+            ("continue" if release else "skipped", time.time(), node_id),
+        )
+    else:
+        if status == "running":
+            raise TransitionError(f"{node_id} is running: wait for it to stop before cancelling")
+        conn.execute("UPDATE nodes SET status = 'cancelled', route = 'cancelled' WHERE id = ?", (node_id,))
+
+
+def wake_once(conn, node_id, tier, rule, reason):
+    """Raises the wake unless one with this rule is still open for the node. Returns its id, or None."""
+    with transaction(conn):
+        _row(conn, node_id)
+        if conn.execute("SELECT 1 FROM wakes WHERE node = ? AND rule = ? AND resolved_at IS NULL", (node_id, rule)).fetchone():
+            return None
+        return _wake(conn, node_id, tier, rule, reason)
+
+
+def open_wakes(conn):
+    return conn.execute("SELECT * FROM wakes WHERE resolved_at IS NULL ORDER BY id").fetchall()
+
+
+def running(conn):
+    """The running nodes with their attempt's prompt time, so a restarted dispatcher can watch them again."""
+    return conn.execute(
+        "SELECT n.id, n.agent, a.prompt_at FROM nodes n JOIN attempts a ON a.node = n.id AND a.attempt = n.attempt WHERE n.status = 'running'"
+    ).fetchall()
+
+
+def pause(conn, target, paused=True):
+    """Stops new installs for an agent or a node while paused; a running step is left to finish."""
+    with transaction(conn):
+        if paused:
+            conn.execute("INSERT OR IGNORE INTO pauses (target, created_at) VALUES (?, ?)", (target, time.time()))
+        else:
+            conn.execute("DELETE FROM pauses WHERE target = ?", (target,))
+
+
+def paused(conn):
+    return {row["target"] for row in conn.execute("SELECT target FROM pauses")}
 
 
 def _pass_checkpoint(conn, node_id):
