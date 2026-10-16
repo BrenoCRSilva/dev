@@ -7,6 +7,7 @@ agent, reconcile (add, cancel, revive, edited and removed running nodes, idempot
 leaving no partial rows, stale-report rejection, one running node per agent, and the CLI exit codes.
 Writes only inside a temporary folder.
 """
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,7 @@ AGENTS_MD = """# t
 
 ### Worker repos
 - **dotfiles** — agent `worker-dotfiles`.
+- **other** — agent `worker-other`.
 
 ## Agents
 | name | role |
@@ -130,6 +132,29 @@ def scenario_validation_errors():
     check("TOML syntax error is reported", errors_of(broken) and errors_of(broken)[0].startswith("plan/dag.toml:"), errors_of(broken))
 
 
+def scenario_path_and_type_errors():
+    typed = make_root({"plan/dag.toml": '[[node]]\nid = "a"\nagent = ["worker-dotfiles"]\nspec = "specs/a.md"\nscope = ["env/**"]\n', **specs("a")})
+    check("a non-string agent is reported, not a crash", errors_of(typed) == ["node a: agent must be a name"], errors_of(typed))
+    outside = Path(tempfile.mkdtemp(prefix="plan-outside-")) / "outside.md"
+    outside.write_text("# outside\n", encoding="utf-8")
+    base = '[[node]]\nid = "a"\nagent = "worker-dotfiles"\nscope = ["env/**"]\n'
+    absolute = make_root({"plan/dag.toml": base + f'spec = "{outside}"\n', **specs("a")})
+    check("an absolute spec is rejected", any("must be a relative path inside the task root" in e for e in errors_of(absolute)), errors_of(absolute))
+    up = make_root({"plan/dag.toml": base + f'spec = "../{outside.name}"\n'})
+    (up.parent / outside.name).write_text("# outside\n", encoding="utf-8")
+    check("a spec with .. is rejected even when the file exists", any("must be a relative path" in e for e in errors_of(up)), errors_of(up))
+    link = make_root({"plan/dag.toml": base + 'spec = "specs/link.md"\n', **specs("a")})
+    (link / "specs/a.md").unlink()
+    (link / "specs/link.md").symlink_to(outside)
+    check("a spec symlink outside the root is rejected", any("must be a relative path" in e for e in errors_of(link)), errors_of(link))
+    dotdot_scope = make_root({"plan/dag.toml": base.replace('"env/**"', '"env/../../x"') + 'spec = "specs/a.md"\n', **specs("a")})
+    check("a scope glob with .. is reported", errors_of(dotdot_scope) == ["node a: scope env/../../x must be relative, without .."], errors_of(dotdot_scope))
+    absolute_scope = make_root({"plan/dag.toml": base.replace('"env/**"', '"/etc/**"') + 'spec = "specs/a.md"\n', **specs("a")})
+    check("an absolute scope glob is reported", any("scope /etc/** must be relative" in e for e in errors_of(absolute_scope)), errors_of(absolute_scope))
+    bad_id = make_root({"plan/dag.toml": node("bad id") + node("b", extra='after = ["bad id"]\n'), **specs("b")})
+    check("a dependent of an invalid id adds no cascade error", errors_of(bad_id) == ["node #1: id must be a name such as web-11"], errors_of(bad_id))
+
+
 def scenario_ready():
     plan = (
         node("a") + node("b") + node("r", "researcher")
@@ -159,6 +184,137 @@ def scenario_ready():
 
     stopped = {**pending, "a": ("worker-dotfiles", "stopped", "stopped:needs_decision")}
     check("ready: a stopped dep never releases its dependents", "c" not in task_plan.ready(nodes, state(stopped)))
+
+
+def scenario_edits():
+    root = make_root({"plan/dag.toml": node("a") + node("b") + node("c"), **specs("a", "b", "c")})
+    conn = task_state.connect(root)
+    try:
+        task_state.reconcile(conn, task_plan.load_plan(root))
+        task_state.install(conn, "b", {"turns": 60, "prompt_k": 90})
+        task_state.install(conn, "a", {"turns": 60, "prompt_k": 90})
+        task_state.start(conn, "a", prompt_at=1_000_000.0)
+        task_state.settle(conn, "a", "r.json", 1_000_005.0)
+        task_state.route(conn, "a", "continue")
+        (root / "specs/a.md").write_text("# a, edited after done\n", encoding="utf-8")
+        (root / "specs/b.md").write_text("# b, edited while ready\n", encoding="utf-8")
+        counts = task_state.reconcile(conn, task_plan.load_plan(root))
+        check("edits to ready and done nodes are counted", counts == {"added": 0, "edited": 2, "cancelled": 0, "woken": 0}, counts)
+        rows = task_state.snapshot(conn)["nodes"]
+        check("edited ready node goes back to pending", rows["b"]["status"] == "pending", rows["b"]["status"])
+        check("edited done node keeps its status", rows["a"]["status"] == "done", rows["a"]["status"])
+        details = [row[0] for row in conn.execute("SELECT detail FROM events WHERE kind = 'reconcile' AND node IS NOT NULL")]
+        check("the ready reset is logged", any("reset to pending" in d for d in details), details)
+        check("the done edit is logged", any(d.startswith("edited while done") for d in details), details)
+        check("an edited ready node installs again", task_state.install(conn, "b", {"turns": 60, "prompt_k": 90}) == 2)
+        again = task_state.reconcile(conn, task_plan.load_plan(root))
+        check("second reconcile sees no edits", again["edited"] == 0, again)
+    finally:
+        conn.close()
+
+
+def scenario_agent_change():
+    root = make_root({"plan/dag.toml": node("a"), **specs("a")})
+    conn = task_state.connect(root)
+    try:
+        task_state.reconcile(conn, task_plan.load_plan(root))
+        task_state.install(conn, "a", {"turns": 60, "prompt_k": 90})
+        task_state.start(conn, "a", prompt_at=1_000_000.0)
+        (root / "plan/dag.toml").write_text(node("a", "worker-other"), encoding="utf-8")
+        counts = task_state.reconcile(conn, task_plan.load_plan(root))
+        check("agent change on a running node raises one wake", counts["woken"] == 1, counts)
+        detail = conn.execute("SELECT reason FROM wakes WHERE node = 'a'").fetchone()[0]
+        check("the wake records the agent change", "worker-dotfiles -> worker-other" in detail, detail)
+        check("the running node keeps its old agent", task_state.snapshot(conn)["nodes"]["a"]["agent"] == "worker-dotfiles")
+        task_state.settle(conn, "a", "r.json", 1_000_005.0)
+        task_state.route(conn, "a", "stopped:needs_decision", reason="agent change")
+        task_state.reconcile(conn, task_plan.load_plan(root))
+        check("the new agent applies once the node stops", task_state.snapshot(conn)["nodes"]["a"]["agent"] == "worker-other")
+    finally:
+        conn.close()
+
+
+def scenario_route_needs_report():
+    root = make_root({"plan/dag.toml": node("a") + node("k", extra="checkpoint = true\n"), **specs("a", "k")})
+    conn = task_state.connect(root)
+    try:
+        task_state.reconcile(conn, task_plan.load_plan(root))
+        task_state.install(conn, "a", {"turns": 60, "prompt_k": 90})
+        task_state.start(conn, "a", prompt_at=1_000_000.0)
+        check("continue without an accepted report is refused", _refused(lambda: task_state.route(conn, "a", "continue")))
+        check("the refused route leaves the node running", task_state.snapshot(conn)["nodes"]["a"]["status"] == "running")
+        task_state.settle(conn, "a", "r.json", 1_000_005.0)
+        task_state.route(conn, "a", "continue")
+        task_state.install(conn, "k", {"turns": 60, "prompt_k": 90})
+        task_state.start(conn, "k", prompt_at=1_000_000.0)
+        check("checkpoint without an accepted report is refused", _refused(lambda: task_state.route(conn, "k", "checkpoint")))
+        task_state.settle(conn, "k", "r.json", 1_000_005.0)
+        task_state.route(conn, "k", "checkpoint")
+        check("checkpoint with a report routes", task_state.snapshot(conn)["nodes"]["k"]["route"] == "checkpoint")
+    finally:
+        conn.close()
+
+
+def scenario_checkpoint():
+    plan = node("a") + '[[node]]\nid = "c"\nagent = "orchestrator"\nafter = ["a"]\ncheckpoint = true\n' + node("b", extra='after = ["c"]\n')
+    root = make_root({"plan/dag.toml": plan, **specs("a", "b")})
+    nodes = task_plan.load_plan(root)
+    conn = task_state.connect(root)
+    try:
+        task_state.reconcile(conn, nodes)
+        task_state.install(conn, "a", {"turns": 60, "prompt_k": 90})
+        task_state.start(conn, "a", prompt_at=1_000_000.0)
+        task_state.settle(conn, "a", "r.json", 1_000_005.0)
+        task_state.route(conn, "a", "continue")
+        check("checkpoint is ready once its dep continues", task_plan.ready(nodes, task_state.snapshot(conn)) == ["c"])
+        task_state.install(conn, "c", {"turns": 60, "prompt_k": 90})
+        wake = task_state.wake(conn, "c", "opus", "checkpoint", "A is in; continue to B?")
+        check("b waits while the checkpoint is open", "b" not in task_plan.ready(nodes, task_state.snapshot(conn)))
+        task_state.resolve(conn, wake, "continue")
+        row = task_state.snapshot(conn)["nodes"]["c"]
+        check("resolve(continue) passes the checkpoint", row["status"] == "done" and row["route"] == "continue", row)
+        check("b is ready only after the resolve", task_plan.ready(nodes, task_state.snapshot(conn)) == ["b"])
+    finally:
+        conn.close()
+
+
+def scenario_read_only_connect():
+    root = make_root({"plan/dag.toml": node("a"), **specs("a")})
+    task_state.connect(root).close()
+    holder = sqlite3.connect(root / "state.db", isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    started = time.time()
+    try:
+        task_state.connect(root).close()
+        opened = True
+    except sqlite3.Error:
+        opened = False
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    check("a read-only connect does not wait for the write lock", opened and time.time() - started < 5)
+
+
+def scenario_commit_rollback():
+    root = make_root({"plan/dag.toml": node("a"), **specs("a")})
+    conn = task_state.connect(root)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("CREATE TABLE parent (id INTEGER PRIMARY KEY)")
+        conn.execute("CREATE TABLE child (pid INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)")
+        try:
+            with task_state.transaction(conn):
+                conn.execute("INSERT INTO child (pid) VALUES (99)")
+            failed = False
+        except sqlite3.IntegrityError:
+            failed = True
+        check("a failed COMMIT raises", failed)
+        check("a failed COMMIT leaves no open transaction", not conn.in_transaction)
+        with task_state.transaction(conn):
+            conn.execute("INSERT INTO parent (id) VALUES (1)")
+        check("the next transaction still commits", conn.execute("SELECT COUNT(*) FROM parent").fetchone()[0] == 1)
+    finally:
+        conn.close()
 
 
 def scenario_reconcile():
@@ -193,13 +349,17 @@ def scenario_reconcile():
         counts = task_state.reconcile(conn, task_plan.load_plan(root))
         check("removed running node raises a wake and keeps running",
               counts["woken"] == 1 and task_state.snapshot(conn)["nodes"]["r"]["status"] == "running", counts)
+        wake_r = conn.execute("SELECT id FROM wakes WHERE node = 'r'").fetchone()[0]
+        task_state.resolve(conn, wake_r, "keep it running")
+        again = task_state.reconcile(conn, task_plan.load_plan(root))
+        check("a resolved removed-running wake does not repeat", again["woken"] == 0, again)
 
         (root / "plan/dag.toml").write_text(node("a") + node("b"), encoding="utf-8")
         counts = task_state.reconcile(conn, task_plan.load_plan(root))
-        check("a cancelled node that returns to the plan is pending again", counts["added"] == 1, counts)
+        check("a cancelled node that returns to the plan is pending again", counts["added"] == 1 and counts["woken"] == 0, counts)
         check("revived node is pending", task_state.snapshot(conn)["nodes"]["b"]["status"] == "pending")
-        events = [row[0] for row in conn.execute("SELECT kind FROM events WHERE kind = 'reconcile'")]
-        check("every reconcile is logged", len(events) == 7, len(events))
+        events = [row[0] for row in conn.execute("SELECT kind FROM events WHERE kind = 'reconcile' AND node IS NULL")]
+        check("every reconcile is logged", len(events) == 8, len(events))
     finally:
         conn.close()
 
@@ -318,6 +478,15 @@ def scenario_cli():
     check("invalid plan exits 2 with one line per error", result.returncode == 2 and result.stdout.strip() == "cycle: a -> b -> a", result)
     result = cli(["reconcile"], bad)
     check("invalid plan does not touch state.db", result.returncode == 2 and not (bad / "state.db").exists(), result)
+    newer = make_root({"plan/dag.toml": node("a"), **specs("a")})
+    task_state.connect(newer).close()
+    raw = sqlite3.connect(newer / "state.db")
+    raw.execute("UPDATE schema_version SET version = 99")
+    raw.commit()
+    raw.close()
+    result = cli(["reconcile"], newer)
+    check("a state.db error is one line and exits 22", result.returncode == 22 and result.stdout.startswith("state.db: ")
+          and result.stdout.count("\n") == 1, result)
 
 
 def main():
@@ -330,6 +499,13 @@ def main():
     scenario_one_running_per_agent()
     scenario_schema()
     scenario_cli()
+    scenario_path_and_type_errors()
+    scenario_route_needs_report()
+    scenario_checkpoint()
+    scenario_edits()
+    scenario_agent_change()
+    scenario_read_only_connect()
+    scenario_commit_rollback()
     if FAILURES:
         print(f"FAILED: {', '.join(FAILURES)}")
         return 1

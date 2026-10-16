@@ -7,6 +7,7 @@ Only the dispatcher calls these functions. Times are epoch seconds.
 import json
 import sqlite3
 import time
+import warnings
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -49,7 +50,9 @@ def connect(task_root):
     """The task's state.db, in WAL mode and migrated to the current schema. Waits up to 10 s for a lock."""
     conn = sqlite3.connect(Path(task_root) / "state.db", timeout=10, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+    if mode != "wal":
+        warnings.warn(f"state.db journal mode is {mode}, not wal: readers and writers may block each other", RuntimeWarning, stacklevel=2)
     migrate(conn)
     return conn
 
@@ -59,17 +62,20 @@ def transaction(conn):
     conn.execute("BEGIN IMMEDIATE")
     try:
         yield conn
+        conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         raise
-    conn.execute("COMMIT")
 
 
 def migrate(conn):
+    """Applies the missing migrations. Takes the write lock only when one is missing, so readers never wait on it."""
+    if _version(conn) == max(MIGRATIONS):
+        return
     with transaction(conn):
         conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
-        current = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_version").fetchone()[0]
+        current = _version(conn)
         if current > max(MIGRATIONS):
             raise TransitionError(f"state.db schema {current} is newer than this code ({max(MIGRATIONS)})")
         for version in sorted(MIGRATIONS):
@@ -77,6 +83,13 @@ def migrate(conn):
                 for statement in MIGRATIONS[version]:
                     conn.execute(statement)
                 conn.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
+
+
+def _version(conn):
+    """The schema version, 0 before the first migration. Reads without the write lock."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'").fetchone() is None:
+        return 0
+    return conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_version").fetchone()[0]
 
 
 def report_accepted(report_mtime, prompt_at):
@@ -94,9 +107,11 @@ def snapshot(conn):
 def reconcile(conn, nodes):
     """Brings the nodes table in line with the plan (id -> task_plan.Node). Returns the counts; idempotent.
 
-    New and revived nodes are pending. A pending, ready or finished node takes the plan's agent and hash. A
-    running node keeps its agent and gets a wake, since its session is already at work on the old plan.
-    A pending or ready node that left the plan is cancelled; a running one raises a wake.
+    New and revived nodes are pending. A running node keeps its agent and gets a wake that records any agent
+    change; the new agent applies at the first reconcile after the node stops. An edited node that is not
+    running takes the plan's agent and hash, a ready one goes back to pending (to be installed again), and
+    every such edit is logged. A pending or ready node that left the plan is cancelled; a running one raises
+    a wake, once per attempt.
     """
     counts = {"added": 0, "edited": 0, "cancelled": 0, "woken": 0}
     with transaction(conn):
@@ -115,15 +130,24 @@ def reconcile(conn, nodes):
                     (node.agent, node.plan_hash, node_id),
                 )
                 counts["added"] += 1
-            elif row["plan_hash"] != node.plan_hash:
-                counts["edited"] += 1
-                if row["status"] == "running":
-                    counts["woken"] += _wake_once(conn, node_id, "plan-changed", "plan changed while the node runs")
+            elif row["status"] == "running":
+                if row["plan_hash"] != node.plan_hash:
+                    counts["edited"] += 1
+                    detail = "plan changed while the node runs"
+                    if row["agent"] != node.agent:
+                        detail += f"; agent {row['agent']} -> {node.agent} applies when it stops"
+                    counts["woken"] += _wake_once(conn, node_id, "plan-changed", detail)
                     conn.execute("UPDATE nodes SET plan_hash = ? WHERE id = ?", (node.plan_hash, node_id))
-                else:
-                    conn.execute(
-                        "UPDATE nodes SET agent = ?, plan_hash = ? WHERE id = ?", (node.agent, node.plan_hash, node_id)
-                    )
+            elif row["plan_hash"] != node.plan_hash or row["agent"] != node.agent:
+                status = "pending" if row["status"] == "ready" else row["status"]
+                if row["plan_hash"] != node.plan_hash:
+                    counts["edited"] += 1
+                conn.execute(
+                    "UPDATE nodes SET agent = ?, status = ?, plan_hash = ? WHERE id = ?",
+                    (node.agent, status, node.plan_hash, node_id),
+                )
+                reset = f", reset to {status}" if status != row["status"] else ""
+                _event(conn, node_id, "reconcile", f"edited while {row['status']}: agent {row['agent']} -> {node.agent}{reset}")
         for node_id, row in rows.items():
             if node_id in nodes:
                 continue
@@ -131,7 +155,9 @@ def reconcile(conn, nodes):
                 conn.execute("UPDATE nodes SET status = 'cancelled' WHERE id = ?", (node_id,))
                 counts["cancelled"] += 1
             elif row["status"] == "running":
-                counts["woken"] += _wake_once(conn, node_id, "removed-running", "node was removed from the plan while it runs")
+                counts["woken"] += _wake_once(
+                    conn, node_id, "removed-running", "node was removed from the plan while it runs", this_attempt=True
+                )
         _event(conn, None, "reconcile", json.dumps(counts, sort_keys=True))
     return counts
 
@@ -199,6 +225,8 @@ def route(conn, node_id, outcome, reason="", tier=None):
         row = _row(conn, node_id)
         if row["status"] != "running":
             raise TransitionError(f"{node_id} is {row['status']}, not running")
+        if status == "done" and row["report"] is None:
+            raise TransitionError(f"{node_id} has no accepted report, so it cannot route {outcome}")
         conn.execute(
             "UPDATE nodes SET status = ?, route = ?, reason = ?, tier = ? WHERE id = ?",
             (status, outcome, reason, tier, node_id),
@@ -207,21 +235,35 @@ def route(conn, node_id, outcome, reason="", tier=None):
 
 
 def wake(conn, node_id, tier, rule, reason, pointers=None, options=None, audit=None):
-    """Raises a wake for Opus or the user on the node. Returns the wake id."""
+    """Raises a wake for Opus or the user on the node. Returns the wake id. A rule of 'checkpoint' marks a checkpoint."""
     with transaction(conn):
         _row(conn, node_id)
         return _wake(conn, node_id, tier, rule, reason, pointers, options, audit)
 
 
 def resolve(conn, wake_id, resolution):
+    """Closes the wake. Resolving a checkpoint wake with continue passes the checkpoint (see _pass_checkpoint)."""
     with transaction(conn):
-        row = conn.execute("SELECT node, resolved_at FROM wakes WHERE id = ?", (wake_id,)).fetchone()
+        row = conn.execute("SELECT node, rule, resolved_at FROM wakes WHERE id = ?", (wake_id,)).fetchone()
         if row is None:
             raise TransitionError(f"unknown wake {wake_id}")
         if row["resolved_at"] is not None:
             raise TransitionError(f"wake {wake_id} is already resolved")
         conn.execute("UPDATE wakes SET resolved_at = ?, resolution = ? WHERE id = ?", (time.time(), resolution, wake_id))
+        if row["rule"] == "checkpoint" and resolution == "continue":
+            _pass_checkpoint(conn, row["node"])
         _event(conn, row["node"], "resolve", f"wake {wake_id}: {resolution}")
+
+
+def _pass_checkpoint(conn, node_id):
+    """A checkpoint that is not running becomes done with route continue, so its successors may start."""
+    row = _row(conn, node_id)
+    if row["status"] not in ("pending", "ready", "done"):
+        raise TransitionError(f"{node_id} is {row['status']}, so it cannot pass a checkpoint")
+    conn.execute(
+        "UPDATE nodes SET status = 'done', route = 'continue', ended_at = COALESCE(ended_at, ?) WHERE id = ?",
+        (time.time(), node_id),
+    )
 
 
 def _route_status(outcome):
@@ -256,12 +298,21 @@ def _wake(conn, node_id, tier, rule, reason, pointers=None, options=None, audit=
     return cursor.lastrowid
 
 
-def _wake_once(conn, node_id, rule, reason):
-    """Raises the wake unless one with this rule is still open for the node. Returns 1 when it raised one."""
-    open_wake = conn.execute(
-        "SELECT 1 FROM wakes WHERE node = ? AND rule = ? AND resolved_at IS NULL", (node_id, rule)
-    ).fetchone()
-    if open_wake:
+def _wake_once(conn, node_id, rule, reason, this_attempt=False):
+    """Raises the wake unless one with this rule is still open for the node or, with this_attempt, was raised
+    since the node's current attempt started. Returns 1 when it raised one."""
+    if this_attempt:
+        seen = conn.execute(
+            """SELECT 1 FROM wakes WHERE node = ? AND rule = ? AND created_at >= (
+                SELECT a.started_at FROM attempts a JOIN nodes n ON n.id = a.node AND n.attempt = a.attempt
+                WHERE n.id = ?)""",
+            (node_id, rule, node_id),
+        ).fetchone()
+    else:
+        seen = conn.execute(
+            "SELECT 1 FROM wakes WHERE node = ? AND rule = ? AND resolved_at IS NULL", (node_id, rule)
+        ).fetchone()
+    if seen:
         return 0
     _wake(conn, node_id, "opus", rule, reason)
     return 1

@@ -10,7 +10,7 @@ import json
 import re
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 DEFAULTS = {"session": "fresh", "review": "judge", "budget": {"turns": 60, "prompt_k": 90}}
 SESSIONS = ("fresh", "continue")
@@ -64,15 +64,18 @@ def load_plan(task_root):
     if not isinstance(raw_nodes, list):
         raise PlanError([*errors, "plan/dag.toml: node must be an array of [[node]] tables"])
     nodes = {}
+    invalid = set()
     for index, raw in enumerate(raw_nodes, 1):
         node = _node(root, index, raw, defaults, agents, errors)
         if node is None:
+            if isinstance(raw, dict) and isinstance(raw.get("id"), str):
+                invalid.add(raw["id"])
             continue
         if node.id in nodes:
             errors.append(f"node {node.id}: duplicate id")
         else:
             nodes[node.id] = node
-    errors += _graph_errors(nodes)
+    errors += _graph_errors(nodes, invalid)
     if errors:
         raise PlanError(errors)
     return nodes
@@ -143,20 +146,25 @@ def _node(root, index, raw, defaults, agents, errors):
     for key in sorted(set(raw) - NODE_KEYS):
         errors.append(f"{where}: unknown key {key}")
     agent = raw.get("agent")
-    if agent not in agents:
+    if not isinstance(agent, str):
+        errors.append(f"{where}: agent must be a name")
+    elif agent not in agents:
         errors.append(f"{where}: unknown agent {agent!r}")
     checkpoint = raw.get("checkpoint", False)
     if not isinstance(checkpoint, bool):
         errors.append(f"{where}: checkpoint must be true or false")
     spec = raw.get("spec")
+    spec_ok = spec is not None and _inside(root, spec) and (root / spec).is_file()
     if spec is None and checkpoint is not True:
         errors.append(f"{where}: spec is required unless the node is a checkpoint")
-    elif spec is not None and not (isinstance(spec, str) and (root / spec).is_file()):
+    elif spec is not None and not _inside(root, spec):
+        errors.append(f"{where}: spec {spec!r} must be a relative path inside the task root")
+    elif spec is not None and not spec_ok:
         errors.append(f"{where}: spec file {spec!r} not found")
     scope = _strings(raw.get("scope", []), where, "scope", errors)
     if isinstance(agent, str) and agent.startswith("worker-") and not scope:
         errors.append(f"{where}: a worker node needs scope globs")
-    errors += [f"{where}: scope {glob} must be relative" for glob in scope if glob.startswith("/")]
+    errors += [f"{where}: scope {glob} must be relative, without .." for glob in scope if _escapes(glob)]
     fields = {
         "id": node_id,
         "agent": agent,
@@ -169,16 +177,27 @@ def _node(root, index, raw, defaults, agents, errors):
         "session": _choice(raw.get("session", defaults["session"]), SESSIONS, where, "session", errors),
         "budget": {**defaults["budget"], **_budget(raw.get("budget", {}), where, errors)},
     }
-    text = (root / spec).read_text(encoding="utf-8") if isinstance(spec, str) and (root / spec).is_file() else ""
-    digest = hashlib.sha256(json.dumps({**fields, "spec_text": text}, sort_keys=True).encode()).hexdigest()
+    text = (root / spec).read_text(encoding="utf-8") if spec_ok else ""
+    digest = hashlib.sha256(json.dumps({**fields, "spec_text": text}, sort_keys=True, default=str).encode()).hexdigest()
     return Node(**fields, plan_hash=digest[:16])
 
 
-def _graph_errors(nodes):
+def _escapes(glob):
+    """True for an absolute path or one with a .. segment, which would leave the worktree."""
+    path = PurePosixPath(glob)
+    return path.is_absolute() or ".." in path.parts
+
+
+def _inside(root, rel):
+    """True when rel is a relative path that stays inside root, symlinks included."""
+    return isinstance(rel, str) and not _escapes(rel) and (root / rel).resolve().is_relative_to(root.resolve())
+
+
+def _graph_errors(nodes, invalid):
     errors = []
     for node in nodes.values():
         for dep in node.after:
-            if not QID.fullmatch(dep) and dep not in nodes:
+            if not QID.fullmatch(dep) and dep not in nodes and dep not in invalid:
                 errors.append(f"node {node.id}: after {dep} is neither a node id nor q:<qid>")
     cycle = _find_cycle(nodes)
     if cycle:

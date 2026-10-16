@@ -50,6 +50,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -373,11 +374,15 @@ def plan_main(argv):
     if args.command == "check":
         print(f"ok {len(nodes)} nodes")
         return 0
-    conn = task_state.connect(args.task_root)
     try:
-        counts = task_state.reconcile(conn, nodes)
-    finally:
-        conn.close()
+        conn = task_state.connect(args.task_root)
+        try:
+            counts = task_state.reconcile(conn, nodes)
+        finally:
+            conn.close()
+    except (sqlite3.Error, task_state.TransitionError) as error:
+        print(f"state.db: {error}")
+        return INTERNAL
     print("reconcile: " + ", ".join(f"{key} {value}" for key, value in counts.items()))
     return 0
 
