@@ -69,6 +69,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.append(str(HERE))
 import task_plan  # noqa: E402 (sibling modules, found through the path above)
+import task_jev  # noqa: E402
 import task_state  # noqa: E402
 DECIDE = HERE / "task-decide.py"
 REPORT_CHECK = HERE / "task-report.py"
@@ -889,6 +890,8 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["plan"]:
         return plan_main(argv[1:])
+    if argv[:1] == ["jev"]:
+        return task_jev.main(argv[1:])
     if argv[:1] and argv[0] in V2_COMMANDS:
         return v2_main(argv)
     parser = argparse.ArgumentParser(description="Wait for worker turns and route finished steps.")
