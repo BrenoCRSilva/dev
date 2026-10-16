@@ -6,6 +6,7 @@
 #   task-agent.sh [--dry-run] [--provider claude|codex] start worker <repo> <pane_id> <canonical_repo> [--resume]
 #   task-agent.sh [--dry-run] [--provider claude|codex] start researcher <pane_id> [--resume]
 #   task-agent.sh [--dry-run] stop <name> [--force]
+#   task-agent.sh [--dry-run] restart orchestrator
 #
 # Agent names: worker-<repo> for a worker and researcher for the researcher. The
 # orchestrator names itself at start-up (herdr cannot name it at launch). The
@@ -22,7 +23,10 @@
 # The provider defaults to $TASK_PROVIDER, else claude. Launching the
 # orchestrator exports TASK_PROVIDER so the agents it starts follow it.
 # --dry-run prints the command instead of running it. --resume must be the
-# last argument.
+# last argument. The orchestrator's claude launch has no MCP servers and no
+# claude.ai connectors, and a 200k auto-compact window (ORCHESTRATOR_ENV).
+# restart orchestrator ends the orchestrator in its own pane and starts a fresh
+# one there, without --resume; see restart_orchestrator.
 set -euo pipefail
 
 ROLES_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/task-roles"
@@ -51,6 +55,12 @@ PONYTAIL_START_HOOK=''
 # The assignment hook is the same command for every agent and provider, so one
 # hook trust covers all of them. Deployed copies live in ~/.config/tmux/scripts.
 ASSIGN_HOOK="$HOME/.config/tmux/scripts/task-assignment.sh"
+# The orchestrator's claude launch: 1h prompt-cache TTL, and a 200k auto-compact
+# window as a backstop below the context guard's restart (task-context-guard.py).
+# Claude-only; codex has no such variables.
+ORCHESTRATOR_ENV=(ENABLE_CLAUDEAI_MCP_SERVERS=false CLAUDE_CODE_PROMPT_CACHE_TTL=1h CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000)
+SELF=$(realpath "${BASH_SOURCE[0]}")
+RESTART_LOG="${XDG_STATE_HOME:-$HOME/.local/state}/task-agents/restart-orchestrator.log"
 
 # --- arguments -------------------------------------------------------------
 usage() {
@@ -59,6 +69,7 @@ usage: task-agent.sh [--dry-run] [--provider claude|codex] orchestrator [--resum
        task-agent.sh [--dry-run] [--provider claude|codex] start worker <repo> <pane_id> <canonical_repo> [--resume]
        task-agent.sh [--dry-run] [--provider claude|codex] start researcher <pane_id> [--resume]
        task-agent.sh [--dry-run] stop <name> [--force]
+       task-agent.sh [--dry-run] restart orchestrator
 EOF
     exit 2
 }
@@ -105,11 +116,70 @@ stop_agent() {
     return 1
 }
 
+# --- restart --------------------------------------------------------------------
+# restart orchestrator ends the orchestrator's session and starts a fresh one in
+# the same pane, with no --resume. It runs in the orchestrator's own pane, and
+# that pane's session is the one it ends, so the work is detached: the caller's
+# turn ends first. The detached --restart-finish waits for the orchestrator to go
+# idle, ends it with /exit, and types the fresh launch into the pane. Its log is
+# in the state folder.
+restart_orchestrator() {
+    local dry=$1 pane=${HERDR_PANE_ID:-} provider=${TASK_PROVIDER:-claude} info cmd
+    [[ "${2:-}" == orchestrator && $# -eq 2 ]] || usage
+    [[ -n "$pane" ]] || { echo "task-agent: restart runs in the orchestrator's pane; HERDR_PANE_ID is not set" >&2; exit 1; }
+    command -v jq >/dev/null || { echo "task-agent: jq is required to restart the orchestrator" >&2; exit 1; }
+    info=$(herdr_cmd agent get orchestrator 2>/dev/null) || { echo "task-agent: no agent named orchestrator" >&2; exit 1; }
+    if [[ "$(jq -r '.result.agent.pane_id' <<< "$info")" != "$pane" ]]; then
+        echo "task-agent: the orchestrator is not in pane $pane; restart it from its own pane" >&2
+        exit 1
+    fi
+    printf -v cmd '%q ' "$SELF" --provider "$provider" orchestrator --restarted
+    cmd=${cmd% }
+    if [[ "$dry" == yes ]]; then
+        printf 'restart: wait for the orchestrator in pane %s to go idle, send /exit, then type into that pane:\n  %s\n' "$pane" "$cmd"
+        echo "fresh launch (dry run):"
+        "$SELF" --dry-run --provider "$provider" orchestrator --restarted
+        return 0
+    fi
+    mkdir -p "${RESTART_LOG%/*}"
+    setsid -f "$SELF" --restart-finish "$pane" "$cmd" </dev/null >> "$RESTART_LOG" 2>&1
+    printf 'restart: scheduled; the orchestrator in pane %s ends after this turn and a fresh one starts there (log: %s)\n' "$pane" "$RESTART_LOG"
+}
+
+# Run detached by restart_orchestrator. Gives up after 10 minutes, or at once when
+# the orchestrator is gone, leaving the pane alone.
+finish_restart() {
+    local pane=$1 cmd=$2 state
+    for _ in $(seq 1 1200); do
+        state=$(herdr_cmd agent get orchestrator 2>/dev/null | jq -r '.result.agent.agent_status // empty' 2>/dev/null) || state=
+        if [[ "$state" == idle ]]; then
+            stop_agent no orchestrator || { echo "$(date -Is) restart: orchestrator did not end; not restarted"; return 1; }
+            herdr_cmd pane run "$pane" "$cmd" >/dev/null
+            echo "$(date -Is) restart: fresh orchestrator started in pane $pane"
+            return 0
+        fi
+        [[ -n "$state" ]] || { echo "$(date -Is) restart: no orchestrator agent; nothing done"; return 1; }
+        sleep 0.5
+    done
+    echo "$(date -Is) restart: orchestrator did not go idle within 10 minutes; not restarted"
+    return 1
+}
+
 dry_run=no
 if [[ "${1:-}" == --dry-run ]]; then dry_run=yes; shift; fi
 
 if [[ "${1:-}" == stop ]]; then
     stop_agent "$dry_run" "${@:2}"
+    exit
+fi
+
+if [[ "${1:-}" == restart ]]; then
+    restart_orchestrator "$dry_run" "${@:2}"
+    exit
+fi
+
+if [[ "${1:-}" == --restart-finish ]]; then
+    finish_restart "${@:2}"
     exit
 fi
 
@@ -124,9 +194,12 @@ case "$provider" in
     *) usage ;;
 esac
 
-resume=no
+resume=no restarted=no
 if (( $# > 0 )) && [[ "${!#}" == --resume ]]; then
     resume=yes
+    set -- "${@:1:$#-1}"
+elif (( $# > 0 )) && [[ "${!#}" == --restarted ]]; then
+    restarted=yes
     set -- "${@:1:$#-1}"
 fi
 
@@ -264,6 +337,8 @@ agent_args() {
         # assignment hook for the others, and the write guard for workers only.
         ARGS=(--model "${MODEL[claude:$role]}" --effort "${EFFORT[claude:$role]}" --append-system-prompt-file "$file"
               --settings "$ROLES_DIR/$role.claude-settings.json")
+        # The orchestrator loads no MCP server: its tool names and instructions would otherwise be in context.
+        if [[ $role == orchestrator ]]; then ARGS+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}'); fi
         if [[ $role == worker || $role == researcher ]]; then tool_args claude; fi
         if [[ $role == worker ]]; then
             dirs=("$canonical_repo/.git")
@@ -386,11 +461,14 @@ agent_args "$role" "$resume"
 if [[ $role == orchestrator ]]; then
     if [[ $resume == yes ]]; then
         kickoff="You were resumed as this task's orchestrator. Run your start-up steps again, then tell me where the plan stands."
+    elif [[ $restarted == yes ]]; then
+        kickoff='You were restarted as this task'"'"'s orchestrator in a fresh session. Rename yourself first (herdr agent rename "$HERDR_PANE_ID" orchestrator). Then resume from AGENTS.md, status.log and the latest reports under reports/, not from the old session. The workers and the researcher are still running: check herdr agent list and do not start them again. Then tell me where the plan stands.'
     else
         kickoff="You are this task's orchestrator. Run your start-up steps now."
     fi
     export TASK_PROVIDER=$provider
     cmd=("$provider" "${ARGS[@]}" "$kickoff")
+    if [[ $provider == claude ]]; then cmd=(env "${ORCHESTRATOR_ENV[@]}" "${cmd[@]}"); fi
 else
     if [[ $provider == claude ]]; then trust_pane_cwd; fi
     cmd=(herdr agent start "$name" --kind "$provider" --pane "$pane" --timeout 60000 -- "${ARGS[@]}")

@@ -2,5 +2,30 @@
   "statusLine": {
     "type": "command",
     "command": "~/.config/tmux/scripts/task-statusline.sh"
+  },
+  "disableClaudeAiConnectors": true,
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.config/tmux/scripts/task-context-guard.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.config/tmux/scripts/task-context-guard.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }

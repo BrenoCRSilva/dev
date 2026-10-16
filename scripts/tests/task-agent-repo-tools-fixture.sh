@@ -4,7 +4,7 @@
 # missing tool (with a warning). Workers and the researcher always get the
 # assignment hook and write access to their reports folder. Codex worker and
 # researcher launches pass a trust override for the pane's cwd; the
-# orchestrator's launch is unchanged.
+# orchestrator's launch loads no MCP server (strict empty config) and no repo tool.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -169,10 +169,11 @@ ignored_status=$(XDG_CONFIG_HOME="$IGN_TEST/xdg" git -C "$IGN_TEST/repo" status 
 printf 'PASS: tracked global ignore hides a symlinked .codegraph index\n'
 
 # The orchestrator gets no repo tools and no trust override, either provider.
+# Its --strict-mcp-config with an empty server list is not a repo tool, so mcp is not matched here.
 for launch in "orchestrator" "--provider codex orchestrator"; do
     # shellcheck disable=SC2086
     out=$(FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --dry-run $launch 2> "$ERR")
-    if grep -Eq 'codegraph|ponytail|mcp|plugin-dir|worker\.|hooks\.|dangerously|projects=' <<< "$out"; then
+    if grep -Eq 'codegraph|ponytail|plugin-dir|worker\.|hooks\.|dangerously|projects=' <<< "$out"; then
         fail "'$launch' picked up repo-only tools: $out"
     fi
 done

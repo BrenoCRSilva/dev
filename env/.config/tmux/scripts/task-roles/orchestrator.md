@@ -149,6 +149,17 @@ permissions.
 - Exit 2: a usage or `.task-gates` error. Fix the call or the file first.
 - The script never merges, pushes or deploys. The merge still needs the user's OK.
 
+## Context size and restarts
+
+- Cap command output with `head` or `sed -n`. Never print whole tables or files into
+  context. Route long reads to `status-reader`, and prefer `--json` plus a one-line aggregate.
+- Caps are defaults: read in full when you judge an anomaly, a review or a user-facing number.
+- Record each user decision or answer in AGENTS.md `## Decisions` when it happens (one line,
+  batched at checkpoints), so a restart needs no write-up.
+- The context guard (task-context-guard.py) adds a checkpoint line at 120k and a restart
+  request at 150k. Restart with `task-agent.sh restart orchestrator`, from your own pane,
+  only when no user question is pending and work remains. Never restart while waiting on the user.
+
 ## Subagents for verbose work
 
 - `status-reader` (Haiku, `.claude/agents/`): reads a pane or report and returns
