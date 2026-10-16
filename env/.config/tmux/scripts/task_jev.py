@@ -1,6 +1,7 @@
 """Jev client for the step router (arch v2 §5, T1): builds the gating request for one worker report,
 redacts it, and reads the five answers. Stdlib only.
 
+    task-dispatch.py jev calibrate [--task-root <dir>] [--json]
     task-dispatch.py jev smoke [--dry-run] --report <report.json> [--spec <spec.md>] [--scope <path>]...
                                [--next-spec <spec.md>] [--contracts <file>] [--worktree <dir>] [--base <ref>]
 
@@ -18,6 +19,7 @@ import http.client
 import json
 import os
 import re
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -131,8 +133,20 @@ def diffstat(worktree, base, head):
     return done.stdout if done.returncode == 0 else f"unavailable: git exit {done.returncode}"
 
 
-def load_state(args):
+def build_state(report, spec, scope, contract, diff, next_spec=""):
     """The state the questions read, redacted. Every text field is capped so the request stays near 12k tokens."""
+    state = {
+        "step": {"id": report.get("step"), "spec": clip(spec, CAPS["spec"]), "scope": scope},
+        "worker_report": report,
+        "diffstat": clip(diff, CAPS["diffstat"]),
+        "contract_excerpt": clip(contract, CAPS["contract"]),
+    }
+    if next_spec:
+        state["next_step"] = {"spec": clip(next_spec, CAPS["next_spec"])}
+    return redact_tree(state)
+
+
+def load_state(args):
     try:
         report = json.loads(read_text(args.report, "report"))
     except ValueError as error:
@@ -141,15 +155,23 @@ def load_state(args):
         raise InputError("report must be a JSON object")
     spec = read_text(args.spec, "spec") if args.spec else ""
     contract = read_text(args.contracts, "contracts") if args.contracts else ""
-    state = {
-        "step": {"id": report.get("step"), "spec": clip(spec, CAPS["spec"]), "scope": args.scope},
-        "worker_report": report,
-        "diffstat": clip(diffstat(args.worktree, args.base, report.get("head_sha") or "HEAD"), CAPS["diffstat"]),
-        "contract_excerpt": clip(contract, CAPS["contract"]),
-    }
-    if args.next_spec:
-        state["next_step"] = {"spec": clip(read_text(args.next_spec, "next spec"), CAPS["next_spec"])}
-    return redact_tree(state)
+    next_spec = read_text(args.next_spec, "next spec") if args.next_spec else ""
+    diff = diffstat(args.worktree, args.base, report.get("head_sha") or "HEAD")
+    return build_state(report, spec, args.scope, contract, diff, next_spec)
+
+
+# Each question's favourable answer: the route continues only when all five are favourable (arch v2 §5).
+FAVORABLE = {"done_met": "yes", "risk_material": "no", "contract_change": "no", "next_ready": "yes", "privileged_action": "no"}
+
+
+def derive_route(answers, threshold):
+    """continue when every answer is favourable and every confidence is at least threshold, else escalate. No answers
+    (jev failed) escalate."""
+    if answers is None:
+        return "escalate"
+    favorable = all(answers[qid]["choice"] == choice for qid, choice in FAVORABLE.items())
+    confident = all(answer["confidence"] >= threshold for answer in answers.values())
+    return "continue" if favorable and confident else "escalate"
 
 
 def build_body(state, model, shape):
@@ -263,12 +285,78 @@ def ask(body, *, url, shape, env, key_path, post=_post, sleep=time.sleep):
     return {"answers": answers, "latency_ms": round((time.monotonic() - started) * 1000), "input_tokens": tokens}
 
 
+# Calibration: a final outcome is what the step's attempt came to. Continue, resolved:continue and the resolved
+# retry, skip and cancel are final; a stop with no resolution yet is not.
+FINAL_OUTCOMES = {"continue": True, "resolved:continue": True, "resolved:retry": False, "resolved:skip": False,
+                  "resolved:cancel": False}
+MIN_STEPS = 20
+THRESHOLDS = [round(0.5 + 0.05 * step, 2) for step in range(11)]
+
+
+def judged_rows(root):
+    """(answers, derived route, final accepted) for each judged attempt with answers and a final outcome, and the number of
+    judgements with no answers (jev failed). Read-only; a state.db without judgements gives nothing."""
+    path = Path(root) / "state.db"
+    if not path.exists():
+        return [], 0
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute("SELECT answers_json, derived_route, outcome FROM judgements").fetchall()
+        errors = conn.execute("SELECT COUNT(*) FROM judgements WHERE answers_json IS NULL").fetchone()[0]
+    except sqlite3.OperationalError:  # no judgements table or outcome column yet
+        return [], 0
+    finally:
+        conn.close()
+    final = [(json.loads(answers), route, FINAL_OUTCOMES[outcome]) for answers, route, outcome in rows
+             if answers is not None and outcome in FINAL_OUTCOMES]
+    return final, errors
+
+
+def calibrate(root, as_json, out):
+    """Confidence against outcome for each question, the would-have-routed accuracy and false continues, and the lowest
+    threshold with no false continue over MIN_STEPS final steps (or the sample size when there are too few)."""
+    final, errors = judged_rows(root)
+    accepted = [accepted for _, _, accepted in final]
+    matches = sum((route == "continue") == accepted_now for _, route, accepted_now in final)
+    false_continue = sum(route == "continue" and not accepted_now for _, route, accepted_now in final)
+    buckets = {qid: {} for qid in QUESTIONS}
+    for answers, _, accepted_now in final:
+        for qid in QUESTIONS:
+            answer = answers[qid]
+            key = min(int(answer["confidence"] * 10), 9) / 10
+            count, agree = buckets[qid].get(key, (0, 0))
+            agreed = (answer["choice"] == FAVORABLE[qid]) == accepted_now
+            buckets[qid][key] = (count + 1, agree + agreed)
+    if len(final) < MIN_STEPS:
+        suggestion = f"insufficient data ({len(final)})"
+    else:
+        clean = [t for t in THRESHOLDS if not any(derive_route(a, t) == "continue" and not ok for a, _, ok in final)]
+        suggestion = f"{clean[0]:.2f} (zero false continues over {len(final)} steps)" if clean else \
+            f"none: every threshold lets a false continue through over {len(final)} steps"
+    result = {"judged": len(final), "errors": errors, "accuracy": matches / len(final) if final else None,
+              "false_continue": false_continue, "accepted": sum(accepted), "threshold": suggestion,
+              "buckets": {qid: {f"{key:.1f}": {"n": n, "agree": agree} for key, (n, agree) in sorted(table.items())}
+                          for qid, table in buckets.items()}}
+    if as_json:
+        print(json.dumps(result, indent=2), file=out)
+        return
+    print(f"judged steps with a final outcome: {len(final)} ({sum(accepted)} accepted), jev failures: {errors}", file=out)
+    accuracy = "n/a" if result["accuracy"] is None else f"{result['accuracy']:.0%}"
+    print(f"would-have-routed accuracy: {accuracy}; false continues: {false_continue}", file=out)
+    for qid, table in result["buckets"].items():
+        cells = ", ".join(f"{key}: {cell['agree']}/{cell['n']}" for key, cell in table.items())
+        print(f"{qid} (agreement by confidence): {cells or 'no data'}", file=out)
+    print(f"threshold: {suggestion}", file=out)
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog="task-dispatch.py jev",
-                                     description="Send one worker report to Jev, or print the request (--dry-run).")
-    parser.add_argument("action", choices=["smoke"])
+                                     description="Send one worker report to Jev (smoke), or calibrate the judgements.")
+    parser.add_argument("action", choices=["smoke", "calibrate"])
     parser.add_argument("--dry-run", action="store_true", help="print the redacted request; no request, no key")
-    parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--report", type=Path, help="smoke: the worker report to send")
+    parser.add_argument("--task-root", type=Path, default=Path.cwd(), help="calibrate: the task root with state.db")
+    parser.add_argument("--json", action="store_true", help="calibrate: JSON output")
     parser.add_argument("--spec", type=Path)
     parser.add_argument("--scope", action="append", default=[])
     parser.add_argument("--next-spec", type=Path)
@@ -276,6 +364,11 @@ def main(argv):
     parser.add_argument("--worktree", type=Path, default=Path.cwd())
     parser.add_argument("--base", default="main")
     args = parser.parse_args(argv)
+    if args.action == "calibrate":
+        calibrate(args.task_root, args.json, sys.stdout)
+        return 0
+    if args.report is None:
+        parser.error("smoke needs --report")
     env = os.environ
     shape = env.get("TASK_JEV_SHAPE", "native")
     try:

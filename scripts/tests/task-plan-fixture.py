@@ -455,7 +455,7 @@ def scenario_schema():
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
     conn.close()
-    check("migrations apply once, in order", versions == [1, 2, 3, 4], versions)
+    check("migrations apply once, in order", versions == [1, 2, 3, 4, 5], versions)
     check("schema has the §3 tables", {"nodes", "attempts", "events", "wakes", "judgements", "questions"} <= tables, tables)
     check("state.db is in WAL mode", mode == "wal", mode)
 

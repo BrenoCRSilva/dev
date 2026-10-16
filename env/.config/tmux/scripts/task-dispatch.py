@@ -51,6 +51,7 @@ herdr session. Stdlib only.
 """
 import argparse
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -101,12 +102,16 @@ LAUNCH = 28
 KEYWORD = 29  # a bare safety keyword: Opus decides, not the user
 LAUNCHED = "launched"  # a message from the launch thread, not an exit code
 LOCKED = 23
+JEV_ESCALATE = 30  # route mode: jev's gate failed, so Opus decides with jev's answers in the wake
 DAEMON_STOPPED = 1
 ASK_USER = 11
-STOP_NAMES = {NEEDS_DECISION: "needs_decision", OUT_OF_SCOPE: "out_of_scope", CHECKS_FAILED: "checks", BUDGET: "budget", 10: "escalate", ASK_USER: "ask_user", 20: "decision_unavailable", QUESTION: "question", KEYWORD: "keyword-safety"}
+STOP_NAMES = {NEEDS_DECISION: "needs_decision", OUT_OF_SCOPE: "out_of_scope", CHECKS_FAILED: "checks", BUDGET: "budget", 10: "escalate", ASK_USER: "ask_user", 20: "decision_unavailable", QUESTION: "question", KEYWORD: "keyword-safety", JEV_ESCALATE: "jev-escalate"}
 FAIL_NAMES = {BLOCKED: "blocked", NOT_STARTED: "not_started", TIMED_OUT: "timed_out", HERDR: "herdr", INTERNAL: "internal", NO_REPORT: "no_report", STALE: "stale_report", LAUNCH: "launch"}
 V2_COMMANDS = ("run", "wake-wait", "status", "wakes", "resolve", "pause", "resume")
 TICK_S = 1
+JEV_MODES = ("off", "shadow", "route")
+JEV_DEFAULT_THRESHOLD = 0.8  # shadow reporting only; route mode requires TASK_JEV_THRESHOLD
+JEV_USD_PER_MTOK = 0.042  # jev's input price (list-price equivalent)
 STOP_ROUTES = {NEEDS_DECISION: "stopped:needs_decision", OUT_OF_SCOPE: "stopped:out_of_scope"}
 
 
@@ -551,73 +556,197 @@ def t0_safety(formula, data):
     return None
 
 
-def evaluate(root, agent, node, scope, budget):
-    """T0 rules, free and first: needs_decision, blocking questions, checks exit 0, files within scope, no safety
-    paths, context and turns within budget. Then the report check and task-decide (v1). Returns (exit code, one line);
-    0 means continue."""
-    report = report_path(root, agent, node)
+def jev_settings(env=os.environ):
+    """(mode, threshold) from TASK_JEV_MODE (default shadow) and TASK_JEV_THRESHOLD. Route mode needs the threshold."""
+    mode = env.get("TASK_JEV_MODE", "shadow")
+    if mode not in JEV_MODES:
+        raise ValueError(f"TASK_JEV_MODE must be off, shadow or route, not {mode}")
+    raw = env.get("TASK_JEV_THRESHOLD")
+    if raw is None:
+        if mode == "route":
+            raise ValueError("TASK_JEV_MODE=route needs TASK_JEV_THRESHOLD (0 to 1); refusing to route without it")
+        return mode, JEV_DEFAULT_THRESHOLD
     try:
-        data = json.loads(report.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return NO_REPORT, f"no readable report for {node}"
-    if data.get("needs_decision"):
-        return NEEDS_DECISION, f"needs_decision is set: {str(data['needs_decision'])[:200]}"
-    blocking = [str(q.get("text", ""))[:200] for q in data.get("questions", []) if q.get("blocking")]
-    if blocking:
-        return QUESTION, f"blocking question: {blocking[0]}"
-    failed = [check.get("cmd", "?") for check in data.get("checks", []) if check.get("exit") != 0]
-    if failed:
-        return CHECKS_FAILED, f"checks not all exit 0: {', '.join(failed)}"[:300]
-    if scope is not None:  # None: the node is gone from the plan, so there is no scope to check against
-        regexes = scope_regexes(scope)
-        outside = [path for path in data.get("files_changed", []) if not any(r.match(path) for r in regexes)]
-        if outside:
-            return OUT_OF_SCOPE, f"changed outside scope: {', '.join(outside)}"[:300]
-    tiered = t0_safety(DECIDE_MODULE.load_formula(FORMULA), data)
-    if tiered:
-        return tiered
+        threshold = float(raw)
+    except ValueError:
+        raise ValueError(f"TASK_JEV_THRESHOLD must be a number from 0 to 1, not {raw!r}")
+    if not 0 <= threshold <= 1:
+        raise ValueError(f"TASK_JEV_THRESHOLD must be from 0 to 1, not {raw}")
+    return mode, threshold
+
+
+def repo_line(root, agent):
+    """The AGENTS.md Repo modes line that names the agent, or '' when there is none."""
+    try:
+        lines = (root / "AGENTS.md").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    return next((line for line in lines if f"agent `{agent}`" in line), "")
+
+
+def contract_text(root, ids):
+    """The AGENTS.md cross-repo contract bullets named by ids (C5 and the like), each with its continuation lines."""
+    try:
+        lines = (root / "AGENTS.md").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    blocks, current = {}, None
+    for line in lines:
+        match = re.match(r"- (C\d+):", line)
+        if match:
+            current = blocks.setdefault(match[1], [])
+            current.append(line)
+        elif current is not None and line[:1].isspace():
+            current.append(line)
+        else:
+            current = None
+    return "\n".join("\n".join(blocks[contract]) for contract in ids if contract in blocks)
+
+
+def read_or_empty(path):
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def ask_jev(root, plan, node_id, agent, data):
+    """Builds the redacted request for one attempt and asks jev once (the client's live gate applies). Returns the fields
+    the judgement records."""
+    env = os.environ
+    shape = env.get("TASK_JEV_SHAPE", "native")
+    model = env.get("TASK_JEV_MODEL", task_jev.MODEL)
+    node = plan.get(node_id)
+    successor = next((other for other in plan.values() if node_id in other.after and other.spec), None)
+    match = re.search(r"worktree `([^`]+)`", repo_line(root, agent))
+    state = task_jev.build_state(
+        data,
+        read_or_empty(root / node.spec) if node and node.spec else "",
+        node.scope if node else [],
+        contract_text(root, node.contracts if node else []),
+        task_jev.diffstat(Path(match[1]), "main", data.get("head_sha") or "HEAD") if match else "unavailable: no worktree",
+        read_or_empty(root / successor.spec) if successor else "",
+    )
+    body = task_jev.build_body(state, model, shape)
+    result = task_jev.ask(body, url=env.get("TASK_JEV_URL", task_jev.ENDPOINTS.get(shape, "")), shape=shape, env=env,
+                          key_path=Path(env.get("TASK_JEV_KEYFILE", Path.home() / ".config/task-agents/openrouter.env")))
+    tokens = result["input_tokens"]
+    return {"model": model, "request_hash": hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest(),
+            "answers": result["answers"], "latency_ms": result["latency_ms"], "input_tokens": tokens,
+            "cost_usd": None if tokens is None else tokens * JEV_USD_PER_MTOK / 1_000_000}
+
+
+def judge(root, plan, node_id, agent, data, mode, threshold):
+    """jev's answers for this attempt (T1) as a judgement record. Never raises: a failed call is recorded with its error and
+    derives escalate, so jev alone never fails a node."""
+    judged = {"mode": mode, "model": task_jev.MODEL, "request_hash": None, "answers": None, "error": None,
+              "latency_ms": None, "input_tokens": None, "cost_usd": None}
+    try:
+        judged.update(ask_jev(root, plan, node_id, agent, data))
+    except Exception as error:  # the key is never in an error message: the client keeps it out
+        judged["error"] = f"{type(error).__name__}: {error}"[:300]
+    judged["derived_route"] = task_jev.derive_route(judged["answers"], threshold)
+    return judged
+
+
+def jev_summary(judged):
+    if judged["answers"] is None:
+        return f"unavailable ({judged['error']})"
+    return ", ".join(f"{qid} {answer['choice']} {answer['confidence']:.2f}" for qid, answer in judged["answers"].items())
+
+
+def jev_pointer(judged):
+    """What the wake carries for Opus: jev's answers (shadow too), its derived route and any error."""
+    return {"mode": judged["mode"], "derived_route": judged["derived_route"], "answers": judged["answers"], "error": judged["error"]}
+
+
+def over_budget(data, budget):
+    """(BUDGET, line) when the report is over its context or turn budget, else None."""
     if (data.get("context_estimate_k") or 0) > budget["prompt_k"]:
         return BUDGET, f"context estimate {data['context_estimate_k']}k is over the {budget['prompt_k']}k budget"
     if "turns" in data and data["turns"] > budget["turns"]:
         return BUDGET, f"turns {data['turns']} is over the {budget['turns']}-turn budget"
-    return route(agent, node, root)
+    return None
 
 
-def turn_outcome(root, agent, node, scope, budget, since, start_ms, turn_ms):
+def evaluate(root, agent, node, scope, budget, plan):
+    """T0 rules, free and first: needs_decision, blocking questions, checks exit 0, files within scope, no safety
+    paths, context and turns within budget. Then jev (T1, after T0 passes or on a keyword-safety stop), then the report
+    check and task-decide (v1). Returns (exit code, one line, judgement or None); 0 means continue."""
+    report = report_path(root, agent, node)
+    try:
+        data = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return NO_REPORT, f"no readable report for {node}", None
+    if data.get("needs_decision"):
+        return NEEDS_DECISION, f"needs_decision is set: {str(data['needs_decision'])[:200]}", None
+    blocking = [str(q.get("text", ""))[:200] for q in data.get("questions", []) if q.get("blocking")]
+    if blocking:
+        return QUESTION, f"blocking question: {blocking[0]}", None
+    failed = [check.get("cmd", "?") for check in data.get("checks", []) if check.get("exit") != 0]
+    if failed:
+        return CHECKS_FAILED, f"checks not all exit 0: {', '.join(failed)}"[:300], None
+    if scope is not None:  # None: the node is gone from the plan, so there is no scope to check against
+        regexes = scope_regexes(scope)
+        outside = [path for path in data.get("files_changed", []) if not any(r.match(path) for r in regexes)]
+        if outside:
+            return OUT_OF_SCOPE, f"changed outside scope: {', '.join(outside)}"[:300], None
+    tiered = t0_safety(DECIDE_MODULE.load_formula(FORMULA), data)
+    if tiered and tiered[0] != KEYWORD:
+        return (*tiered, None)
+    if not tiered and (over := over_budget(data, budget)):
+        return (*over, None)
+    mode, threshold = jev_settings()
+    judged = judge(root, plan, node, agent, data, mode, threshold) if mode != "off" else None
+    if tiered:  # a bare keyword: Opus decides, unless route mode's gate clears it
+        if not (mode == "route" and judged and judged["derived_route"] == "continue"):
+            return KEYWORD, f"{tiered[1]}; jev {jev_summary(judged) if judged else 'off'}", judged
+    elif mode == "route" and judged["derived_route"] != "continue":
+        return JEV_ESCALATE, f"jev gate not clear: {jev_summary(judged)}"[:300], judged
+    code, line = route(agent, node, root)
+    return code, line, judged
+
+
+def turn_outcome(root, agent, node, scope, budget, since, start_ms, turn_ms, plan):
     try:
         code, line = await_turn(agent, node, root, start_ms, turn_ms, since)
         if code is not None:
-            return code, line
+            return code, line, None
         # A report from before this attempt's prompt is not this turn's: it fails the node before any evaluation.
         report = report_path(root, agent, node)
         if report.exists() and not fresh_report(report, since):
-            return STALE, f"report for {node} was written before its prompt"
-        return evaluate(root, agent, node, scope, budget)
+            return STALE, f"report for {node} was written before its prompt", None
+        return evaluate(root, agent, node, scope, budget, plan)
     except Herdr as error:
-        return HERDR, f"{agent}: {error}"
+        return HERDR, f"{agent}: {error}", None
     except Exception as error:
-        return INTERNAL, f"internal: {node}: {error!r}"
+        return INTERNAL, f"internal: {node}: {error!r}", None
 
 
-def spawn(results, root, agent, node, scope, budget, since, start_ms, turn_ms):
+def spawn(results, root, agent, node, scope, budget, since, start_ms, turn_ms, plan):
     def lane():
-        results.put((node, *turn_outcome(root, agent, node, scope, budget, since, start_ms, turn_ms)))
+        results.put((node, *turn_outcome(root, agent, node, scope, budget, since, start_ms, turn_ms, plan)))
 
     threading.Thread(target=lane, daemon=True).start()
 
 
-def stop_node(conn, node, kind, name, reason, tier="opus"):
+def stop_node(conn, node, kind, name, reason, tier="opus", pointers=None):
     """Routes the running node stopped or failed, and raises the wake for Opus (or the user) that says why."""
     task_state.route(conn, node, f"{kind}:{name}", reason, tier)
-    task_state.wake(conn, node, tier, name, reason)
+    task_state.wake(conn, node, tier, name, reason, pointers)
 
 
-def finish(conn, root, node, code, line, plan):
-    """Settles a finished turn: writes the report to state if it is fresh, then routes the node by the outcome. A passing
-    node with review: opus also raises an Opus wake; its successors are not held for it."""
-    agent = task_state.snapshot(conn)["nodes"][node]["agent"]
+def finish(conn, root, node, code, line, plan, judged=None):
+    """Settles a finished turn: records jev's judgement, writes the report to state if it is fresh, then routes the node by
+    the outcome. A passing node with review: opus also raises an Opus wake; its successors are not held for it."""
+    snapshot = task_state.snapshot(conn)["nodes"][node]
+    agent = snapshot["agent"]
+    pointers = None
+    if judged:
+        task_state.record_judgement(conn, node, snapshot["attempt"], judged)
+        pointers = {"jev": jev_pointer(judged)}
     if code in FAIL_NAMES:
-        return stop_node(conn, node, "failed", FAIL_NAMES[code], line)
+        return stop_node(conn, node, "failed", FAIL_NAMES[code], line, pointers=pointers)
     report = report_path(root, agent, node)
     try:
         data = json.loads(report.read_text(encoding="utf-8"))
@@ -629,9 +758,9 @@ def finish(conn, root, node, code, line, plan):
     if code == 0:
         task_state.route(conn, node, "continue")
         if node in plan and plan[node].review == "opus":
-            task_state.wake(conn, node, "opus", "review", "review=opus: check this step before relying on it")
+            task_state.wake(conn, node, "opus", "review", "review=opus: check this step before relying on it", pointers)
         return None
-    return stop_node(conn, node, "stopped", STOP_NAMES.get(code, "decide"), line, "user" if code == ASK_USER else "opus")
+    return stop_node(conn, node, "stopped", STOP_NAMES.get(code, "decide"), line, "user" if code == ASK_USER else "opus", pointers)
 
 
 def fail_node(conn, node, error):
@@ -683,12 +812,12 @@ def prompt_lane(results, root, nodes, node, attempt, prompt_at):
             relaunch(root, node.agent)
         herdr("prompt", node.agent, f"Read {root}/hooks/{node.agent}.md and follow it. End with the SUMMARY block.")
     except Herdr as error:
-        return results.put((node.id, HERDR, str(error)))
+        return results.put((node.id, HERDR, str(error), None))
     except Launch as error:
-        return results.put((node.id, LAUNCH, str(error)))
+        return results.put((node.id, LAUNCH, str(error), None))
     except Exception as error:
-        return results.put((node.id, INTERNAL, f"internal: {node.id}: {error!r}"))
-    results.put((node.id, LAUNCHED, (node.agent, node.scope, node.budget, prompt_at)))
+        return results.put((node.id, INTERNAL, f"internal: {node.id}: {error!r}", None))
+    results.put((node.id, LAUNCHED, (node.agent, node.scope, node.budget, prompt_at), None))
 
 
 def load_nodes(conn, root):
@@ -730,22 +859,22 @@ def daemon(root, start_ms, turn_ms):
             else:
                 scope = node.scope if node else None  # an attempt from before migration 4
             budget = {"turns": row["budget_turns"], "prompt_k": row["budget_prompt_k"]}
-            spawn(results, root, row["agent"], row["id"], scope, budget, row["prompt_at"], start_ms, turn_ms)
+            spawn(results, root, row["agent"], row["id"], scope, budget, row["prompt_at"], start_ms, turn_ms, known)
         while not STOP.is_set():
             nodes = load_nodes(conn, root)
             if nodes is not None:
                 known = nodes
                 tick(conn, root, nodes, results)
             try:
-                node, code, line = results.get(timeout=TICK_S)
+                node, code, line, judged = results.get(timeout=TICK_S)
             except queue.Empty:
                 continue
             if code == LAUNCHED:
                 agent, scope, budget, since = line
-                spawn(results, root, agent, node, scope, budget, since, start_ms, turn_ms)
+                spawn(results, root, agent, node, scope, budget, since, start_ms, turn_ms, known)
                 continue
             try:
-                finish(conn, root, node, code, line, known)
+                finish(conn, root, node, code, line, known, judged)
             except Exception as error:
                 fail_node(conn, node, repr(error))
     finally:
@@ -831,6 +960,11 @@ def v2_main(argv):
     args = parser.parse_args(argv)
     root = args.task_root
     if args.command == "run":
+        try:
+            jev_settings()
+        except ValueError as error:
+            print(f"refused: {error}")
+            return USAGE
         start_ms = int(os.environ.get("TASK_DISPATCH_START_MS", 30000))
         turn_ms = int(os.environ.get("TASK_DISPATCH_TURN_MS", 4 * 60 * 60 * 1000))
         return daemon(root, start_ms, turn_ms)
