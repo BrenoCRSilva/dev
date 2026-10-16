@@ -46,6 +46,14 @@ PY
 trap cleanup EXIT
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+# nvim starts a moment after its tmux window, so its log line is polled for up to 10 s.
+wait_nvim_line() {
+    for _ in $(seq 1 100); do
+        grep -Fxq "$1" "$NVIM_LOG" 2>/dev/null && return 0
+        sleep 0.1
+    done
+    return 1
+}
 make_repo() { mkdir -p "$TASKS_DIR/$1/$2"; : > "$TASKS_DIR/$1/$2/.git"; }
 run_task() { TASK_SEARCH=1 "$SESSIONIZER" open "$1"; }
 expect_windows() {
@@ -69,7 +77,7 @@ expect_windows fixture-multi $'agent\nnvim-dotfiles\nnvim-api\nsrv-dotfiles\nsrv
 [[ $(cat "$TASKS_DIR/fixture-multi/.task-worker-order") == $'dotfiles\napi' ]] ||
     fail 'legacy AGENTS.md order was not persisted on first use'
 for expected in "$TASKS_DIR/fixture-multi/dotfiles" "$TASKS_DIR/fixture-multi/api"; do
-    grep -Fxq "$expected$(printf '\t.')" "$NVIM_LOG" || fail "nvim . did not launch in $expected"
+    wait_nvim_line "$expected$(printf '\t.')" || fail "nvim . did not launch in $expected"
 done
 
 # A live server in a correctly rooted srv tab is kept in place on re-entry.
@@ -103,7 +111,7 @@ expect_windows fixture-explicit $'agent\nnvim-dotfiles\nnvim-api\nsrv-dotfiles\n
 make_repo fixture-single onlyrepo
 run_task fixture-single
 expect_windows fixture-single $'agent\nnvim-onlyrepo\nsrv-onlyrepo'
-grep -Fxq "$TASKS_DIR/fixture-single/onlyrepo$(printf '\t.')" "$NVIM_LOG" ||
+wait_nvim_line "$TASKS_DIR/fixture-single/onlyrepo$(printf '\t.')" ||
     fail 'single-repo nvim . did not launch in its worktree'
 
 printf 'PASS: single/multi-repo ordering, nvim cwd, busy srv idempotence, focus, and extra-window preservation\n'

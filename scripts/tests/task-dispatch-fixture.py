@@ -36,9 +36,19 @@ args = sys.argv[1:]
 with (FAKE / "calls.log").open("a", encoding="utf-8") as log:
     log.write("\t".join(args) + "\n")
 
+def save(path, st):
+    # Atomic: a killed daemon can leave a herdr wait running that writes the same state file.
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(st), encoding="utf-8")
+    os.replace(tmp, path)
+
 def reply(result=None, error=None):
-    print(json.dumps({"id": "fake", "error": error} if error else {"id": "fake", "result": result}))
-    sys.exit(1 if error else 0)
+    # As real herdr: an error reply goes to stderr and stdout stays empty.
+    if error:
+        print(json.dumps({"id": "fake", "error": error}), file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps({"id": "fake", "result": result}))
+    sys.exit(0)
 
 def current(name):
     path = FAKE / "state" / f"{name}.json"
@@ -62,11 +72,11 @@ def current(name):
         st["active"] = None
         st["blocked"] = turn["end"] == "blocked"
         status = turn["end"]
-    path.write_text(json.dumps(st), encoding="utf-8")
+    save(path, st)
     return status, st
 
 def info(name, status):
-    return {"type": "agent_info", "agent": {"name": name, "agent_status": status}}
+    return {"type": "agent_info", "agent": {"name": name, "agent_status": status, "pane_id": f"pane-{name}"}}
 
 command, name = args[1], args[2] if len(args) > 2 else ""
 if command == "get":
@@ -80,9 +90,11 @@ if command == "prompt":
         reply(error={"code": "no_turn", "message": "fixture has no turn left"})
     st["active"], st["turns"] = st["turns"].pop(0), st["turns"]
     st["t0"] = time.time()
-    (FAKE / "state" / f"{name}.json").write_text(json.dumps(st), encoding="utf-8")
+    save(FAKE / "state" / f"{name}.json", st)
     with (FAKE / "prompts.log").open("a", encoding="utf-8") as log:
         log.write(f"{name}\t{args[3]}\n")
+    with (FAKE / "sessions.log").open("a", encoding="utf-8") as log:
+        log.write(f"{name}\t{st.get('session', 0)}\n")
     reply({"type": "ok"})
 if command == "wait":
     until = {args[args.index("--until") + 1]} if "--until" in args else {"idle", "done", "blocked"}

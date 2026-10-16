@@ -120,15 +120,29 @@ class Timeout(Herdr):
     """A herdr wait ran out of time."""
 
 
+class Launch(Exception):
+    """A fresh session could not be started (task-agent.sh or the agent's state): the node fails."""
+
+
+def _reply(text):
+    """The JSON object in text, or None when there is none."""
+    try:
+        reply = json.loads(text)
+    except ValueError:
+        return None
+    return reply if isinstance(reply, dict) else None
+
+
 def herdr(*args):
-    """Runs `herdr agent <args>` and returns its result."""
+    """Runs `herdr agent <args>` and returns its result. herdr writes an error reply to stderr with stdout empty."""
     cmd = ["herdr"]
     if os.environ.get("TASK_SESSION"):
         cmd += ["--session", os.environ["TASK_SESSION"]]
     proc = subprocess.run([*cmd, "agent", *args], capture_output=True, text=True)
-    try:
-        reply = json.loads(proc.stdout)
-    except ValueError:
+    reply = _reply(proc.stdout)
+    if reply is None:
+        reply = _reply(proc.stderr)
+    if reply is None:
         raise Herdr(f"herdr agent {args[0]}: no JSON reply: {(proc.stderr or proc.stdout).strip()[:200]}")
     if "error" in reply:
         error = reply["error"]
@@ -140,6 +154,42 @@ def herdr(*args):
 
 def status(agent):
     return herdr("get", agent)["agent"]["agent_status"]
+
+
+def canonical_repo(root, agent):
+    """The canonical checkout of a worker's repo: the AGENTS.md Repo modes line that names its agent."""
+    try:
+        lines = (root / "AGENTS.md").read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        raise Launch(f"cannot read AGENTS.md: {error}")
+    for line in lines:
+        match = re.search(r"canonical checkout `([^`]+)`", line)
+        if match and f"agent `{agent}`" in line:
+            return match[1]
+    raise Launch(f"AGENTS.md Repo modes has no canonical checkout for {agent}")
+
+
+def task_agent(*args):
+    """Runs task-agent.sh (TASK_AGENT_SCRIPT overrides the path in tests). Raises Launch when it fails."""
+    proc = subprocess.run([os.environ.get("TASK_AGENT_SCRIPT", str(HERE / "task-agent.sh")), *args], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise Launch(f"task-agent.sh {' '.join(args[:2])} exit {proc.returncode}: {(proc.stderr or proc.stdout).strip()[-200:]}")
+
+
+def relaunch(root, agent):
+    """session=fresh: ends the agent's session and starts a new one in its pane, with no --resume. The hook is
+    already installed, so the new session reads it. The start arguments are checked before the session is ended."""
+    info = herdr("get", agent)["agent"]
+    if info["agent_status"] not in ("idle", "done"):
+        raise Launch(f"{agent} is {info['agent_status']}, not idle, so it cannot start a fresh session")
+    if agent == "researcher":
+        start = ["start", "researcher", info["pane_id"]]
+    elif agent.startswith("worker-"):
+        start = ["start", "worker", agent[len("worker-"):], info["pane_id"], canonical_repo(root, agent)]
+    else:
+        raise Launch(f"{agent} cannot start a fresh session; use session = \"continue\"")
+    task_agent("stop", agent)
+    task_agent(*start)
 
 
 def wait_status(agent, until, timeout_ms):
@@ -382,8 +432,8 @@ def wait(agents, root, start_ms, turn_ms):
 # `resolve` applies to the wake's node: continue (checkpoint passes; a stopped or failed node with an accepted report
 # is accepted), retry (stopped or failed back to pending, a new attempt), skip (done with route skipped, or
 # continue with --release so successors start), cancel (cancelled, kept until its plan entry changes).
-# pause and resume hold back installs for an agent or a node. Session fresh: START prompts the live session;
-# a stop-and-start of the agent is not wired yet (see the M2 report).
+# pause and resume hold back installs for an agent or a node. Session fresh relaunches the agent through task-agent.sh
+# (stop, then start in the same pane) after the hook is written; continue prompts the live session.
 
 STOP = threading.Event()
 
@@ -468,6 +518,8 @@ def evaluate(root, agent, node, scope, budget):
         return OUT_OF_SCOPE, f"changed outside scope: {', '.join(outside)}"[:300]
     if (data.get("context_estimate_k") or 0) > budget["prompt_k"]:
         return BUDGET, f"context estimate {data['context_estimate_k']}k is over the {budget['prompt_k']}k budget"
+    if "turns" in data and data["turns"] > budget["turns"]:
+        return BUDGET, f"turns {data['turns']} is over the {budget['turns']}-turn budget"
     return route(agent, node, root)
 
 
@@ -527,22 +579,30 @@ def tick(conn, root, nodes, start_ms, turn_ms, results):
         attempt = task_state.install(conn, node_id, node.budget)
         (root / "hooks").mkdir(exist_ok=True)
         (root / "hooks" / f"{node.agent}.md").write_text(hook_text(root, nodes, node, attempt), encoding="utf-8")
+        # The node is running before anything can fail, so a failed start routes it failed. prompt_at is taken before the
+        # relaunch: a report written during it is from this attempt, and an older one is still rejected.
         prompt_at = time.time()
         task_state.start(conn, node_id, prompt_at=prompt_at)
         try:
+            if node.session == "fresh":
+                relaunch(root, node.agent)
             herdr("prompt", node.agent, f"Read {root}/hooks/{node.agent}.md and follow it. End with the SUMMARY block.")
-        except Herdr as error:
-            stop_node(conn, node_id, "failed", "herdr", str(error))
+        except (Herdr, Launch) as error:
+            stop_node(conn, node_id, "failed", "herdr" if isinstance(error, Herdr) else "launch", str(error))
             continue
         spawn(results, root, node.agent, node_id, node.scope, node.budget, prompt_at, start_ms, turn_ms)
 
 
-def load_nodes(root):
-    """The plan's nodes, or None while plan/dag.toml is invalid (the tick is skipped; `status` shows nothing new)."""
+def load_nodes(conn, root):
+    """The plan's nodes, or None while plan/dag.toml is invalid (the tick is skipped). An invalid plan is recorded with
+    one plan-invalid wake; a valid one clears the record."""
     try:
-        return task_plan.load_plan(root)
-    except task_plan.PlanError:
+        nodes = task_plan.load_plan(root)
+    except task_plan.PlanError as error:
+        task_state.plan_invalid(conn, error.errors[0])
         return None
+    task_state.plan_valid(conn)
+    return nodes
 
 
 def daemon(root, start_ms, turn_ms):
@@ -560,11 +620,11 @@ def daemon(root, start_ms, turn_ms):
         print(f"dispatcher started (pid {os.getpid()})", flush=True)
         for row in task_state.running(conn):
             # A running node stays running across a restart: watch its turn again from its prompt time.
-            node = load_nodes(root).get(row["id"])
+            node = (load_nodes(conn, root) or {}).get(row["id"])
             budget = node.budget if node else task_plan.DEFAULTS["budget"]
             spawn(results, root, row["agent"], row["id"], node.scope if node else [], budget, row["prompt_at"], start_ms, turn_ms)
         while not STOP.is_set():
-            nodes = load_nodes(root)
+            nodes = load_nodes(conn, root)
             if nodes is not None:
                 tick(conn, root, nodes, start_ms, turn_ms, results)
             try:
@@ -585,7 +645,11 @@ def wake_line(row):
     return f"wake {row['id']} {row['tier']} {row['node']} {row['rule']}: {row['reason']}"
 
 
-def wake_wait(root, poll_s=1.0):
+def wake_wait(root, poll_s=1.0, start_grace_s=10.0):
+    """Returns at the first open wake, or once the daemon has stopped. A daemon started just before this call has
+    start_grace_s to take dispatch.lock; after it has held the lock, the lock going away means it stopped."""
+    begun = time.monotonic()
+    seen = False
     while True:
         conn = task_state.connect(root)
         try:
@@ -595,13 +659,19 @@ def wake_wait(root, poll_s=1.0):
         if rows:
             print(wake_line(rows[0]))
             return EMPTY
-        if lock_holder(root) is None:
+        held = lock_holder(root) is not None
+        seen = seen or held
+        if (not held) if seen else time.monotonic() - begun > start_grace_s:
             print("dispatcher stopped: no wake")
             return DAEMON_STOPPED
         time.sleep(poll_s)
 
 
 def status_main(root):
+    try:
+        task_plan.load_plan(root)
+    except task_plan.PlanError as error:
+        print(f"plan: INVALID {error.errors[0]}")
     holder = lock_holder(root)
     print(f"dispatcher: running pid {holder}" if holder else "dispatcher: stopped")
     conn = task_state.connect(root)

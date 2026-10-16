@@ -42,7 +42,11 @@ MIGRATIONS = {
     2: [
         """CREATE TABLE pauses (target TEXT PRIMARY KEY, created_at REAL NOT NULL)""",
     ],
+    3: [
+        """CREATE TABLE plan_state (id INTEGER PRIMARY KEY CHECK (id = 1), error TEXT)""",
+    ],
 }
+PLAN_RULE = "plan-invalid"
 
 
 class TransitionError(Exception):
@@ -272,7 +276,8 @@ def resolve(conn, wake_id, resolution, release=False, note=""):
             raise TransitionError(f"unknown wake {wake_id}")
         if row["resolved_at"] is not None:
             raise TransitionError(f"wake {wake_id} is already resolved")
-        if resolution in RESOLUTIONS:
+        # A wake with no node (plan-invalid) only closes: its plan error clears when the plan loads.
+        if resolution in RESOLUTIONS and row["node"]:
             _apply(conn, row["node"], row["rule"], resolution, release)
         # Any other text only closes the wake: the plan-changed and removed-running wakes need no node transition.
         conn.execute("UPDATE wakes SET resolved_at = ?, resolution = ? WHERE id = ?", (time.time(), resolution, wake_id))
@@ -308,6 +313,31 @@ def _apply(conn, node_id, rule, resolution, release):
         if status == "running":
             raise TransitionError(f"{node_id} is running: wait for it to stop before cancelling")
         conn.execute("UPDATE nodes SET status = 'cancelled', route = 'cancelled' WHERE id = ?", (node_id,))
+
+
+def plan_invalid(conn, error):
+    """Records the plan error and raises one plan-invalid wake for it (node '' : the plan has no node). A repeat of the
+    error that is already recorded raises nothing. Returns the wake id, or None."""
+    with transaction(conn):
+        if _plan_error(conn) == error:
+            return None
+        conn.execute("INSERT OR REPLACE INTO plan_state (id, error) VALUES (1, ?)", (error,))
+        return _wake(conn, "", "opus", PLAN_RULE, error)
+
+
+def plan_valid(conn):
+    """Clears the recorded plan error and closes its wake, once plan/dag.toml loads again. Does nothing when no error is recorded."""
+    if _plan_error(conn) is None:
+        return
+    with transaction(conn):
+        conn.execute("UPDATE plan_state SET error = NULL WHERE id = 1")
+        conn.execute("UPDATE wakes SET resolved_at = ?, resolution = 'fixed' WHERE rule = ? AND resolved_at IS NULL", (time.time(), PLAN_RULE))
+        _event(conn, None, "reconcile", "plan valid again")
+
+
+def _plan_error(conn):
+    row = conn.execute("SELECT error FROM plan_state WHERE id = 1").fetchone()
+    return row["error"] if row else None
 
 
 def wake_once(conn, node_id, tier, rule, reason):
