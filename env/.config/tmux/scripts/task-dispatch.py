@@ -32,9 +32,12 @@ wait only waits for each named agent's current turn to settle and reports it; it
 Exit codes: 0 queue empty (watch) or settled (wait); 2 usage; 3 invalid formula or report; 10 escalate;
 11 ask_user; 12 agent blocked; 13 agent did not start the step; 14 no valid report for the step; 15 turn
 timed out; 16 herdr refused or failed a call; 17 checkpoint reached; 18 report sets needs_decision;
-19 report changed a file outside Scope:; 20 decision service unavailable; 21 Requires: not met.
+19 report changed a file outside Scope:; 20 decision service unavailable; 21 Requires: not met;
+22 internal error (a bug here, not herdr; the line starts with internal:).
 The 2, 3, 10, 11 and 20 codes come from task-decide. Env: TASK_DISPATCH_START_MS (wait for a turn to start,
-default 30000), TASK_DISPATCH_TURN_MS (wait for it to settle, default 4 hours). TASK_SESSION names the
+default 30000), TASK_DISPATCH_TURN_MS (wait for it to settle, default 4 hours), TASK_DISPATCH_SLICE_MS (the
+longest single herdr wait, default 10 minutes). A turn that never visibly starts counts only with a report
+written after its prompt; the first step's prompt time is the hook's install time. TASK_SESSION names the
 herdr session. Stdlib only.
 """
 import argparse
@@ -47,6 +50,7 @@ import subprocess
 import sys
 import threading
 import queue
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,6 +60,7 @@ REPORT_CHECK = HERE / "task-report.py"
 FORMULA = HERE / "task-roles" / "formulas" / "worker-step.toml"
 LOG_LINE = re.compile(r"(\S+) (\S+) route=(continue|checkpoint|stopped:\w+) step=(\S+)")
 QUEUE_FILE = re.compile(r"(\d+)-(.+)\.md")
+SLICE_MS = int(os.environ.get("TASK_DISPATCH_SLICE_MS", 10 * 60 * 1000))
 
 EMPTY = 0
 USAGE = 2
@@ -68,6 +73,7 @@ CHECKPOINT = 17
 NEEDS_DECISION = 18
 OUT_OF_SCOPE = 19
 REQUIRES_UNMET = 21
+INTERNAL = 22
 STOP_ROUTES = {NEEDS_DECISION: "stopped:needs_decision", OUT_OF_SCOPE: "stopped:out_of_scope"}
 
 
@@ -102,9 +108,10 @@ def herdr(*args):
     except ValueError:
         raise Herdr(f"herdr agent {args[0]}: no JSON reply: {(proc.stderr or proc.stdout).strip()[:200]}")
     if "error" in reply:
-        if reply["error"].get("code") == "timeout":
+        error = reply["error"]
+        if error.get("code") == "timeout" or "timed out" in str(error.get("message", "")):
             raise Timeout("timed out")
-        raise Herdr(f"{reply['error'].get('code')}: {reply['error'].get('message')}")
+        raise Herdr(f"{error.get('code')}: {error.get('message')}")
     return reply["result"]
 
 
@@ -113,25 +120,44 @@ def status(agent):
 
 
 def wait_status(agent, until, timeout_ms):
-    """The agent's status once it matches `until` (default idle, done or blocked); None on timeout."""
-    args = ["wait", agent, "--timeout", str(timeout_ms)]
-    if until:
-        args += ["--until", until]
-    try:
-        return herdr(*args)["agent"]["agent_status"]
-    except Timeout:
-        return None
+    """The agent's status once it matches `until` (default idle, done or blocked); None on timeout.
+
+    herdr's wait runs in slices, so no single call asks herdr for a long timeout.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        left = max(0, round((deadline - time.monotonic()) * 1000))
+        args = ["wait", agent, "--timeout", str(min(left, SLICE_MS))]
+        if until:
+            args += ["--until", until]
+        try:
+            return herdr(*args)["agent"]["agent_status"]
+        except Timeout:
+            if left <= SLICE_MS:
+                return None
+
+
+def installed_at(root, agent):
+    """When the agent's hook was installed: the first step's prompt time, since the orchestrator installs the hook just before it prompts."""
+    hook = root / "hooks" / f"{agent}.md"
+    return hook.stat().st_mtime if hook.exists() else None
+
+
+def fresh_report(path, since):
+    """True when the report exists and was written at or after the prompt (since, epoch seconds)."""
+    return since is not None and path.exists() and path.stat().st_mtime >= since
 
 
 def report_path(root, agent, step):
     return root / "reports" / agent / f"{step}.json"
 
 
-def await_turn(agent, step, root, start_ms, turn_ms):
+def await_turn(agent, step, root, start_ms, turn_ms, since):
     """Waits for the agent's turn on step to start and settle. Returns (None, "") when settled, else (exit code, why).
 
     The start wait is bounded, so a turn that finished before the wait began still settles: its report
-    is then checked. An agent that never starts and has no report for the step is NOT_STARTED.
+    is then checked. A turn that never visibly starts counts only with a report written at or after
+    `since` (the prompt time); an older report is from an earlier run of the step. Otherwise NOT_STARTED.
     """
     started = wait_status(agent, "working", start_ms) is not None or status(agent) == "working"
     if started:
@@ -142,7 +168,7 @@ def await_turn(agent, step, root, start_ms, turn_ms):
         final = status(agent)
     if final == "blocked":
         return BLOCKED, f"{agent} is blocked: a question is waiting in its pane"
-    if not started and not report_path(root, agent, step).exists():
+    if not started and not fresh_report(report_path(root, agent, step), since):
         return NOT_STARTED, f"{agent} did not start step {step} within {start_ms} ms"
     return None, ""
 
@@ -261,9 +287,10 @@ def drive(agent, root, start_ms, turn_ms, lock):
     steps = pending(root, agent)
     if steps and (why := unmet_requires(root, agent, steps[0][1])):
         return REQUIRES_UNMET, f"{agent} step {steps[0][0]}: {why}"
+    since = installed_at(root, agent)
     while steps:
         step, hook, prompt = steps[0]
-        code, line = await_turn(agent, step, root, start_ms, turn_ms)
+        code, line = await_turn(agent, step, root, start_ms, turn_ms, since)
         if code is None:
             code, line = route(agent, step, root)
         if code != 0:
@@ -282,6 +309,7 @@ def drive(agent, root, start_ms, turn_ms, lock):
             if why := unmet_requires(root, agent, hook):
                 return REQUIRES_UNMET, f"{agent} step {step}: {why}"
             shutil.copyfile(hook, root / "hooks" / f"{agent}.md")
+            since = time.time()
             herdr("prompt", agent, " ".join(prompt.read_text(encoding="utf-8").split()))
     return EMPTY, f"{agent}: queue empty"
 
@@ -291,11 +319,13 @@ def watch(agents, root, start_ms, turn_ms):
     results = queue.Queue()
 
     def lane(agent):
-        result = (HERDR, f"{agent}: internal error")
+        result = (INTERNAL, f"internal: {agent}: lane ended without a result")
         try:
             result = drive(agent, root, start_ms, turn_ms, lock)
         except Herdr as error:
             result = (HERDR, f"{agent}: {error}")
+        except Exception as error:
+            result = (INTERNAL, f"internal: {agent}: {error!r}")
         finally:
             results.put(result)
 
@@ -313,7 +343,7 @@ def watch(agents, root, start_ms, turn_ms):
 def wait(agents, root, start_ms, turn_ms):
     for agent in agents:
         try:
-            code, why = await_turn(agent, "", root, start_ms, turn_ms)
+            code, why = await_turn(agent, "", root, start_ms, turn_ms, None)
         except Herdr as error:
             return HERDR, f"{agent}: {error}"
         if code is not None:

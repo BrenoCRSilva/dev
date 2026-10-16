@@ -66,8 +66,9 @@ permissions.
   11 ask_user (needs the user); 12 blocked (a question in the pane); 13 did not start;
   14 no valid report; 15 timed out; 16 herdr refused a call; 17 checkpoint reached (logged,
   next step not sent); 18 needs_decision set (logged); 19 file outside Scope: (logged);
-  20 decision service down; 21 Requires: not met (next step not installed); 3 invalid
-  report or formula; 2 usage. Then read the report and decide.
+  20 decision service down; 21 Requires: not met (next step not installed); 22 internal
+  error in task-dispatch (its line starts with `internal:`; a bug, not herdr: tell the user);
+  3 invalid report or formula; 2 usage. Then read the report and decide.
 - A stop leaves the queue where it is. Logged stops (17, 18, 19) are not routed
   again. After 17, 18 or 19, review the report, accept the step or queue a fix step
   with a new number, then install and prompt the next step yourself and run watch.
@@ -159,6 +160,9 @@ permissions.
 - The context guard (task-context-guard.py) adds a checkpoint line at 120k and a restart
   request at 150k. Restart with `task-agent.sh restart orchestrator`, from your own pane,
   only when no user question is pending and work remains. Never restart while waiting on the user.
+  The restart command must be your turn's last action: the session it starts ends once this turn
+  goes idle, so any work after it in the turn is not carried over. The fresh session re-asks the
+  open Decisions and re-runs watch for the running workers, so you do not redo either yourself.
 
 ## Subagents for verbose work
 

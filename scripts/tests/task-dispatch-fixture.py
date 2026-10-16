@@ -16,8 +16,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 DISPATCH = ROOT / "env/.config/tmux/scripts/task-dispatch.py"
@@ -90,7 +92,7 @@ if command == "wait":
         if status in until:
             reply(info(name, status))
         if time.time() >= deadline:
-            reply(error={"code": "timeout", "message": "timed out waiting for agent status"})
+            reply(error={"code": os.environ.get("FAKE_TIMEOUT_CODE", "timeout"), "message": "timed out waiting for agent status"})
         time.sleep(0.02)
 sys.exit(2)
 '''
@@ -439,6 +441,52 @@ def main():
         check("helpers: Requires report field met", module.unmet_requires(scratch, WORKER, write("08-x.md", "Requires: report:6:head_sha\n")) is None)
         check("helpers: Requires report field unmet", "report:6:nope" in module.unmet_requires(scratch, WORKER, write("09-x.md", "Requires: report:6:nope\n")))
         check("helpers: unknown Requires item stops", "unknown" in module.unmet_requires(scratch, WORKER, write("10-x.md", "Requires: magic:thing\n")))
+
+        # 15. An unexpected error in a lane is exit 22 with an internal: line, not a herdr exit 16.
+        module = load_dispatch()
+        with mock.patch.object(module, "drive", side_effect=KeyError("boom")):
+            code, line = module.watch([WORKER], tmp / "lane", 1, 1)
+        expect("internal: exit 22", code, 22)
+        check("internal: names the agent and the error", line == f"internal: {WORKER}: KeyError('boom')")
+
+        # 16. A turn that never visibly starts: a report from an earlier run of the step is not routed (exit 13).
+        root, fake, env = scenario(tmp, "stale-report")
+        queue_step(root, 1, "6")
+        (root / "hooks").mkdir()
+        stale = root / "reports" / WORKER / "6.json"
+        stale.parent.mkdir(parents=True)
+        stale.write_text(json.dumps(report("6")), encoding="utf-8")
+        hour_ago = time.time() - 3600
+        os.utime(stale, (hour_ago, hour_ago))
+        set_agent(fake, WORKER, [turn(root, "6", start=30)])
+        env["TASK_DISPATCH_START_MS"] = "800"
+        orchestrator_prompt(env, WORKER, "go")
+        result = run(["watch", WORKER, "--task-root", str(root)], env, root)
+        expect("stale report: exit 13", result.returncode, 13)
+        check("stale report: no decision made", len(Mock.seen) == 0)
+
+        # 17. The same turn that never visibly starts, but finishing after its prompt with the hook installed: routed.
+        root, fake, env = scenario(tmp, "fresh-report")
+        queue_step(root, 1, "6")
+        (root / "hooks").mkdir()
+        shutil.copyfile(root / "queue" / WORKER / "01-6.md", root / "hooks" / f"{WORKER}.md")
+        set_agent(fake, WORKER, [turn(root, "6", start=0, work=0)])
+        env["TASK_DISPATCH_START_MS"] = "800"
+        orchestrator_prompt(env, WORKER, "go")
+        result = run(["watch", WORKER, "--task-root", str(root)], env, root)
+        expect("fresh report: exit 0", result.returncode, 0)
+        check("fresh report: decision made", len(Mock.seen) == 1)
+
+        # 18. A herdr timeout with another code but "timed out" text is a timeout (exit 15 at the deadline, not 16),
+        # and the waits run in slices no longer than TASK_DISPATCH_SLICE_MS.
+        root, fake, env = scenario(tmp, "slices")
+        set_agent(fake, WORKER, [turn(root, "6", start=0.2, work=10)])
+        env.update(TASK_DISPATCH_TURN_MS="2500", TASK_DISPATCH_SLICE_MS="1000", FAKE_TIMEOUT_CODE="herdr_wait_failed")
+        orchestrator_prompt(env, WORKER, "go")
+        result = run(["wait", WORKER, "--task-root", str(root)], env, root)
+        expect("slices: still working at the deadline is exit 15", result.returncode, 15)
+        waits = [line.split("\t") for line in lines(fake / "calls.log") if line.startswith("agent\twait\t")]
+        check("slices: several waits, none longer than a slice", len(waits) >= 4 and all(int(w[w.index("--timeout") + 1]) <= 1000 for w in waits))
 
         # 9. Only the orchestrator may watch.
         root, fake, env = scenario(tmp, "refuse")

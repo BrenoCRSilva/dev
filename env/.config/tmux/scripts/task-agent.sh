@@ -87,7 +87,8 @@ herdr_cmd() {
 
 # Ends a worker or researcher agent by sending it /exit, as if typed. An agent
 # that is working is left alone unless --force is given. Nothing is killed: if
-# the agent is still there after the wait, that is reported.
+# the agent is still there after the wait, that is reported. Failures return 1
+# rather than exit, because finish_restart calls this and must log its own line.
 stop_agent() {
     local dry=$1 name=${2:-} arg info state pane force=no
     [[ -n "$name" ]] || usage
@@ -95,13 +96,13 @@ stop_agent() {
         [[ "$arg" == --force ]] || usage
         force=yes
     done
-    command -v jq >/dev/null || { echo "task-agent: jq is required to stop an agent" >&2; exit 1; }
-    info=$(herdr_cmd agent get "$name" 2>/dev/null) || { echo "task-agent: no agent named $name" >&2; exit 1; }
+    command -v jq >/dev/null || { echo "task-agent: jq is required to stop an agent" >&2; return 1; }
+    info=$(herdr_cmd agent get "$name" 2>/dev/null) || { echo "task-agent: no agent named $name" >&2; return 1; }
     state=$(jq -r '.result.agent.agent_status' <<< "$info")
     pane=$(jq -r '.result.agent.pane_id' <<< "$info")
     if [[ "$state" == working && "$force" != yes ]]; then
         echo "task-agent: $name is working; wait for it, or stop $name --force" >&2
-        exit 1
+        return 1
     fi
     if [[ "$dry" == yes ]]; then
         printf 'would send /exit to %s (pane %s, status %s)\n' "$name" "$pane" "$state"
@@ -462,7 +463,7 @@ if [[ $role == orchestrator ]]; then
     if [[ $resume == yes ]]; then
         kickoff="You were resumed as this task's orchestrator. Run your start-up steps again, then tell me where the plan stands."
     elif [[ $restarted == yes ]]; then
-        kickoff='You were restarted as this task'"'"'s orchestrator in a fresh session. Rename yourself first (herdr agent rename "$HERDR_PANE_ID" orchestrator). Then resume from AGENTS.md, status.log and the latest reports under reports/, not from the old session. The workers and the researcher are still running: check herdr agent list and do not start them again. Then tell me where the plan stands.'
+        kickoff='You were restarted as this task'"'"'s orchestrator in a fresh session. Rename yourself first (herdr agent rename "$HERDR_PANE_ID" orchestrator). Then resume from AGENTS.md, status.log and the latest reports under reports/, not from the old session. The workers and the researcher are still running: check herdr agent list and do not start them again. Re-ask the user every open question recorded under AGENTS.md Decisions, since the old session may have asked it without an answer. Then, for each running worker, run task-dispatch.py watch in the background with its agent name, so routing resumes. Then tell me where the plan stands.'
     else
         kickoff="You are this task's orchestrator. Run your start-up steps now."
     fi

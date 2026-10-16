@@ -22,6 +22,10 @@ echo "$*" >> "$FAKE_LOG"
 case "$*" in
     "agent get orchestrator")
         [[ -e "$FAKE_STATE/gone" ]] && exit 1
+        if [[ -n "${FAKE_VANISH:-}" ]]; then
+            [[ -e "$FAKE_STATE/seen" ]] && exit 1
+            touch "$FAKE_STATE/seen"
+        fi
         printf '{"result":{"agent":{"agent_status":"%s","pane_id":"%s"}}}\n' "$(cat "$FAKE_STATE/status")" "$FAKE_PANE"
         ;;
     "agent prompt orchestrator /exit") touch "$FAKE_STATE/gone" ;;
@@ -66,6 +70,8 @@ check "$dry" 'restart: wait for the orchestrator in pane w1:p1' 'restart dry run
 check "$dry" '--restarted' 'restart dry run types the fresh launch'
 check "$dry" 'fresh launch (dry run)' 'restart dry run shows the fresh launch'
 check "$dry" 'ENABLE_CLAUDEAI_MCP_SERVERS=false' 'fresh launch carries the orchestrator env'
+check "$dry" 'Decisions' 'restart kickoff re-asks open decisions'
+check "$dry" 'task-dispatch.py' 'restart kickoff re-runs watch for running workers'
 [[ "$dry" != *"--resume"* && "$dry" != *"--continue"* ]] || fail "restart launches fresh, never --resume"
 [[ ! -e "$FAKE_STATE/gone" && ! -e "$FAKE_STATE/ran" ]] || fail "dry run changed state"
 
@@ -93,6 +99,13 @@ out=$("$TASK_AGENT" --restart-finish w1:p1 "task-agent.sh --restarted fixture" 2
 check "$out" 'no orchestrator agent; nothing done' 'gone orchestrator reported'
 [[ ! -e "$FAKE_STATE/ran" ]] || fail "gone orchestrator: pane left alone"
 rm -f "$FAKE_STATE/gone"
+
+# The orchestrator is idle when checked, then gone when stop_agent looks: the job logs "did not end" and leaves the pane alone.
+rm -f "$FAKE_STATE/ran" "$FAKE_STATE/seen"
+out=$(FAKE_VANISH=1 "$TASK_AGENT" --restart-finish w1:p1 "task-agent.sh --restarted fixture" 2>&1) && fail "vanished orchestrator must not restart"
+check "$out" 'did not end; not restarted' 'vanished orchestrator is logged by the job'
+[[ ! -e "$FAKE_STATE/ran" ]] || fail "vanished orchestrator: pane left alone"
+rm -f "$FAKE_STATE/seen"
 
 # --- the real restart: detached, then the fresh launch lands in the pane -------
 rm -f "$FAKE_STATE/ran"
