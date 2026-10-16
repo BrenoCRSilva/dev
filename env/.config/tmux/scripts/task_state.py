@@ -58,6 +58,11 @@ MIGRATIONS = {
         """ALTER TABLE judgements ADD COLUMN outcome TEXT""",
         """ALTER TABLE judgements ADD COLUMN outcome_at REAL""",
     ],
+    6: [
+        # One judgement per attempt: a restart that judges the same attempt again updates the row and keeps its outcome.
+        """DELETE FROM judgements WHERE rowid NOT IN (SELECT MAX(rowid) FROM judgements GROUP BY node, attempt)""",
+        """CREATE UNIQUE INDEX judgements_attempt ON judgements (node, attempt)""",
+    ],
 }
 PLAN_RULE = "plan-invalid"
 
@@ -269,17 +274,29 @@ def record_judgement(conn, node_id, attempt, judged):
     with transaction(conn):
         conn.execute(
             "INSERT INTO judgements (node, attempt, model, request_hash, answers_json, derived_route, mode, latency_ms, "
-            "cost_usd, input_tokens, error, judged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "cost_usd, input_tokens, error, judged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (node, attempt) DO UPDATE SET model = excluded.model, request_hash = excluded.request_hash, "
+            "answers_json = excluded.answers_json, derived_route = excluded.derived_route, mode = excluded.mode, "
+            "latency_ms = excluded.latency_ms, cost_usd = excluded.cost_usd, input_tokens = excluded.input_tokens, "
+            "error = excluded.error, judged_at = excluded.judged_at",
             (node_id, attempt, judged["model"], judged["request_hash"],
              None if judged["answers"] is None else json.dumps(judged["answers"]), judged["derived_route"], judged["mode"],
              judged["latency_ms"], judged["cost_usd"], judged["input_tokens"], judged["error"], time.time()),
         )
 
 
+def judgement_failed(conn, node_id, error):
+    """Logs a judgement that could not be recorded. The route does not depend on it."""
+    with transaction(conn):
+        _event(conn, node_id, "route", f"judgement not recorded: {error}"[:300])
+
+
 def _mark_outcome(conn, node_id, outcome):
-    """Sets the outcome of the node's current attempt, if jev judged it (calibration reads these)."""
+    """Sets the outcome of the node's current attempt, if jev judged it (calibration reads these). Written only over no
+    outcome or a node-terminal one (stopped or failed), so a resolution replaces the stop it answers and nothing else."""
     conn.execute(
-        "UPDATE judgements SET outcome = ?, outcome_at = ? WHERE node = ? AND attempt = (SELECT attempt FROM nodes WHERE id = ?)",
+        "UPDATE judgements SET outcome = ?, outcome_at = ? WHERE node = ? AND attempt = (SELECT attempt FROM nodes WHERE id = ?) "
+        "AND (outcome IS NULL OR outcome LIKE 'stopped:%' OR outcome LIKE 'failed:%')",
         (outcome, time.time(), node_id, node_id),
     )
 
@@ -322,8 +339,8 @@ def resolve(conn, wake_id, resolution, release=False, note=""):
         if resolution != "ack":
             if not row["node"] or row["rule"] in INFO_RULES:
                 raise TransitionError(f"wake {wake_id} ({row['rule']}) is informational: resolve it with ack")
+            _mark_outcome(conn, row["node"], f"resolved:{resolution}")  # before _apply: a retry starts a new attempt
             _apply(conn, row["node"], row["rule"], resolution, release)
-            _mark_outcome(conn, row["node"], f"resolved:{resolution}")
             if resolution != "continue":
                 closed = conn.execute(
                     "UPDATE wakes SET resolved_at = ?, resolution = ? WHERE node = ? AND id != ? AND rule != 'checkpoint' AND resolved_at IS NULL",

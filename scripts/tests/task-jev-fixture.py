@@ -74,7 +74,7 @@ def run_cli(args, env):
 
 
 def test_redaction():
-    text = jev.redact(" ".join(PATHS + PLANTED[:-1]) + f" and {Path.home()}/tasks")
+    text = jev.redact("\n".join(PATHS + PLANTED[:-1]) + f"\nand {Path.home()}/tasks")  # one line per secret
     for leaked in ("PLANTED", "person@example.com", "987654321", "otheruser", "/root/", str(Path.home())):
         assert leaked not in text, (leaked, text)
     assert "~/tasks" in text and "[email]" in text and "[private key]" in text and "[token]" in text
@@ -95,6 +95,9 @@ def test_redaction_outputs():
         "/rootfs/x": "/rootfs/x",
         '{"api_key": "PLANTEDquoted \\" escaped", "n": 1}': '{"api_key": "[redacted]", "n": 1}',
         "tokens: 500": "tokens: [redacted]",
+        "password: hunter two": "password: [redacted]",  # an unquoted value runs to the end of its line
+        'password: "a b" more': 'password: [redacted] more',  # a quoted value ends at its quote
+        "note password: PLANTEDline hunter two\nnext line": "note password: [redacted]\nnext line",
     }
     for raw, expected in cases.items():
         assert jev.redact(raw) == expected, (raw, jev.redact(raw))

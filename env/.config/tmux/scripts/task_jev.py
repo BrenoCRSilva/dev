@@ -83,8 +83,10 @@ REDACTIONS = (
     (re.compile(rf'(?i)"([^"\\]*{SECRET_WORD}[^"\\]*)"\s*:\s*(?:"(?:[^"\\]|\\.)*"|-?\d[\d.eE+-]*)'),
      r'"\1": "[redacted]"'),
     (re.compile(rf"(?i)(--[\w.-]*{SECRET_WORD}[\w.-]*)[ \t]+{VALUE}"), r"\1 [redacted]"),  # --token x
-    (re.compile(rf"(?i)(\b[\w.-]*{SECRET_WORD}[\w.-]*[ \t]*[:=][ \t]*)(?:(?:basic|bearer)[ \t]+)?{VALUE}"),
-     r"\1[redacted]"),  # KEY=value, password: value, --password=value
+    # KEY=value, password: value, --password=value. An unquoted value runs to the end of the line ("password: hunter two").
+    (re.compile(rf"""(?i)(\b[\w.-]*{SECRET_WORD}[\w.-]*[ \t]*[:=][ \t]*)(?:(?:basic|bearer)[ \t]+)?"""
+                rf"""(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\n]*)"""),
+     r"\1[redacted]"),
     (re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^\s/@]+@"), r"\1[redacted]@"),  # user:password@ in a URL
     (re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}"), "[email]"),
     (re.compile(r"/home/[^/\s\"']+"), "~"),
@@ -146,6 +148,16 @@ def read_text(path, what):
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
         raise InputError(f"cannot read {what} {path}: {error}")
+
+
+def default_base(worktree):
+    """The remote's default branch as a ref (origin/main), or None when origin's HEAD is not set."""
+    try:
+        done = subprocess.run(["git", "-C", str(worktree), "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return done.stdout.strip() or None if done.returncode == 0 else None
 
 
 def diffstat(worktree, base, head):
@@ -359,7 +371,9 @@ def judged_rows(root):
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         rows = conn.execute("SELECT answers_json, derived_route, outcome FROM judgements").fetchall()
-        errors = conn.execute("SELECT COUNT(*) FROM judgements WHERE answers_json IS NULL").fetchone()[0]
+        finals = ", ".join("?" for _ in FINAL_OUTCOMES)
+        errors = conn.execute(f"SELECT COUNT(*) FROM judgements WHERE answers_json IS NULL AND outcome IN ({finals})",
+                              list(FINAL_OUTCOMES)).fetchone()[0]
     except sqlite3.OperationalError:  # no judgements table or outcome column yet
         return [], 0
     finally:
@@ -383,14 +397,20 @@ def calibrate(root, as_json, out):
             count, agree = buckets[qid].get(key, (0, 0))
             agreed = (answer["choice"] == FAVORABLE[qid]) == accepted_now
             buckets[qid][key] = (count + 1, agree + agreed)
+    would_continue = None
     if len(final) < MIN_STEPS:
         suggestion = f"insufficient data ({len(final)})"
-    else:
-        clean = [t for t in THRESHOLDS if not any(derive_route(a, t) == "continue" and not ok for a, _, ok in final)]
-        suggestion = f"{clean[0]:.2f} (zero false continues over {len(final)} steps)" if clean else \
-            f"none: every threshold lets a false continue through over {len(final)} steps"
+    else:  # a threshold needs zero false continues and at least one step it would continue, or it proves nothing
+        clean = [t for t in THRESHOLDS if not any(derive_route(a, t) == "continue" and not ok for a, _, ok in final)
+                 and any(derive_route(a, t) == "continue" for a, _, _ in final)]
+        if clean:
+            would_continue = sum(derive_route(a, clean[0]) == "continue" for a, _, _ in final)
+            suggestion = f"{clean[0]:.2f} (zero false continues over {len(final)} steps)"
+        else:
+            suggestion = f"none: no threshold with a false-continue-free continue over {len(final)} steps"
     result = {"judged": len(final), "errors": errors, "accuracy": matches / len(final) if final else None,
               "false_continue": false_continue, "accepted": sum(accepted), "threshold": suggestion,
+              "would_continue": would_continue,
               "buckets": {qid: {f"{key:.1f}": {"n": n, "agree": agree} for key, (n, agree) in sorted(table.items())}
                           for qid, table in buckets.items()}}
     if as_json:
@@ -403,6 +423,8 @@ def calibrate(root, as_json, out):
         cells = ", ".join(f"{key}: {cell['agree']}/{cell['n']}" for key, cell in table.items())
         print(f"{qid} (agreement by confidence): {cells or 'no data'}", file=out)
     print(f"threshold: {suggestion}", file=out)
+    if would_continue is not None:
+        print(f"would-continue at the suggested threshold: {would_continue} of {len(final)}", file=out)
 
 
 def main(argv):

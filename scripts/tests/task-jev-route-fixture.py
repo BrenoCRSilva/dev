@@ -6,6 +6,7 @@ the task-spend judgement rows. jev is a fake ask function, so nothing leaves the
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from io import StringIO
@@ -65,6 +66,25 @@ def node(node_id, spec, after=()):
                                    plan_hash="h")
 
 
+def make_worktree(tmp):
+    """A git worktree whose origin/HEAD names origin/main, with one change on top: the head sha the report names."""
+    wt = tmp / "wt"
+    wt.mkdir()
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(wt), "-c", "user.name=t", "-c", "user.email=t@example.org", *args],
+                              check=True, capture_output=True, text=True).stdout.strip()
+    git("init", "-q", "-b", "main")
+    git("commit", "-q", "--allow-empty", "-m", "base")
+    git("update-ref", "refs/remotes/origin/main", "HEAD")
+    git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    (wt / "env/x").mkdir(parents=True)
+    (wt / "env/x/f.py").write_text("x = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "change")
+    return git("rev-parse", "HEAD")
+
+
 def make_root(tmp, summary="Built the thing.", successor=True):
     root = tmp / "task"
     (root / "specs").mkdir(parents=True, exist_ok=True)
@@ -74,7 +94,7 @@ def make_root(tmp, summary="Built the thing.", successor=True):
     report = root / "reports/worker-dotfiles/a.json"
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps({
-        "step": "a", "agent": "worker-dotfiles", "head_sha": "abc1234", "files_changed": ["env/x/f.py"],
+        "step": "a", "agent": "worker-dotfiles", "head_sha": make_worktree(tmp), "files_changed": ["env/x/f.py"],
         "checks": [{"cmd": "t", "exit": 0}], "risks": [], "summary": summary, "needs_decision": None,
         "context_estimate_k": 40, "questions": [],
     }), encoding="utf-8")
@@ -196,8 +216,13 @@ def test_calibrate(tmp):
     result = calibrate(build(tmp / "many", rows))
     check("calibrate counts 21 steps", result["judged"] == 21 and result["accepted"] == 20, result)
     check("one false continue", result["false_continue"] == 1, result)
-    check("threshold above the wrong step's confidence", result["threshold"] == "0.95 (zero false continues over 21 steps)",
-          result["threshold"])
+    # Every threshold that routes the false continue away also routes every favourable step away: no usable threshold.
+    check("no threshold with a continue", result["threshold"] == "none: no threshold with a false-continue-free continue over 21 steps"
+          and result["would_continue"] is None, result["threshold"])
+    # The false continue at 0.4 clears by the 0.5 floor, so 0.50 is clean and continues the favourable steps.
+    unsure = rows[:-2] + [({qid: {"choice": FAVORABLE[qid], "confidence": 0.4} for qid in FAVORABLE}, "continue", "resolved:retry")]
+    result = calibrate(build(tmp / "unsure", unsure + rows[-1:]))
+    check("0.50 clean with continues", result["threshold"].startswith("0.50 ") and result["would_continue"] >= 19, result)
     check("next_ready ignored where absent", sum(cell["n"] for cell in result["buckets"]["next_ready"].values()) == 20)
 
 

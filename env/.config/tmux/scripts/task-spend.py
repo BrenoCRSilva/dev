@@ -94,6 +94,7 @@ PRICES = {
     ],
 }
 JUDGE_PROVIDER = "jev"
+JUDGE_FALLBACK_MODEL = "typesafe/jev-1.14"  # the price a judgement row falls back to when its model has none
 TOKEN_FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 CODEX_TOOL_ITEMS = ("function_call", "custom_tool_call")
 GROUPS = {"role": ("role",), "model": ("model",), "task": ("task",), "role,task": ("role", "task"),
@@ -255,6 +256,7 @@ def judgement_responses(tasks):
     """One response per jev judgement with input tokens, read from each task root's state.db (read-only). Role judge,
     one session per judged attempt; a task root with no judgements table gives nothing."""
     rows = []
+    noted = set()  # models already reported as unpriced on stderr
     for path in sorted(glob.glob(os.path.join(tasks, "*", "state.db"))):
         task = os.path.basename(os.path.dirname(path))
         try:
@@ -271,8 +273,12 @@ def judgement_responses(tasks):
             conn.close()
         for node, attempt, model, tokens, judged_at in found:
             key = f"{task}/{node}/{attempt}"
+            if model not in PRICES and model not in noted:  # a TASK_JEV_MODEL override with no price of its own
+                noted.add(model)
+                print(f"note: {model} has no price; its judgements are priced as {JUDGE_FALLBACK_MODEL}", file=sys.stderr)
             rows.append({
                 "provider": JUDGE_PROVIDER, "key": key, "session": key, "task": task, "role": "judge", "model": model,
+                "price_model": model if model in PRICES else JUDGE_FALLBACK_MODEL,
                 "cwd": "", "sidechain": False, "tool_ids": set(), "write_unsplit": 0, "output": 0, "cache_read": 0,
                 "cache_write_5m": 0, "cache_write_1h": 0, "input": tokens,
                 "ts": datetime.datetime.fromtimestamp(judged_at, datetime.timezone.utc).astimezone() if judged_at else None,
@@ -324,7 +330,7 @@ def prompt_size(response):
 
 def price_turn(response, prices):
     """(USD by token kind, tier index) for one response, or (None, None) when its model has no price."""
-    for index, tier in enumerate(prices.get(response["model"]) or ()):
+    for index, tier in enumerate(prices.get(response.get("price_model", response["model"])) or ()):
         if tier["upto"] is None or prompt_size(response) <= tier["upto"]:
             return {field: response[field] * tier[field] / 1_000_000 for field in TOKEN_FIELDS}, index
     return None, None

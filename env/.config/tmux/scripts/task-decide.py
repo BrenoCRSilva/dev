@@ -285,8 +285,9 @@ def glob_regex(pattern):
     return re.compile("".join(out) + r"\Z")
 
 
-def safety_hit(formula, report):
-    """The first safety rule the report hits, as text, or None."""
+def safety_hit(formula, report, keywords=True):
+    """The first safety rule the report hits, as text, or None. keywords=False skips the keyword rule (the v2 dispatcher
+    routes bare keywords to Opus itself, so the path and needs_decision rules are all that count here)."""
     safety = formula["safety"]
     if report["needs_decision"] is not None:
         return "needs_decision is set"
@@ -296,19 +297,19 @@ def safety_hit(formula, report):
             if regex.match(path):
                 return f"{pattern} matches {path}"
     for field, texts in (("risks", report["risks"]), ("summary", [report["summary"]])):
-        for word in safety["ask_user_keywords"]:
+        for word in safety["ask_user_keywords"] if keywords else []:
             pattern = rf"\b{re.escape(word)}\w*"
             if any(re.search(pattern, text, re.IGNORECASE) for text in texts):
                 return f"keyword {word} in {field}"
     return None
 
 
-def code_rule(formula, report):
+def code_rule(formula, report, keywords=True):
     """The route code gives before any request: (route, rule, reason), or None."""
     failed = code_route(formula, report)
     if failed:
         return "escalate", "code-check", failed
-    hit = safety_hit(formula, report)
+    hit = safety_hit(formula, report, keywords)
     if hit:
         return "ask_user", "code-safety", f"safety: {hit}"
     return None
@@ -453,9 +454,9 @@ def ask_jev(formula, report, model, *, opt_in, key_loader=load_key, url=None, sl
     return call(body, key_loader(), url or endpoint(), sleep)
 
 
-def decide(formula, report, *, model, opt_in, key_loader=load_key, url=None, sleep=time.sleep):
+def decide(formula, report, *, model, opt_in, key_loader=load_key, url=None, sleep=time.sleep, keywords=True):
     """Returns (record, exit code). Makes at most one decision request, and none when a code rule routes."""
-    hit = code_rule(formula, report)
+    hit = code_rule(formula, report, keywords)
     if hit:
         route, rule, reason = hit
         return record(formula, report, route, rule, reason), ROUTES[route]
@@ -488,6 +489,8 @@ def main(argv=None):
     parser.add_argument("--model")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--no-keyword-rule", action="store_true",
+                        help="skip the keyword safety rule (the v2 dispatcher routes keywords to Opus itself)")
     args = parser.parse_args(argv)
     try:
         if args.provider != "openrouter":
@@ -499,7 +502,8 @@ def main(argv=None):
         report = load_report(args.report, args.step)
         if args.dry_run:
             return dry_run(formula, report, model)
-        result, code = decide(formula, report, model=model, opt_in=os.environ.get("TASK_DECIDE_LIVE") == "1")
+        result, code = decide(formula, report, model=model, opt_in=os.environ.get("TASK_DECIDE_LIVE") == "1",
+                              keywords=not args.no_keyword_rule)
         root = args.task_root or args.report.resolve().parents[2]
         path = root / "decisions" / report["agent"] / f"{report['step']}.json"
         path.parent.mkdir(parents=True, exist_ok=True)

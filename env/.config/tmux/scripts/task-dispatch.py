@@ -55,6 +55,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import posixpath
 import re
 import shutil
 import signal
@@ -79,7 +80,7 @@ LOG_LINE = re.compile(r"(\S+) (\S+) route=(continue|checkpoint|stopped:\w+) step
 QUEUE_FILE = re.compile(r"(\d+)-(.+)\.md")
 SLICE_MS = int(os.environ.get("TASK_DISPATCH_SLICE_MS", 10 * 60 * 1000))
 LAUNCH_WAIT_MS = 60 * 1000
-SHUTDOWN_S = 120  # how long a stopping daemon waits for launch threads (a fresh start can take LAUNCH_WAIT_MS)
+SHUTDOWN_S = 30  # how long a stopping daemon waits for launch threads (a fresh start can take LAUNCH_WAIT_MS)
 LAUNCHES = []  # the prompt threads of this daemon, joined at shutdown
 
 EMPTY = 0
@@ -285,7 +286,8 @@ def route(agent, step, root):
     if check.returncode != 0:
         return NO_REPORT, f"report for step {step} fails task-report check: {check.stdout.strip()[:200]}"
     env = {**os.environ, "TASK_DECIDE_LIVE": "1"}
-    args = [sys.executable, str(DECIDE), "--formula", str(FORMULA), "--report", str(report), "--step", step, "--task-root", str(root)]
+    args = [sys.executable, str(DECIDE), "--formula", str(FORMULA), "--report", str(report), "--step", step, "--task-root", str(root),
+            "--no-keyword-rule"]  # bare keywords reached here already passed t0_safety (Opus or jev decides them)
     decide = subprocess.run(args, capture_output=True, text=True, env=env)
     return decide.returncode, (decide.stdout or decide.stderr).strip()
 
@@ -525,26 +527,54 @@ def hook_text(root, nodes, node, attempt):
 
 # Concrete privileged commands in the report's text: user tier. A bare keyword ("install" in prose) is not one.
 PRIVILEGED = [re.compile(p, re.IGNORECASE) for p in (
-    r"\bsudo\b",
-    r"\b(?:pacman|yay|paru|apt(?:-get)?|dnf|brew)\s+(?:-\S+\s+)*(?:install|-S\b|add\b)",
-    r"\b(?:pip3?|npm|pnpm|yarn|cargo|gem)\s+(?:\S+\s+)*?install\b[^\n]*(?:\s-g\b|--global\b|--system\b|\s/usr\b)",
+    r"\bsudo\b|\b(?:doas|pkexec|systemctl|chown|stow)\b",
+    r"\bsu\b(?:\s+\S+)*\s+-c\b",
+    r"\bpacman\s+(?:\S+\s+)*?(?:-\w*[SUR]\w*|--sync|--upgrade|--remove)\b",
+    r"\b(?:yay|paru|apt(?:-get)?|dnf|brew)\s+(?:\S+\s+)*?(?:install|-S\w*|add)\b",
+    r"\b(?:pip3?|npm|pnpm|yarn|cargo|gem)\s+(?:\S+\s+)*?install\b[^\n]*(?:\s-g\b|--global\b|--system\b|--user\b|\s/usr\b)",
+    r"\bnpm\b[^\n]*?(?:\s-g\b|--global\b)",  # -g before the verb too
+    r"\bcargo\s+install\b",
+    r"\bln\b(?=[^\n]*\s-\w*s\w*)[^\n]*?(?:~|\$\{?HOME\}?|/home/|/root\b)",
+    r"\bgit\b(?:\s+-\S+(?:\s+\S+)?)*?\s+push\b",
     r"\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b",
-    r"\bgit\s+push\b",
+    r"\b(?:ba|z|da)?sh\s+<\(\s*(?:curl|wget)\b|\b(?:ba|z|da)?sh\b[^\n]*\$\(\s*(?:curl|wget)\b",
+    r"\b(?:curl|wget)\b[^\n]*?(?:-o\b|-O\b|--output)[^\n]*?(?:;|&&|\|\|)\s*(?:sudo\s+)?(?:ba|z|da)?sh\b",
     r"\b(?:apply|deploy)\.sh\b",
 )]
 
 
+def outside_worktree(path):
+    """True when a changed path leaves the worktree: absolute, home (~, $HOME, $VAR) or a normalised path that climbs out."""
+    if re.match(r"(?:~|\$)", path) or path.startswith("/"):
+        return True
+    return posixpath.normpath(path).startswith("..")
+
+
+def report_texts(data):
+    """Every free-text value the report carries: summary, risks, the check commands, needs_decision and the questions."""
+    def strings(value):
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, dict):
+            return [s for item in value.values() for s in strings(item)]
+        if isinstance(value, list):
+            return [s for item in value for s in strings(item)]
+        return []
+    return strings([data.get("summary", ""), data.get("risks", []), data.get("needs_decision"), data.get("questions", []),
+                    [str(check.get("cmd", "")) for check in data.get("checks", [])]])
+
+
 def t0_safety(formula, data):
-    """The T0 safety tier of a report, or None. A safety path or a privileged command routes to the user (ASK_USER); a
-    bare keyword routes to Opus (KEYWORD, rule keyword-safety). Writes outside the worktree count as privileged."""
+    """The T0 safety tier of a report, or None. A safety path, a privileged command or a path outside the worktree routes to
+    the user (ASK_USER); a bare keyword routes to Opus (KEYWORD, rule keyword-safety)."""
     base = {"needs_decision": None, "files_changed": data.get("files_changed", []), "risks": data.get("risks", []), "summary": data.get("summary", "")}
     path = DECIDE_MODULE.safety_hit(formula, {**base, "risks": [], "summary": ""})
     if path:
         return ASK_USER, f"safety: {path}"[:300]
-    texts = [*base["risks"], base["summary"], *(str(check.get("cmd", "")) for check in data.get("checks", []))]
-    outside = [p for p in base["files_changed"] if p.startswith(("/", ".."))]
+    outside = [p for p in base["files_changed"] if outside_worktree(p)]
     if outside:
         return ASK_USER, f"safety: writes outside the worktree: {', '.join(outside)}"[:300]
+    texts = report_texts(data)
     for pattern in PRIVILEGED:
         for text in texts:
             found = pattern.search(text)
@@ -612,20 +642,31 @@ def read_or_empty(path):
 
 def ask_jev(root, plan, node_id, agent, data):
     """Builds the redacted request for one attempt and asks jev once (the client's live gate applies). Returns the fields
-    the judgement records."""
+    the judgement records. Fails closed: an input jev needs but cannot read raises before any request, so it escalates."""
     env = os.environ
     shape = env.get("TASK_JEV_SHAPE", "native")
     model = env.get("TASK_JEV_MODEL", task_jev.MODEL)
     node = plan.get(node_id)
     successor = next((other for other in plan.values() if node_id in other.after and other.spec), None)
+    spec = read_or_empty(root / node.spec) if node and node.spec else ""
+    next_spec = read_or_empty(root / successor.spec) if successor else ""
     match = re.search(r"worktree `([^`]+)`", repo_line(root, agent))
+    base = task_jev.default_base(Path(match[1])) if match else None
+    diff = task_jev.diffstat(Path(match[1]), base, data.get("head_sha") or "HEAD") if match and base else ""
+    gaps = [label for label, missing in (
+        ("node not in plan", node is None), ("spec unreadable or empty", node is not None and node.spec and not spec),
+        ("successor spec missing", successor is not None and not next_spec), ("no worktree", not match),
+        ("diff base unknown", bool(match) and base is None), ("diffstat unavailable", diff.startswith("unavailable")),
+    ) if missing]
+    if gaps:
+        raise task_jev.InputError("fail closed: " + ", ".join(gaps))
     state = task_jev.build_state(
         data,
-        read_or_empty(root / node.spec) if node and node.spec else "",
-        node.scope if node else [],
-        contract_text(root, node.contracts if node else []),
-        task_jev.diffstat(Path(match[1]), "main", data.get("head_sha") or "HEAD") if match else "unavailable: no worktree",
-        read_or_empty(root / successor.spec) if successor else "",
+        spec,
+        node.scope,
+        contract_text(root, node.contracts),
+        diff,
+        next_spec,
     )
     asked = task_jev.asked_questions("next_step" in state)
     body = task_jev.build_body(state, model, shape, asked)
@@ -696,7 +737,7 @@ def evaluate(root, agent, node, scope, budget, plan):
     tiered = t0_safety(DECIDE_MODULE.load_formula(FORMULA), data)
     if tiered and tiered[0] != KEYWORD:
         return (*tiered, None)
-    if not tiered and (over := over_budget(data, budget)):
+    if over := over_budget(data, budget):  # before any jev clearance, keyword stops included
         return (*over, None)
     mode, threshold = jev_settings()
     judged = judge(root, plan, node, agent, data, mode, threshold) if mode != "off" else None
@@ -745,7 +786,10 @@ def finish(conn, root, node, code, line, plan, judged=None):
     agent = snapshot["agent"]
     pointers = None
     if judged:
-        task_state.record_judgement(conn, node, snapshot["attempt"], judged)
+        try:
+            task_state.record_judgement(conn, node, snapshot["attempt"], judged)
+        except Exception as error:  # a judgement that fails to record never changes the route
+            task_state.judgement_failed(conn, node, f"{type(error).__name__}: {error}")
         pointers = {"jev": jev_pointer(judged)}
     if code in FAIL_NAMES:
         return stop_node(conn, node, "failed", FAIL_NAMES[code], line, pointers=pointers)
