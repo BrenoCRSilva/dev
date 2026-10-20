@@ -536,6 +536,60 @@ def scenario_keyword_path(tmp):
         check(f"{name}: jev was asked once per judged attempt", len(lines(fake / "jev.log")) == (0 if derived is None else 1), str(lines(fake / "jev.log")))
 
 
+def scenario_outcomes(tmp):
+    """Part B of M3e: a keyword stop retried as attempt 2 keeps its own outcome per attempt. A daemon restart during attempt 2
+    judges it again, and the judgement row is updated in place, so calibrate counts each attempt once."""
+    spec = importlib.util.spec_from_file_location("task_dispatch_outcomes", DISPATCH)
+    assert spec is not None and spec.loader is not None
+    dispatch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dispatch)
+    root, fake, env = plan_root(tmp, "outcomes", [("o1", WORKER, [], False)])
+    worktree, change = git_worktree(tmp / "outcomes" / "worktree")
+    (root / "AGENTS.md").write_text(f"# t\n\n- **dotfiles** — worktree `{worktree}`; canonical checkout `{worktree}`; agent `{WORKER}`.\n", encoding="utf-8")
+    files = ["env/.config/tmux/scripts/task-x.py"]
+    keyword = turn_for(root, "o1", files=files)
+    keyword["report"].update(summary="We will install the hook next.", head_sha=change)
+    retried = turn_for(root, "o1", files=files, work=4.0)  # long enough to stop the daemon mid-attempt
+    retried["report"].update(summary="The hook is ready.", head_sha=change)
+    v1.set_agent(fake, WORKER, [keyword, retried])
+    wrapper = fake / "jev-daemon.py"
+    wrapper.write_text(JEV_DAEMON, encoding="utf-8")
+    for key in ("TASK_JEV_MODE", "TASK_JEV_THRESHOLD", "TASK_JEV_LIVE"):
+        env.pop(key, None)
+    env.update(TASK_JEV_MODE="shadow", FAKE_DISPATCH=str(DISPATCH), FAKE_JEV_DIR=str(fake))
+    proc = daemon(env, root, wrapper)
+    woke = cli(env, root, "wake-wait", timeout=60).stdout
+    check("outcomes: attempt 1 stops for keyword-safety", " opus o1 keyword-safety: " in woke, woke)
+    check("outcomes: attempt 1's judgement is stopped:keyword-safety", db(root, "SELECT attempt, outcome FROM judgements WHERE node = 'o1'") == [(1, "stopped:keyword-safety")])
+    cli(env, root, "resolve", woke.split()[1], "retry")
+    check("outcomes: retry marks attempt 1 resolved:retry", db(root, "SELECT attempt, outcome FROM judgements WHERE node = 'o1'") == [(1, "resolved:retry")])
+    running = wait_for(lambda: db(root, "SELECT attempt, status FROM nodes WHERE id = 'o1'") == [(2, "running")])
+    check("outcomes: the retry runs as attempt 2", running, str(db(root, "SELECT attempt, status FROM nodes WHERE id = 'o1'")))
+    stop(proc)
+    # The first daemon never reached attempt 2's turn end, so no judgement exists yet. Record the row it would have written,
+    # so the restarted daemon's judgement of the same attempt hits the existing row.
+    ts = state_module()
+    conn = ts.connect(root)
+    try:
+        answers = {qid: {"choice": choice, "confidence": 0.9} for qid, choice in dispatch.task_jev.FAVORABLE.items()}
+        ts.record_judgement(conn, "o1", 2, {"model": "typesafe/jev-1.14", "request_hash": None, "answers": answers, "derived_route": "continue",
+                                            "mode": "shadow", "latency_ms": 5, "cost_usd": None, "input_tokens": 1000, "error": None})
+    finally:
+        conn.close()
+    proc = daemon(env, root, wrapper)
+    done = wait_for(lambda: "worker-dotfiles: idle; done 1" in status(env, root))
+    check("outcomes: the restarted daemon finishes attempt 2", done, status(env, root))
+    check("outcomes: one judgement row per attempt, outcomes per attempt",
+          db(root, "SELECT attempt, outcome FROM judgements WHERE node = 'o1' ORDER BY attempt") == [(1, "resolved:retry"), (2, "continue")],
+          str(db(root, "SELECT attempt, outcome FROM judgements WHERE node = 'o1' ORDER BY attempt")))
+    check("outcomes: the restarted daemon asked jev for attempt 2 (once per attempt, two in all)", len(lines(fake / "jev.log")) == 2, str(lines(fake / "jev.log")))
+    calibration = json.loads(cli(env, root, "jev", "calibrate", "--json").stdout)
+    check("outcomes: calibrate counts each attempt once", calibration["judged"] == 2 and calibration["accepted"] == 1 and calibration["errors"] == 0, str(calibration))
+    # Attempt 1 derived continue (favourable answers) but was retried, so it is the one false continue; attempt 2 is not.
+    check("outcomes: calibrate counts attempt 1 as the one false continue", calibration["false_continue"] == 1, str(calibration))
+    stop(proc)
+
+
 def scenario_relaunch_herdr(tmp):
     """A herdr failure while relaunching is a launch failure (exit 28), not a herdr one (exit 16)."""
     spec = importlib.util.spec_from_file_location("task_dispatch_relaunch", DISPATCH)
@@ -595,6 +649,7 @@ def main():
         scenario_lock_scope(tmp)
         scenario_t0_tiers(tmp)
         scenario_keyword_path(tmp)
+        scenario_outcomes(tmp)
         scenario_relaunch_herdr(tmp)
         scenario_fail_node(tmp)
     if FAILURES:
