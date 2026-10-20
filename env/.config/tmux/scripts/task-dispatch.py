@@ -538,7 +538,7 @@ PRIVILEGED = [re.compile(p, re.IGNORECASE) for p in (
     r"\bgit\b(?:\s+-\S+(?:\s+\S+)?)*?\s+push\b",
     r"\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b",
     r"\b(?:ba|z|da)?sh\s+<\(\s*(?:curl|wget)\b|\b(?:ba|z|da)?sh\b[^\n]*\$\(\s*(?:curl|wget)\b",
-    r"\b(?:curl|wget)\b[^\n]*?(?:-o\b|-O\b|--output)[^\n]*?(?:;|&&|\|\|)\s*(?:sudo\s+)?(?:ba|z|da)?sh\b",
+    r"\b(?:curl|wget)\b[^\n]*?(?:\s-\w*[oO]\b|--output\b)[^\n]*?(?:;|&&|\|\|)\s*(?:sudo\s+)?(?:ba|z|da)?sh\b",  # -fsSLo too
     r"\b(?:apply|deploy)\.sh\b",
 )]
 

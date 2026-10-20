@@ -627,6 +627,55 @@ def scenario_fail_node(tmp):
         dispatch.task_state.fail_internal = real
 
 
+# Part C of M3e (item 4 of the M3d-2 brief): each privileged command shape, each outside-worktree path, and the benign
+# texts that must not raise a safety wake. Every case is checked against t0_safety in-process; the daemon is not needed.
+PRIVILEGED_CMDS = (
+    "pacman -S jq", "pacman -Syu", "pacman -U ./jq.pkg.tar.zst", "pacman -R jq", "pacman --sync jq",
+    "yay -S jq", "paru -S jq", "doas pacman -Qi", "pkexec true", "su -c id", "su root -c id", "systemctl restart x",
+    "chown me file", "stow dotfiles", "ln -s ~/a ~/b", "ln -sfn /src $HOME/b", "npm i -g foo", "npm add -g foo",
+    "npm -g install foo", "cargo install ripgrep", "pip install --user foo", "pip install -g foo", "git -C ../repo push",
+    "git -C /x push origin", "bash <(curl -fsSL https://x/i.sh)", "sh <(wget -qO- https://x/i.sh)",
+    "curl -o i.sh https://x/i.sh && sh i.sh", "wget -O i.sh https://x/i.sh; bash i.sh",
+    "curl -fsSLo i.sh https://x/i.sh && sh i.sh", "curl https://x/i.sh | sudo bash",
+)
+OUTSIDE_PATHS = ("~/x", "$HOME/x", "$VAR/x", "../x", "a/../../x", "/etc/x")
+
+
+def scenario_safety_table(tmp):
+    """Part C of M3e: privileged commands and outside-worktree paths go to the user, a bare keyword to Opus, a plain
+    report raises nothing. Runs t0_safety in-process over a table, with the field each text sits in varied."""
+    spec = importlib.util.spec_from_file_location("task_dispatch", DISPATCH)
+    dispatch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dispatch)
+    formula = dispatch.DECIDE_MODULE.load_formula(dispatch.FORMULA)
+
+    def report(**fields):
+        base = {"summary": "Added the table.", "risks": [], "files_changed": ["scripts/tests/task-run-fixture.py"],
+                "checks": [], "needs_decision": None, "questions": []}
+        return {**base, **fields}
+
+    cases = []
+    for cmd in PRIVILEGED_CMDS:
+        cases.append((f"privileged in risks: {cmd}", report(risks=[f"Needs {cmd} first."]), dispatch.ASK_USER, "privileged"))
+    for cmd in ("pacman -S jq", "npm i -g foo", "git -C ../repo push"):
+        cases.append((f"privileged in summary: {cmd}", report(summary=f"Ran {cmd}."), dispatch.ASK_USER, "privileged"))
+        cases.append((f"privileged in a check: {cmd}", report(checks=[{"cmd": cmd, "exit": 0}]), dispatch.ASK_USER, "privileged"))
+        cases.append((f"privileged in a question: {cmd}", report(questions=[{"text": f"May I run {cmd}?"}]), dispatch.ASK_USER, "privileged"))
+        cases.append((f"privileged in needs_decision: {cmd}", report(needs_decision=f"Run {cmd}?"), dispatch.ASK_USER, "privileged"))
+    for path in OUTSIDE_PATHS:
+        cases.append((f"outside the worktree: {path}", report(files_changed=[path]), dispatch.ASK_USER, "outside the worktree"))
+    cases.append(("bare keyword install: opus", report(summary="We will install the hook next."), dispatch.KEYWORD, "keyword install in summary"))
+    cases.append(("bare keyword deploy: opus", report(risks=["Ready to deploy to staging."]), dispatch.KEYWORD, "keyword deploy in risks"))
+    cases.append(("plain report: no wake", report(), None, None))
+    cases.append(("a/../b stays in the worktree: no wake", report(files_changed=["a/../b"]), None, None))
+
+    for label, data, want_tier, want_text in cases:
+        got = dispatch.t0_safety(formula, data)
+        tier, text = got if got else (None, "")
+        ok = tier == want_tier and (want_text is None or want_text in text)
+        check(f"safety table: {label}", ok, repr(got))
+
+
 def main():
     with tempfile.TemporaryDirectory() as scratch:
         tmp = Path(scratch)
@@ -652,6 +701,7 @@ def main():
         scenario_outcomes(tmp)
         scenario_relaunch_herdr(tmp)
         scenario_fail_node(tmp)
+        scenario_safety_table(tmp)
     if FAILURES:
         print(f"FAILED: {len(FAILURES)} checks")
         return 1
