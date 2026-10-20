@@ -58,7 +58,7 @@ FORMULA = HERE / "task-roles" / "formulas" / "worker-step.toml"
 SLICE_MS = int(os.environ.get("TASK_DISPATCH_SLICE_MS", 10 * 60 * 1000))
 LAUNCH_WAIT_MS = 60 * 1000
 BACKGROUND_POLL_MS = int(os.environ.get("TASK_DISPATCH_BACKGROUND_POLL_MS", 10 * 1000))
-SHELLS_RE = re.compile(r"\b(\d+) shells?\b")
+SHELLS_RE = re.compile(r"·\s*(\d+) shells?\b")
 SHUTDOWN_S = 30  # how long a stopping daemon waits for launch threads (a fresh start can take LAUNCH_WAIT_MS)
 LAUNCHES = []  # the prompt threads of this daemon, joined at shutdown
 
@@ -279,22 +279,28 @@ def readable_report(report):
 
 
 def background_shells(agent):
-    """The background shells in the agent's pane footer ("· 1 shell ·"), 0 when none. Claude Code shows the count only while
-    a background command runs, so an idle agent that shows one has not ended its turn. The footer is the pane's last line."""
+    """The background shells in the agent's pane footer ("· 1 shell ·"), 0 when none. The footer is the last non-empty pane
+    line, and Claude Code shows the count only while a background command runs, so an idle agent that shows one has not
+    ended its turn."""
     proc = herdr_run("read", agent, "--source", "visible", "--lines", "3")
     if proc.returncode != 0:
         raise Herdr(f"herdr agent read {agent}: {(proc.stderr or proc.stdout).strip()[:200]}")
-    match = SHELLS_RE.search(proc.stdout)
+    footer = next((line for line in reversed(proc.stdout.splitlines()) if line.strip()), "")
+    match = SHELLS_RE.search(footer)
     return int(match[1]) if match else 0
 
 
-def wait_background(agent, report, deadline, turn_ms):
-    """For an idle agent with no readable report: keeps the turn open while it runs a background shell, since Claude Code
-    starts the agent again when the shell ends and the report may follow. Returns (None, "") once the report can be read or
-    no background work is left (evaluate then fails the node as no_report), else (exit code, why)."""
+def wait_background(agent, report, since, deadline, turn_ms):
+    """For an idle agent with no report from this turn (readable and fresh since its prompt): keeps the turn open while it
+    runs a background shell, since Claude Code starts the agent again when the shell ends and the report may follow.
+    Returns (None, "") once such a report can be read or no background work is left (evaluate then fails the node as
+    no_report), else (exit code, why)."""
     quiet = 0
-    while not readable_report(report):
-        if status(agent) == "working":  # started again by a shell that ended: settle that turn first
+    while not (readable_report(report) and fresh_report(report, since)):
+        current = status(agent)
+        if current == "blocked":
+            return BLOCKED, f"{agent} is blocked: a question is waiting in its pane"
+        if current == "working":  # started again by a shell that ended: settle that turn first
             quiet = 0
             final = wait_status(agent, None, max(1, round((deadline - time.monotonic()) * 1000)))
             if final is None:
@@ -665,16 +671,26 @@ def blocker(data, scope):
     return None
 
 
-def evaluate(root, agent, node, scope, budget, plan):
+def read_report(path):
+    """(report data, mtime) from one read of the file, so the mtime is that of the bytes parsed; None when unreadable."""
+    try:
+        with path.open("rb") as handle:
+            mtime = os.fstat(handle.fileno()).st_mtime
+            return json.loads(handle.read().decode("utf-8")), mtime
+    except (OSError, ValueError):
+        return None
+
+
+def evaluate(root, agent, node, scope, budget, plan, data=None):
     """T0 rules, free and first: the safety tiers, then needs_decision, checks exit 0, files within scope, context and
     turns within budget. A user-tier safety hit wins over every other stop, and names it. Then jev
     (T1, after T0 passes or on a keyword-safety stop), then the report check and task-decide (v1). Returns (exit code,
-    one line, judgement or None); 0 means continue."""
-    report = report_path(root, agent, node)
-    try:
-        data = json.loads(report.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return NO_REPORT, f"no readable report for {node}", None
+    one line, judgement or None); 0 means continue. data is the parsed report when the caller read it, else it is read here."""
+    if data is None:
+        loaded = read_report(report_path(root, agent, node))
+        if loaded is None:
+            return NO_REPORT, f"no readable report for {node}", None
+        data = loaded[0]
     tiered = t0_safety(DECIDE_MODULE.load_formula(FORMULA), data)
     stop = blocker(data, scope)
     if tiered and tiered[0] == ASK_USER:
@@ -701,8 +717,8 @@ def turn_outcome(root, agent, node, scope, budget, since, start_ms, turn_ms, pla
         if code is not None:
             return code, line, None
         report = report_path(root, agent, node)
-        if not readable_report(report):
-            code, line = wait_background(agent, report, deadline, turn_ms)
+        if not (readable_report(report) and fresh_report(report, since)):
+            code, line = wait_background(agent, report, since, deadline, turn_ms)
             if code is not None:
                 return code, line, None
         # A report from before this attempt's prompt is not this turn's: it fails the node before any evaluation.
@@ -777,31 +793,42 @@ def fail_node(conn, node, error):
         print(f"internal: {node} not failed: {refused}", flush=True)
 
 
+def late_plan(conn, root, node):
+    """The plan's nodes, plus the node itself when it is a researcher's question node. Only that node is built, and its
+    spec is not written: it was written when the node was installed. Raises PlanError for an invalid plan."""
+    plan = task_plan.load_plan(root)
+    for row in task_state.node_questions(conn):
+        if f"q{row['qid']}" == node:
+            plan = {**plan, node: question_node(row)}
+    return plan
+
+
 def late_report(conn, root, wake_id):
-    """For resolve continue on a no_report wake: the node's report as it stands now, if it passes task-report check, the
-    node's answer exists when it is a researcher's, and it was written after its attempt's prompt. evaluate judges it as a
-    report on time is, and its judgement is recorded. Returns what task_state.resolve records (stop is set when evaluate
+    """For resolve continue on a no_report wake that is still open, on a node failed with route failed:no_report: the
+    node's report as it stands now, if it passes task-report check, the node's answer exists when it is a researcher's,
+    and it was written after its attempt's prompt. evaluate judges it as a report on time is. Returns what
+    task_state.resolve records, the judgement included for it to write in its transaction (stop is set when evaluate
     stops the node), else None (resolve then refuses as it does without a report). Raises TransitionError for a report
     written before its prompt."""
     wake = task_state.wake_of(conn, wake_id)
-    node = wake["node"] if wake is not None and wake["rule"] == "no_report" else None
+    node = wake["node"] if wake is not None and wake["rule"] == "no_report" and wake["resolved_at"] is None else None
     row = task_state.snapshot(conn)["nodes"].get(node) if node else None
-    if row is None:
+    if row is None or row["status"] != "failed" or row["route"] != "failed:no_report":
         return None
     report = report_path(root, row["agent"], node)
-    if not report.exists():
+    loaded = read_report(report)  # one read: the mtime and the data are of the same bytes
+    if loaded is None:
         return None
+    data, mtime = loaded
     check = subprocess.run([sys.executable, str(REPORT_CHECK), "check", str(report)], capture_output=True, text=True)
     qid = task_state.researcher_qid(node)
     if check.returncode != 0 or (qid and not (root / task_state.answer_path(qid)).exists()):
         return None
-    mtime = report.stat().st_mtime
     attempt = task_state.attempt_of(conn, node)
     if not task_state.report_accepted(mtime, attempt["prompt_at"]):
         raise task_state.TransitionError(f"{report.relative_to(root)} was written before its prompt")
-    data = json.loads(report.read_text(encoding="utf-8"))
     try:
-        plan = with_questions(conn, root, task_plan.load_plan(root))
+        plan = late_plan(conn, root, node)
     except task_plan.PlanError:
         return None  # the plan's review flags and scope come from it, so an invalid plan refuses the late report
     if node not in plan:
@@ -811,11 +838,9 @@ def late_report(conn, root, wake_id):
     else:
         scope = plan[node].scope  # an attempt from before migration 4
     budget = {"turns": attempt["budget_turns"], "prompt_k": attempt["budget_prompt_k"]}
-    code, line, judged = evaluate(root, row["agent"], node, scope, budget, plan)
+    code, line, judged = evaluate(root, row["agent"], node, scope, budget, plan, data)
     if code in FAIL_NAMES:
         return None
-    if judged:
-        record_judged(conn, node, attempt["attempt"], judged)
     stop = None if code == 0 else (STOP_NAMES.get(code, "decide"), line, "user" if code == ASK_USER else "opus",
                                    {"jev": jev_pointer(judged)} if judged else None)
     return {
@@ -825,6 +850,7 @@ def late_report(conn, root, wake_id):
         "questions": data.get("questions") or [],
         "review": code == 0 and node in plan and plan[node].review == "opus",
         "stop": stop,
+        "judged": judged,
     }
 
 
@@ -902,22 +928,27 @@ def question_spec(node_id, row):
             f"answers/{row['qid']}.md (paths there are relative to research/), then writes reports/researcher/{node_id}.json.\n")
 
 
+def question_node(row):
+    """The researcher node q<qid> for a question row. The plan hash is the question's (qid, text), so a change to the spec
+    text does not reopen a resolved node."""
+    qid = row["qid"]
+    answer = f"answers/{qid}.md"  # the schema-relative form; answer_path is the worktree form
+    return task_plan.Node(
+        id=f"q{qid}", agent="researcher", spec=f"specs/q{qid}.md", after=[], scope=[task_state.answer_path(qid), answer], contracts=[],
+        checkpoint=False, review=task_plan.DEFAULTS["review"], session=task_plan.DEFAULTS["session"],
+        budget=dict(task_plan.DEFAULTS["budget"]), plan_hash=hashlib.sha256(f"{qid}\n{row['text']}".encode()).hexdigest())
+
+
 def with_questions(conn, root, nodes):
     """The plan's nodes plus a researcher node q<qid> for each question without scope_change. The node and its spec come
-    from the question row, so a restart rebuilds both the same way and reconcile keeps the node. The plan hash is the
-    question's (qid, text), so a change to the spec text does not reopen a resolved node."""
+    from the question row, so a restart rebuilds both the same way and reconcile keeps the node."""
     generated = {}
     for row in task_state.node_questions(conn):
-        node_id = f"q{row['qid']}"
-        spec = f"specs/{node_id}.md"
-        if not (root / spec).exists():
+        node = question_node(row)
+        if not (root / node.spec).exists():
             (root / "specs").mkdir(exist_ok=True)
-            (root / spec).write_text(question_spec(node_id, row), encoding="utf-8")
-        answer = f"answers/{row['qid']}.md"  # the schema-relative form; answer_path is the worktree form
-        generated[node_id] = task_plan.Node(
-            id=node_id, agent="researcher", spec=spec, after=[], scope=[task_state.answer_path(row["qid"]), answer], contracts=[], checkpoint=False,
-            review=task_plan.DEFAULTS["review"], session=task_plan.DEFAULTS["session"],
-            budget=dict(task_plan.DEFAULTS["budget"]), plan_hash=hashlib.sha256(f"{row['qid']}\n{row['text']}".encode()).hexdigest())
+            (root / node.spec).write_text(question_spec(node.id, row), encoding="utf-8")
+        generated[node.id] = node
     return {**nodes, **generated}
 
 

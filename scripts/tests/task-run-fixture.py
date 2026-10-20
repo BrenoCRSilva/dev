@@ -5,8 +5,9 @@ Runs the real task-dispatch.py run|status|wake-wait|wakes|resolve against the v1
 decision mock (imported from task-dispatch-fixture.py, so no network and no key). Covers: a 4-node DAG across two
 agents with parallel starts, a checkpoint wake, resolve continue releasing the successor; a stopped node, a retry
 as a new attempt, and dispatch.lock contention; a stale report rejected; an idle agent with a background shell kept
-waiting (timed_out at the turn limit); no_report, and a late report accepted by continue only when it is newer than
-the prompt; SIGTERM mid-turn leaving a consistent state that a restarted daemon finishes. Writes only inside a
+waiting (timed_out at the turn limit), a stale report from an earlier run not taken as this turn's, and a blocked agent
+failing the node blocked; the footer's shell count; no_report, and a late report accepted by continue only when it is
+newer than the prompt, answered once (a second continue, or one after a retry, writes no judgement); SIGTERM mid-turn leaving a consistent state that a restarted daemon finishes. Writes only inside a
 temporary folder.
 """
 import importlib.util
@@ -20,6 +21,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 DISPATCH = HERE.parents[1] / "env/.config/tmux/scripts/task-dispatch.py"
@@ -319,6 +321,96 @@ def scenario_late_stop(tmp):
               db(root, "SELECT tier, rule, resolved_at FROM wakes WHERE node = 'l1'"))
         check(f"{name}: the successor keeps waiting", db(root, "SELECT status FROM nodes WHERE id = 'l2'") == [("pending",)], status(env, root))
         stop(proc)
+
+
+def scenario_late_once(tmp):
+    """A no_report wake is answered once. A second continue on it is refused and writes no judgement: the first one's
+    judgement keeps its time. A continue on the wake that a retry closed is refused, and the retried attempt gets none."""
+    root, fake, env = plan_root(tmp, "late-once", [("o1", WORKER, [], False)])
+    env["TASK_DISPATCH_BACKGROUND_POLL_MS"] = "100"
+    v1.set_agent(fake, WORKER, [turn_for(root, "o1", report=False)])
+    proc = daemon(env, root)
+    wake_id = cli(env, root, "wake-wait", timeout=60).stdout.split()[1]
+    report = root / "reports" / WORKER / "o1.json"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps(v1.report("o1")), encoding="utf-8")
+    first = cli(env, root, "resolve", wake_id, "continue")
+    check("late once: the first continue accepts the late report", first.returncode == 0, first.stdout + first.stderr)
+    judged = db(root, "SELECT attempt, outcome, judged_at FROM judgements WHERE node = 'o1'")
+    check("late once: its judgement is for attempt 1, marked resolved:continue", [row[:2] for row in judged] == [(1, "resolved:continue")], judged)
+    time.sleep(0.05)
+    again = cli(env, root, "resolve", wake_id, "continue")
+    check("late once: a second continue is refused", again.returncode == 2 and "already resolved" in again.stdout, again.stdout + again.stderr)
+    check("late once: the refused continue rewrites no judgement", db(root, "SELECT attempt, outcome, judged_at FROM judgements WHERE node = 'o1'") == judged,
+          db(root, "SELECT attempt, outcome, judged_at FROM judgements WHERE node = 'o1'"))
+    stop(proc)
+    root, fake, env = plan_root(tmp, "late-retry", [("r1", WORKER, [], False)])
+    env["TASK_DISPATCH_BACKGROUND_POLL_MS"] = "100"
+    v1.set_agent(fake, WORKER, [turn_for(root, "r1", report=False)])
+    proc = daemon(env, root)
+    wake_id = cli(env, root, "wake-wait", timeout=60).stdout.split()[1]
+    stop(proc)
+    retry = cli(env, root, "resolve", wake_id, "retry")
+    check("late retry: retry closes the no_report wake and leaves the node pending",
+          retry.returncode == 0 and db(root, "SELECT status FROM nodes WHERE id = 'r1'") == [("pending",)], retry.stdout + retry.stderr)
+    report = root / "reports" / WORKER / "r1.json"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps(v1.report("r1")), encoding="utf-8")
+    late = cli(env, root, "resolve", wake_id, "continue")
+    check("late retry: a continue on the wake a retry closed is refused", late.returncode == 2 and "already resolved" in late.stdout,
+          late.stdout + late.stderr)
+    check("late retry: the pending node gets no judgement", db(root, "SELECT COUNT(*) FROM judgements WHERE node = 'r1'") == [(0,)],
+          str(db(root, "SELECT attempt FROM judgements WHERE node = 'r1'")))
+
+
+def scenario_background_stale(tmp):
+    """An idle agent with a background shell keeps its turn until the report of this turn exists. A report left by an
+    earlier run of the step is not that report, so the turn waits for the fresh one the shell's end writes."""
+    root, fake, env = plan_root(tmp, "background-stale", [("s1", WORKER, [], False)])
+    env["TASK_DISPATCH_BACKGROUND_POLL_MS"] = "100"
+    stale = root / "reports" / WORKER / "s1.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text(json.dumps(v1.report("s1")), encoding="utf-8")
+    hour_ago = time.time() - 3600
+    os.utime(stale, (hour_ago, hour_ago))
+    v1.set_agent(fake, WORKER, [turn_for(root, "s1", shell=1.5)])
+    proc = daemon(env, root)
+    done = wait_for(lambda: "worker-dotfiles: idle; done 1" in status(env, root))
+    check("background stale: the turn waits past the stale report and the node is done", done, status(env, root))
+    check("background stale: routed continue, not failed:stale_report",
+          db(root, "SELECT status, route FROM nodes WHERE id = 's1'") == [("done", "continue")],
+          str(db(root, "SELECT status, route FROM nodes WHERE id = 's1'")))
+    stop(proc)
+
+
+def scenario_blocked_background(tmp):
+    """An idle agent with a background shell that then shows blocked fails the node blocked, not no_report."""
+    root, fake, env = plan_root(tmp, "blocked-background", [("k1", WORKER, [], False)])
+    env["TASK_DISPATCH_BACKGROUND_POLL_MS"] = "100"
+    v1.set_agent(fake, WORKER, [v1.turn(root, "k1", end="blocked", shell=1.5)])
+    proc = daemon(env, root)
+    woke = cli(env, root, "wake-wait", timeout=60).stdout
+    check("blocked background: the wake names blocked", " k1 blocked: worker-dotfiles is blocked" in woke, woke)
+    check("blocked background: routed failed:blocked, not failed:no_report",
+          db(root, "SELECT status, route FROM nodes WHERE id = 'k1'") == [("failed", "failed:blocked")],
+          str(db(root, "SELECT status, route FROM nodes WHERE id = 'k1'")))
+    stop(proc)
+
+
+def scenario_footer(tmp):
+    """The background shell count is read from the pane's last non-empty line only, and needs the "· N shell(s)" footer."""
+    dispatch = dispatch_module()
+    cases = (
+        ("❯\n  ⏵⏵ auto mode on · 1 shell · esc to interrupt\n", 1, "footer shell"),
+        ("❯\n  ⏵⏵ auto mode on · esc to interrupt\n\n", 0, "footer without shells"),
+        ("· 3 shells ran earlier\n❯\n  ⏵⏵ auto mode on · esc to interrupt\n", 0, "shells in an earlier line"),
+        ("  ⏵⏵ auto mode on · 2 shells · esc to interrupt\n\n\n", 2, "footer above trailing blank lines"),
+        ("  ⏵⏵ auto mode on 1 shell · esc to interrupt\n", 0, "shell without the dot"),
+    )
+    for text, want, label in cases:
+        with mock.patch.object(dispatch, "herdr_run", return_value=subprocess.CompletedProcess([], 0, stdout=text, stderr="")):
+            got = dispatch.background_shells(WORKER)
+        check(f"footer: {label} counts {want}", got == want, f"got {got}")
 
 
 def scenario_pause(tmp):
@@ -1153,6 +1245,10 @@ def main():
         scenario_background(tmp)
         scenario_no_report(tmp)
         scenario_late_stop(tmp)
+        scenario_late_once(tmp)
+        scenario_background_stale(tmp)
+        scenario_blocked_background(tmp)
+        scenario_footer(tmp)
         scenario_pause(tmp)
         scenario_fresh(tmp)
         scenario_continue(tmp)

@@ -74,7 +74,9 @@ It sends prompts to agents for planned work. Do not prompt them yourself.
   `plan-invalid`, `review`, `question`); for a `question` wake, `ack` or `continue`
   answers it when `research/answers/<qid>.md` exists, else closes it, and the
   dependents are released either way. For other wakes, decide from the pointers
-  and the report.
+  and the report. On a `no_report` wake, `continue` accepts a late report (fresh,
+  passing task-report check) that then gets the same checks as a report on time;
+  an idle agent with a background shell keeps its turn until the turn limit.
 - `status`: one line per agent, and counts by status.
 - `digest`: the checkpoint packet: milestone results, spend per agent and tier,
   audit picks, open questions, jev shadow agreement. Read it at each checkpoint.

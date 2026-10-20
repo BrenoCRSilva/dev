@@ -343,17 +343,22 @@ def route(conn, node_id, outcome, reason="", tier=None, wake=None, answered=None
 def record_judgement(conn, node_id, attempt, judged):
     """One judgements row for a judged attempt (T1): the answers and derived route, or the error when jev failed."""
     with transaction(conn):
-        conn.execute(
-            "INSERT INTO judgements (node, attempt, model, request_hash, answers_json, derived_route, mode, latency_ms, "
-            "cost_usd, input_tokens, error, judged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT (node, attempt) DO UPDATE SET model = excluded.model, request_hash = excluded.request_hash, "
-            "answers_json = excluded.answers_json, derived_route = excluded.derived_route, mode = excluded.mode, "
-            "latency_ms = excluded.latency_ms, cost_usd = excluded.cost_usd, input_tokens = excluded.input_tokens, "
-            "error = excluded.error, judged_at = excluded.judged_at",
-            (node_id, attempt, judged["model"], judged["request_hash"],
-             None if judged["answers"] is None else json.dumps(judged["answers"]), judged["derived_route"], judged["mode"],
-             judged["latency_ms"], judged["cost_usd"], judged["input_tokens"], judged["error"], time.time()),
-        )
+        _record_judgement(conn, node_id, attempt, judged)
+
+
+def _record_judgement(conn, node_id, attempt, judged):
+    """record_judgement inside the caller's transaction."""
+    conn.execute(
+        "INSERT INTO judgements (node, attempt, model, request_hash, answers_json, derived_route, mode, latency_ms, "
+        "cost_usd, input_tokens, error, judged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (node, attempt) DO UPDATE SET model = excluded.model, request_hash = excluded.request_hash, "
+        "answers_json = excluded.answers_json, derived_route = excluded.derived_route, mode = excluded.mode, "
+        "latency_ms = excluded.latency_ms, cost_usd = excluded.cost_usd, input_tokens = excluded.input_tokens, "
+        "error = excluded.error, judged_at = excluded.judged_at",
+        (node_id, attempt, judged["model"], judged["request_hash"],
+         None if judged["answers"] is None else json.dumps(judged["answers"]), judged["derived_route"], judged["mode"],
+         judged["latency_ms"], judged["cost_usd"], judged["input_tokens"], judged["error"], time.time()),
+    )
 
 
 def judgement_failed(conn, node_id, error):
@@ -463,9 +468,9 @@ def resolve(conn, wake_id, resolution, root, release=False, note="", late=None):
             if late is not None and late["stop"]:
                 _stop_late(conn, row["node"], late)
             else:
-                _mark_outcome(conn, row["node"], f"resolved:{resolution}")  # before _apply: a retry starts a new attempt
                 if late is not None and resolution == "continue":
-                    _accept_late(conn, row["node"], late)
+                    _accept_late(conn, row["node"], late)  # first: it writes the judgement the outcome below marks
+                _mark_outcome(conn, row["node"], f"resolved:{resolution}")  # before _apply: a retry starts a new attempt
                 _apply(conn, row["node"], row["rule"], resolution, release, root, note)
             if resolution != "continue":
                 closed = conn.execute(
@@ -499,7 +504,9 @@ def attempt_of(conn, node_id):
 
 def _record_late(conn, node_id, late):
     """A no_report node's late report, written after its attempt's prompt, is recorded with its questions, as a normal
-    report is. late: {report, mtime, head_sha, questions, review, stop}, checked by the dispatcher."""
+    report is. late: {report, mtime, head_sha, questions, review, stop, judged}, checked by the dispatcher. The judgement
+    is written here, inside the resolve transaction, so a refused resolve writes none. A judgement that fails to write
+    is logged and does not change the route, as record_judged does for a report on time."""
     row = _row(conn, node_id)
     if row["status"] != "failed" or row["route"] != "failed:no_report":
         raise TransitionError(f"{node_id} is {row['status']} ({row['route']}), not failed:no_report")
@@ -510,6 +517,11 @@ def _record_late(conn, node_id, late):
     conn.execute("UPDATE attempts SET report_mtime = ? WHERE node = ? AND attempt = ?", (late["mtime"], node_id, row["attempt"]))
     _event(conn, node_id, "settle", f"accepted late {late['report']}")
     _add_questions(conn, node_id, row["attempt"], late["questions"])
+    if late.get("judged"):
+        try:
+            _record_judgement(conn, node_id, row["attempt"], late["judged"])
+        except sqlite3.Error as error:
+            _event(conn, node_id, "route", f"judgement not recorded: {error}"[:300])
 
 
 def _accept_late(conn, node_id, late):
