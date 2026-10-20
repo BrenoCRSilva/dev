@@ -4,8 +4,10 @@
 Runs the real task-dispatch.py run|status|wake-wait|wakes|resolve against the v1 fixture's fake herdr and its
 decision mock (imported from task-dispatch-fixture.py, so no network and no key). Covers: a 4-node DAG across two
 agents with parallel starts, a checkpoint wake, resolve continue releasing the successor; a stopped node, a retry
-as a new attempt, and dispatch.lock contention; a stale report rejected; SIGTERM mid-turn leaving a consistent
-state that a restarted daemon finishes. Writes only inside a temporary folder.
+as a new attempt, and dispatch.lock contention; a stale report rejected; an idle agent with a background shell kept
+waiting (timed_out at the turn limit); no_report, and a late report accepted by continue only when it is newer than
+the prompt; SIGTERM mid-turn leaving a consistent state that a restarted daemon finishes. Writes only inside a
+temporary folder.
 """
 import importlib.util
 import json
@@ -97,8 +99,8 @@ def plan_root(tmp, name, nodes, session=None):
 
 
 def turn_for(root, step, agent=WORKER, work=0.5, needs=None, report=True, turns=None, checks=None, questions=None, files=None,
-             handoff=None):
-    body = v1.turn(root, step, work=work, agent=agent)
+             handoff=None, shell=0.0):
+    body = v1.turn(root, step, work=work, agent=agent, shell=shell)
     if needs and body["report"]:
         body["report"]["needs_decision"] = needs
     if turns is not None and body["report"]:
@@ -242,6 +244,55 @@ def scenario_stale(tmp):
     woke = cli(env, root, "wake-wait", timeout=60).stdout
     check("stale: a report older than the prompt is rejected", " stale_report: " in woke, woke)
     check("stale: routed failed:stale_report", db(root, "SELECT status, route FROM nodes WHERE id = 's1'") == [("failed", "failed:stale_report")])
+    stop(proc)
+
+
+def scenario_background(tmp):
+    """An idle agent whose footer shows a background shell keeps its turn open, so the report it writes when the shell
+    ends counts. A shell still running at the turn limit fails the node timed_out."""
+    root, fake, env = plan_root(tmp, "background", [("b1", WORKER, [], False)])
+    env["TASK_DISPATCH_BACKGROUND_POLL_MS"] = "100"
+    v1.set_agent(fake, WORKER, [turn_for(root, "b1", shell=1.5)])
+    proc = daemon(env, root)
+    done = wait_for(lambda: "worker-dotfiles: idle; done 1" in status(env, root))
+    check("background: a node with a running shell finishes with the report written when it ends", done, status(env, root))
+    check("background: the node is done and continues", db(root, "SELECT status, route FROM nodes WHERE id = 'b1'") == [("done", "continue")])
+    stop(proc)
+    root, fake, env = plan_root(tmp, "background-limit", [("bl", WORKER, [], False)])
+    env.update(TASK_DISPATCH_BACKGROUND_POLL_MS="100", TASK_DISPATCH_TURN_MS="2000")
+    v1.set_agent(fake, WORKER, [turn_for(root, "bl", shell=30)])
+    proc = daemon(env, root)
+    woke = cli(env, root, "wake-wait", timeout=60).stdout
+    check("background limit: a shell still running at the turn limit fails the node timed_out",
+          " bl timed_out: worker-dotfiles still has a background shell after 2000 ms" in woke, woke)
+    check("background limit: routed failed:timed_out", db(root, "SELECT status, route FROM nodes WHERE id = 'bl'") == [("failed", "failed:timed_out")])
+    stop(proc)
+
+
+def scenario_no_report(tmp):
+    """Idle with no report and no background shell is no_report. A report that appears later is accepted by resolve
+    continue only when it passes the check and was written after the prompt; then its successor runs."""
+    root, fake, env = plan_root(tmp, "no-report", [("n1", WORKER, [], False), ("n2", WORKER, ["n1"], False)])
+    env["TASK_DISPATCH_BACKGROUND_POLL_MS"] = "100"
+    v1.set_agent(fake, WORKER, [turn_for(root, "n1", report=False), turn_for(root, "n2")])
+    proc = daemon(env, root)
+    woke = cli(env, root, "wake-wait", timeout=60).stdout
+    check("no report: idle with no background work fails the node no_report", " n1 no_report: no readable report for n1" in woke, woke)
+    check("no report: routed failed:no_report", db(root, "SELECT status, route FROM nodes WHERE id = 'n1'") == [("failed", "failed:no_report")])
+    wake_id = woke.split()[1]
+    report = root / "reports" / WORKER / "n1.json"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps(v1.report("n1")), encoding="utf-8")
+    os.utime(report, (time.time() - 3600, time.time() - 3600))
+    stale = cli(env, root, "resolve", wake_id, "continue")
+    check("no report: a report written before the prompt is refused", stale.returncode == 2 and "written before its prompt" in stale.stdout, stale.stdout + stale.stderr)
+    check("no report: the refused continue leaves the wake open", db(root, "SELECT resolved_at IS NULL FROM wakes WHERE id = ?", (wake_id,)) == [(1,)])
+    os.utime(report, None)
+    resolved = cli(env, root, "resolve", wake_id, "continue")
+    check("no report: a report written after the prompt is accepted by continue", resolved.returncode == 0, resolved.stdout + resolved.stderr)
+    check("no report: the node is done with that report", db(root, "SELECT status, route, report FROM nodes WHERE id = 'n1'") == [("done", "continue", "reports/worker-dotfiles/n1.json")])
+    done = wait_for(lambda: "worker-dotfiles: idle; done 2" in status(env, root))
+    check("no report: the successor runs after the late report", done, status(env, root))
     stop(proc)
 
 
@@ -1074,6 +1125,8 @@ def main():
         scenario_handoff(tmp)
         scenario_retry(tmp)
         scenario_stale(tmp)
+        scenario_background(tmp)
+        scenario_no_report(tmp)
         scenario_pause(tmp)
         scenario_fresh(tmp)
         scenario_continue(tmp)

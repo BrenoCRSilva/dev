@@ -57,6 +57,8 @@ REPORT_CHECK = HERE / "task-report.py"
 FORMULA = HERE / "task-roles" / "formulas" / "worker-step.toml"
 SLICE_MS = int(os.environ.get("TASK_DISPATCH_SLICE_MS", 10 * 60 * 1000))
 LAUNCH_WAIT_MS = 60 * 1000
+BACKGROUND_POLL_MS = int(os.environ.get("TASK_DISPATCH_BACKGROUND_POLL_MS", 10 * 1000))
+SHELLS_RE = re.compile(r"\b(\d+) shells?\b")
 SHUTDOWN_S = 30  # how long a stopping daemon waits for launch threads (a fresh start can take LAUNCH_WAIT_MS)
 LAUNCHES = []  # the prompt threads of this daemon, joined at shutdown
 
@@ -126,13 +128,18 @@ def _reply(text):
     return None
 
 
-def herdr(*args, group="agent"):
-    """Runs `herdr <group> <args>` (agent by default) and returns its result. herdr writes an error reply to stderr with
-    stdout empty."""
+def herdr_run(*args, group="agent"):
+    """Runs `herdr <group> <args>` (agent by default), on the TASK_SESSION herdr session when it is set."""
     cmd = ["herdr"]
     if os.environ.get("TASK_SESSION"):
         cmd += ["--session", os.environ["TASK_SESSION"]]
-    proc = subprocess.run([*cmd, group, *args], capture_output=True, text=True)
+    return subprocess.run([*cmd, group, *args], capture_output=True, text=True)
+
+
+def herdr(*args, group="agent"):
+    """Runs `herdr <group> <args>` (agent by default) and returns its result. herdr writes an error reply to stderr with
+    stdout empty."""
+    proc = herdr_run(*args, group=group)
     reply = _reply(proc.stdout)
     if reply is None:
         reply = _reply(proc.stderr)
@@ -260,6 +267,49 @@ def await_turn(agent, step, root, start_ms, turn_ms, since):
         return BLOCKED, f"{agent} is blocked: a question is waiting in its pane"
     if not started and not fresh_report(report_path(root, agent, step), since):
         return NOT_STARTED, f"{agent} did not start step {step} within {start_ms} ms"
+    return None, ""
+
+
+def readable_report(report):
+    try:
+        json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def background_shells(agent):
+    """The background shells in the agent's pane footer ("· 1 shell ·"), 0 when none. Claude Code shows the count only while
+    a background command runs, so an idle agent that shows one has not ended its turn. The footer is the pane's last line."""
+    proc = herdr_run("read", agent, "--source", "visible", "--lines", "3")
+    if proc.returncode != 0:
+        raise Herdr(f"herdr agent read {agent}: {(proc.stderr or proc.stdout).strip()[:200]}")
+    match = SHELLS_RE.search(proc.stdout)
+    return int(match[1]) if match else 0
+
+
+def wait_background(agent, report, deadline, turn_ms):
+    """For an idle agent with no readable report: keeps the turn open while it runs a background shell, since Claude Code
+    starts the agent again when the shell ends and the report may follow. Returns (None, "") once the report can be read or
+    no background work is left (evaluate then fails the node as no_report), else (exit code, why)."""
+    quiet = 0
+    while not readable_report(report):
+        if status(agent) == "working":  # started again by a shell that ended: settle that turn first
+            quiet = 0
+            final = wait_status(agent, None, max(1, round((deadline - time.monotonic()) * 1000)))
+            if final is None:
+                return TIMED_OUT, f"{agent} still working after {turn_ms} ms"
+            if final == "blocked":
+                return BLOCKED, f"{agent} is blocked: a question is waiting in its pane"
+        elif background_shells(agent):
+            quiet = 0
+            if time.monotonic() >= deadline:
+                return TIMED_OUT, f"{agent} still has a background shell after {turn_ms} ms"
+        else:
+            quiet += 1
+            if quiet == 2:  # idle with no background work on two polls: no report is coming
+                return None, ""
+        time.sleep(BACKGROUND_POLL_MS / 1000)
     return None, ""
 
 
@@ -646,11 +696,16 @@ def evaluate(root, agent, node, scope, budget, plan):
 
 def turn_outcome(root, agent, node, scope, budget, since, start_ms, turn_ms, plan):
     try:
+        deadline = time.monotonic() + turn_ms / 1000
         code, line = await_turn(agent, node, root, start_ms, turn_ms, since)
         if code is not None:
             return code, line, None
-        # A report from before this attempt's prompt is not this turn's: it fails the node before any evaluation.
         report = report_path(root, agent, node)
+        if not readable_report(report):
+            code, line = wait_background(agent, report, deadline, turn_ms)
+            if code is not None:
+                return code, line, None
+        # A report from before this attempt's prompt is not this turn's: it fails the node before any evaluation.
         if report.exists() and not fresh_report(report, since):
             return STALE, f"report for {node} was written before its prompt", None
         return evaluate(root, agent, node, scope, budget, plan)
@@ -715,6 +770,36 @@ def fail_node(conn, node, error):
         task_state.fail_internal(conn, node, error)
     except task_state.TransitionError as refused:
         print(f"internal: {node} not failed: {refused}", flush=True)
+
+
+def late_report(conn, root, wake_id):
+    """For resolve continue on a no_report wake: the node's report as it stands now, if it passes task-report check and
+    the node's answer exists when it is a researcher's. Returns what task_state.resolve records, else None (resolve then
+    refuses as it does without a report)."""
+    wake = task_state.wake_of(conn, wake_id)
+    node = wake["node"] if wake is not None and wake["rule"] == "no_report" else None
+    row = task_state.snapshot(conn)["nodes"].get(node) if node else None
+    if row is None:
+        return None
+    report = report_path(root, row["agent"], node)
+    if not report.exists():
+        return None
+    check = subprocess.run([sys.executable, str(REPORT_CHECK), "check", str(report)], capture_output=True, text=True)
+    qid = task_state.researcher_qid(node)
+    if check.returncode != 0 or (qid and not (root / task_state.answer_path(qid)).exists()):
+        return None
+    data = json.loads(report.read_text(encoding="utf-8"))
+    try:
+        plan = task_plan.load_plan(root)
+    except task_plan.PlanError:
+        return None  # the review flag comes from the plan, so an invalid plan refuses the late report
+    return {
+        "report": str(report.relative_to(root)),
+        "mtime": report.stat().st_mtime,
+        "head_sha": data.get("head_sha"),
+        "questions": data.get("questions") or [],
+        "review": node in plan and plan[node].review == "opus",
+    }
 
 
 def tick(conn, root, nodes, results):
@@ -1048,7 +1133,8 @@ def v2_main(argv):
                 print(wake_line(row))
             return EMPTY
         if args.command == "resolve":
-            task_state.resolve(conn, args.wake, args.resolution, root, release=args.release, note=args.note)
+            late = late_report(conn, root, args.wake) if args.resolution == "continue" else None
+            task_state.resolve(conn, args.wake, args.resolution, root, release=args.release, note=args.note, late=late)
             print(f"resolved wake {args.wake}: {args.resolution}")
             return EMPTY
         task_state.pause(conn, args.target, paused=args.command == "pause")

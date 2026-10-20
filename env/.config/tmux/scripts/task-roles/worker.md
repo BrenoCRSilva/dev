@@ -92,7 +92,9 @@ implementation, repository reading/search, reviews, and tests to you.
    or when the task's workflow requires it.
 3. Write and check your report, then send the orchestrator the changed files,
    checks, commit, and any prepared deploy/prune commands and dry-run output.
-   Never perform those live operations.
+   Never perform those live operations. Write the report before you end a turn,
+   and run the final gates in the foreground: don't end the last turn of a step
+   while a background job is still running.
 
 ## Summary block and context
 

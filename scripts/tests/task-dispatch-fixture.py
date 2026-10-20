@@ -62,6 +62,8 @@ def current(name):
         status = "idle"
     elif now < st["t0"] + turn["start"] + turn["work"]:
         status = "working"
+    elif now < st["t0"] + turn["start"] + turn["work"] + turn.get("shell", 0):
+        status = "idle"  # the turn ended with a background shell running; its report comes when the shell ends
     else:
         if turn.get("report"):
             Path(turn["report_path"]).parent.mkdir(parents=True, exist_ok=True)
@@ -82,6 +84,11 @@ command, name = args[1], args[2] if len(args) > 2 else ""
 if command == "get":
     status, _ = current(name)
     reply(info(name, status))
+if command == "read":  # plain pane text; the footer shows "1 shell" while the turn's background shell runs
+    _, st = current(name)
+    shell = st.get("shell_from", 0) <= time.time() < st.get("shell_until", 0)
+    print("❯\n  ⏵⏵ auto mode on" + (" · 1 shell" if shell else "") + " · esc to interrupt")
+    sys.exit(0)
 if command == "prompt":
     status, st = current(name)
     if status == "blocked":
@@ -90,6 +97,8 @@ if command == "prompt":
         reply(error={"code": "no_turn", "message": "fixture has no turn left"})
     st["active"], st["turns"] = st["turns"].pop(0), st["turns"]
     st["t0"] = time.time()
+    st["shell_from"] = st["t0"] + st["active"]["start"] + st["active"]["work"]
+    st["shell_until"] = st["shell_from"] + st["active"].get("shell", 0)
     save(FAKE / "state" / f"{name}.json", st)
     with (FAKE / "prompts.log").open("a", encoding="utf-8") as log:
         log.write(f"{name}\t{args[3]}\n")
@@ -180,11 +189,12 @@ def report(step, agent=WORKER):
     }
 
 
-def turn(root, step, start=0.3, work=0.5, end="idle", agent=WORKER):
-    """A fake turn: idle for start seconds, working for work seconds, then end, with its report."""
+def turn(root, step, start=0.3, work=0.5, end="idle", agent=WORKER, shell=0.0):
+    """A fake turn: idle for start seconds, working for work seconds, then end, with its report. With shell, the turn
+    is idle for that many seconds more, its footer shows a background shell, and the report comes when the shell ends."""
     path = root / "reports" / agent / f"{step}.json"
     body = report(step, agent) if end == "idle" else None
-    return {"start": start, "work": work, "end": end, "report": body, "report_path": str(path)}
+    return {"start": start, "work": work, "end": end, "report": body, "report_path": str(path), "shell": shell}
 
 
 def set_agent(fake, name, turns, blocked=False):

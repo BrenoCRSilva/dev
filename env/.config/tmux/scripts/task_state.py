@@ -382,28 +382,33 @@ def wake(conn, node_id, tier, rule, reason, pointers=None, options=None, audit=N
 def add_questions(conn, node_id, attempt, questions):
     """Records a report's questions, once per attempt and text, numbered after the existing ones. A scope_change question
     raises an Opus wake instead of a researcher node. Returns the qids: the new ones, and the earlier qid of a repeated one."""
-    qids = []
     with transaction(conn):
         _row(conn, node_id)
-        for question in questions:
-            text = str(question.get("text", ""))[:500]
-            # One question per node and text while the earlier one is open, across attempts; a re-run of its report adds nothing.
-            earlier = conn.execute("SELECT qid FROM questions WHERE node = ? AND text = ? AND (attempt = ? OR status = 'open')",
-                                   (node_id, text, attempt)).fetchone()
-            if earlier:
-                qids.append(earlier[0])
-                continue
-            qid = str(conn.execute("SELECT COALESCE(MAX(CAST(qid AS INTEGER)), 0) + 1 FROM questions").fetchone()[0])
-            scope_change = bool(question.get("scope_change"))
-            conn.execute(
-                "INSERT INTO questions (qid, node, text, blocking, status, answer_path, attempt, scope_change) "
-                "VALUES (?, ?, ?, ?, 'open', NULL, ?, ?)",
-                (qid, node_id, text, int(bool(question.get("blocking"))), attempt, int(scope_change)),
-            )
-            _event(conn, node_id, "question", f"q{qid}: {text}"[:300])
-            if scope_change:
-                _wake(conn, node_id, "opus", "question", f"scope change asked: q{qid}: {text}"[:300], pointers={"qid": qid})
-            qids.append(qid)
+        return _add_questions(conn, node_id, attempt, questions)
+
+
+def _add_questions(conn, node_id, attempt, questions):
+    """add_questions inside the caller's transaction."""
+    qids = []
+    for question in questions:
+        text = str(question.get("text", ""))[:500]
+        # One question per node and text while the earlier one is open, across attempts; a re-run of its report adds nothing.
+        earlier = conn.execute("SELECT qid FROM questions WHERE node = ? AND text = ? AND (attempt = ? OR status = 'open')",
+                               (node_id, text, attempt)).fetchone()
+        if earlier:
+            qids.append(earlier[0])
+            continue
+        qid = str(conn.execute("SELECT COALESCE(MAX(CAST(qid AS INTEGER)), 0) + 1 FROM questions").fetchone()[0])
+        scope_change = bool(question.get("scope_change"))
+        conn.execute(
+            "INSERT INTO questions (qid, node, text, blocking, status, answer_path, attempt, scope_change) "
+            "VALUES (?, ?, ?, ?, 'open', NULL, ?, ?)",
+            (qid, node_id, text, int(bool(question.get("blocking"))), attempt, int(scope_change)),
+        )
+        _event(conn, node_id, "question", f"q{qid}: {text}"[:300])
+        if scope_change:
+            _wake(conn, node_id, "opus", "question", f"scope change asked: q{qid}: {text}"[:300], pointers={"qid": qid})
+        qids.append(qid)
     return qids
 
 
@@ -420,11 +425,16 @@ RESOLUTIONS = ("continue", "retry", "skip", "cancel", "ack")
 INFO_RULES = ("plan-changed", "removed-running", PLAN_RULE, "review", "question")
 
 
-def resolve(conn, wake_id, resolution, root, release=False, note=""):
+def wake_of(conn, wake_id):
+    return conn.execute("SELECT * FROM wakes WHERE id = ?", (wake_id,)).fetchone()
+
+
+def resolve(conn, wake_id, resolution, root, release=False, note="", late=None):
     """Closes the wake and applies the resolution to its node. Refused with TransitionError, and nothing written, when it cannot apply.
 
     continue: a checkpoint passes (done, route continue); a stopped or failed node whose report was accepted is
-    accepted (done, route continue).
+    accepted (done, route continue). late (a no_report node's report, see _accept_late) is recorded first, in the same
+    transaction, so the continue accepts it.
     retry: a stopped or failed node goes back to pending, so its next install is a new attempt; route, report,
     head_sha and ended_at are cleared.
     skip: the node is done with route skipped, so its successors stay blocked. With release, route is continue,
@@ -451,6 +461,8 @@ def resolve(conn, wake_id, resolution, root, release=False, note=""):
             if not row["node"] or row["rule"] in INFO_RULES:
                 raise TransitionError(f"wake {wake_id} ({row['rule']}) is informational: resolve it with ack")
             _mark_outcome(conn, row["node"], f"resolved:{resolution}")  # before _apply: a retry starts a new attempt
+            if late is not None and resolution == "continue":
+                _accept_late(conn, row["node"], late)
             _apply(conn, row["node"], row["rule"], resolution, release, root, note)
             if resolution != "continue":
                 closed = conn.execute(
@@ -473,6 +485,23 @@ def _settle_question(conn, qid, root, note=""):
 
 def close_question(conn, qid, note):
     conn.execute("UPDATE questions SET status = 'closed', note = ? WHERE qid = ? AND status = 'open'", (note, qid))
+
+
+def _accept_late(conn, node_id, late):
+    """A no_report node whose report was written after its attempt's prompt gets that report recorded, with its questions
+    and review wake, as a normal report is. late: {report, mtime, head_sha, questions, review}, checked by the dispatcher."""
+    row = _row(conn, node_id)
+    if row["status"] != "failed" or row["route"] != "failed:no_report":
+        raise TransitionError(f"{node_id} is {row['status']} ({row['route']}), not failed:no_report")
+    attempt = conn.execute("SELECT prompt_at FROM attempts WHERE node = ? AND attempt = ?", (node_id, row["attempt"])).fetchone()
+    if not report_accepted(late["mtime"], attempt["prompt_at"]):
+        raise TransitionError(f"{late['report']} was written before its prompt")
+    conn.execute("UPDATE nodes SET report = ?, head_sha = ? WHERE id = ?", (late["report"], late["head_sha"], node_id))
+    conn.execute("UPDATE attempts SET report_mtime = ? WHERE node = ? AND attempt = ?", (late["mtime"], node_id, row["attempt"]))
+    _event(conn, node_id, "settle", f"accepted late {late['report']}")
+    _add_questions(conn, node_id, row["attempt"], late["questions"])
+    if late["review"]:
+        _wake(conn, node_id, "opus", "review", "review=opus: check this step before relying on it")
 
 
 def _apply(conn, node_id, rule, resolution, release, root, note=""):
