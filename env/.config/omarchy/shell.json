@@ -20,6 +20,9 @@
         },
         {
           "id": "io.github.aashbury.voxhud"
+        },
+        {
+          "id": "io.github.jcarcinogen.gaming-console"
         }
       ],
       "left": [
@@ -61,16 +64,19 @@
           "id": "omarchy.network"
         },
         {
+          "id": "omarchy.system-update"
+        },
+        {
+          "id": "omarchy.power"
+        },
+        {
           "id": "omarchy.audio"
         },
         {
           "id": "omarchy.monitor"
         },
         {
-          "id": "omarchy.system-update"
-        },
-        {
-          "id": "omarchy.power"
+          "id": "crmne.hyprmoncfg"
         }
       ]
     },
