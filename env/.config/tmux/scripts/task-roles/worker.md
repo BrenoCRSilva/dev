@@ -14,9 +14,11 @@ implementation, repository reading/search, reviews, and tests to you.
   blocker instead. Read other worker repos only
   when the task names them. Do not read, search or open a **Context only** repo
   listed in the task root `AGENTS.md`, or anything under the task's `research/`
-  folder: the researcher owns those. If you need a fact from one, ask the
-  orchestrator; it routes the question to the researcher and passes the answer
-  back to you.
+  folder: the researcher owns those. One exception: you may read the single
+  `research/answers/<qid>.md` that an `Answer:` or `After:` line in your hook
+  names (paths are relative to the task root). If you need any other fact from
+  one, ask the orchestrator; it routes the question to the researcher and passes
+  the answer back to you.
 - Your write permission to git metadata is limited to this repo's canonical
   checkout `.git`, so you may create commits on the task branch. Never add
   Co-Authored-By or other AI attribution trailers to commits or PRs. Do not merge to

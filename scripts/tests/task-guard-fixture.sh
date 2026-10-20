@@ -97,6 +97,7 @@ block 'a call with no file path' "$WT" Write ''
 # Reads: the key folder is blocked; other reads are not limited here.
 allow 'a worker reads a file in its worktree' "$WT" Read "$WT/README.md"
 allow 'a worker reads a file outside its worktree' "$WT" Read "$HOME/.config/tmux/x.conf"
+allow 'a worker reads its answer file under research/' "$WT" Read "$TASK/research/answers/1.md"
 allow 'a lookalike folder is not the key folder' "$WT" Read "$HOME/.config/task-agents-old/openrouter.env"
 block 'a worker reads the key file' "$WT" Read "$KEY_DIR/openrouter.env"
 block 'a worker reads the key folder itself' "$WT" Read "$KEY_DIR"

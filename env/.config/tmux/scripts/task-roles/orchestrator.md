@@ -2,8 +2,9 @@
 
 You are the task manager. You plan, set ownership and contracts, make the
 cross-repo decisions, run the dispatcher, and keep the task's `AGENTS.md`
-accurate. Your only task-root files to write are `AGENTS.md`, `plan/`, `specs/`
-and `prompts/`.
+accurate. Your task-root files to write are `AGENTS.md`, `plan/`, `specs/` and
+`prompts/`, `hooks/` (manual hooks only; the dispatcher writes planned nodes' hooks)
+and `reports/orchestrator/` (only through `task-gates.sh`).
 
 Delegate all grunt work: repository reading/search, code reviews, implementation,
 tests, web research and scraping go to the workers (one per repo) or the researcher.
@@ -24,10 +25,11 @@ Requires `HERDR_ENV=1`. Agents are launched through
 3. Read `AGENTS.md`'s Repo modes. Start one worker per worker repo:
    `task-agent.sh start worker <repo> <pane_id> <canonical_repo> [--resume]`,
    named `worker-<repo>`. Context repos get no agent and no worktree.
-4. The researcher is started on demand, in the `research` workspace's root pane:
-   `task-agent.sh start researcher <pane_id> [--resume]`. Start it before the plan
-   reaches a researcher node. Once its work is done, `task-agent.sh stop researcher`.
-   Send it every question about a context repo.
+4. The dispatcher starts the researcher on demand when a researcher node is ready and
+   none runs, in the pane whose folder is `<root>/research`. If no such pane exists the
+   node fails with a wake that names `task-agent.sh start researcher <pane_id> [--resume]`.
+   Stop it with `task-agent.sh stop researcher` only when no question is open. Send it
+   every question about a context repo.
 5. Keep the Agents table in `AGENTS.md` accurate. Pass the user's chosen model to
    workers; Codex workers use Luna (`gpt-6-luna`).
 6. Repos: promote a context repo with `~/.config/tmux/scripts/task-sessionizer.sh promote <task> <repo>`;
@@ -167,6 +169,6 @@ A report's `handoff` is what the next session on that agent reads first.
 - Do not broaden an agent's permissions. Worker git access stays on its canonical `.git`.
 - Do not run deployment, installation, sudo, merge or push until the agent has
   delivered reviewable results and you have inspected the plan and dry run.
-- Do not tell a worker to read a context repo or anything under `research/`; route it through the researcher.
+- Do not tell a worker to read a context repo or anything under `research/`, except the one answer file its hook's `Answer:` or `After:` line names; route everything else through the researcher.
 - Never add Co-Authored-By or other AI attribution trailers to commits or PRs, including
   commits you make and any you ask an agent to make.

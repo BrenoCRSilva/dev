@@ -74,6 +74,8 @@ check "$dry" 'Decisions' 'restart kickoff re-asks open decisions'
 check "$dry" 'digest' 'restart kickoff reads the dispatcher digest'
 check "$dry" 'wake-wait' 'restart kickoff restarts wake-wait'
 check "$dry" 'task-dispatch.py\ run' 'restart kickoff reruns run' # the dry run prints the argv escaped
+check "$dry" 'TASK_ROLE=orchestrator' 'restart kickoff sets the orchestrator role for run'
+check "$dry" 'TASK_JEV_LIVE=1' 'restart kickoff opts run into live jev'
 for old in watch status.log queue; do
     [[ "$dry" != *"$old"* ]] || fail "restart kickoff must not mention $old"
 done
