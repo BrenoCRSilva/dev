@@ -480,6 +480,29 @@ def scenario_answer_missing(tmp):
     check("no answer: continue resolves the wake", resolved.returncode == 0, resolved.stdout + resolved.stderr)
     check("no answer: continue closes the question and releases the successor",
           done and db(root, "SELECT qid, status, answer_path FROM questions") == [("1", "closed", None)], db(root, "SELECT qid, status FROM questions"))
+    hook = (root / "hooks" / f"{WORKER}.md").read_text(encoding="utf-8")
+    check("no answer: the successor's hook says the question closed", "Answer: none (question 1 closed: continue)" in hook.splitlines(), hook)
+
+
+def scenario_question_cancel(tmp):
+    """Cancelling a researcher node that stopped with no answer closes its question with the note, and its successor is
+    released with an Answer: none line naming the closing note."""
+    root, fake, env = plan_root(tmp, "question-cancel", [("a", WORKER, [], False), ("b", WORKER, ["a"], False)])
+    v1.set_agent(fake, WORKER, [turn_for(root, "a", questions=[{"text": "which path?", "blocking": True}]), turn_for(root, "b")])
+    v1.set_agent(fake, "researcher", [turn_for(root, "q1", agent="researcher", files=["research/answers/1.md"])])
+    proc = daemon(env, root)
+    woke = cli(env, root, "wake-wait", timeout=60).stdout
+    wake_id = woke.split()[1] if woke.startswith("wake ") else "0"
+    cancelled = cli(env, root, "resolve", wake_id, "cancel", "--note", "not needed")
+    done = wait_for(lambda: poll_rows(root, "SELECT route FROM nodes WHERE id = 'b'") == [("continue",)])
+    stop(proc)
+    check("cancel: the researcher node is cancelled", cancelled.returncode == 0 and db(root, "SELECT status FROM nodes WHERE id = 'q1'") == [("cancelled",)],
+          cancelled.stdout + cancelled.stderr)
+    check("cancel: the question is closed with the note", db(root, "SELECT qid, status, note FROM questions")
+          == [("1", "closed", "cancelled: not needed")], db(root, "SELECT qid, status, note FROM questions"))
+    check("cancel: the successor is released", done, db(root, "SELECT id, status FROM nodes"))
+    hook = (root / "hooks" / f"{WORKER}.md").read_text(encoding="utf-8")
+    check("cancel: the successor's hook names the closing note", "Answer: none (question 1 closed: cancelled: not needed)" in hook.splitlines(), hook)
 
 
 def scenario_question_settle(tmp):
@@ -574,6 +597,9 @@ def scenario_lock_scope(tmp):
     regexes = dispatch.scope_regexes(["docs/", "src/*.py"])
     check("scope: a plain dir covers its files", any(r.match("docs/a.md") for r in regexes))
     check("scope: a glob covers its matches only", any(r.match("src/a.py") for r in regexes) and not any(r.match("lib/x.py") for r in regexes))
+    deep = dispatch.scope_regexes(["src/**"])
+    check("scope: a final ** covers any depth", any(r.match("src/a/b/c.py") for r in deep) and not any(r.match("lib/a.py") for r in deep))
+    check("scope: a single * stays in one folder", not any(r.match("src/a/b.py") for r in dispatch.scope_regexes(["src/*.py"])))
     check("herdr: the last JSON line of stderr is the reply", dispatch._reply('log line\n{"error": {"code": "x"}}\n') == {"error": {"code": "x"}})
 
 
@@ -936,6 +962,7 @@ def main():
         scenario_question_stop(tmp)
         scenario_answer(tmp)
         scenario_answer_missing(tmp)
+        scenario_question_cancel(tmp)
         scenario_question_settle(tmp)
         scenario_reserved_id(tmp)
         scenario_safety(tmp)

@@ -512,7 +512,7 @@ def take_lock(root):
 
 def hook_text(root, nodes, node, attempt, handoff=None, answers=()):
     """The pointer-sized hook for a node's attempt: spec, report, scope, contracts and the reports it depends on. handoff
-    is the report path to point at, not its text. answers are the answer files of the blocking questions it waits on."""
+    is the report path to point at, not its text. answers are the Answer: values of the blocking questions it waits on (a file, or none when closed)."""
     lines = [
         f"# {node.id} (attempt {attempt})",
         f"Spec: {root / node.spec}" if node.spec else "Spec: none",
@@ -900,7 +900,7 @@ def launch(conn, root, nodes, node_id, results):
         return
     attempt = task_state.install(conn, node_id, node.budget)
     handoff = handoff_of(conn, root, node)
-    answers = task_state.answer_paths_for(conn, [dep for dep in node.after if not dep.startswith("q:")])
+    answers = task_state.answers_for(conn, [dep for dep in node.after if not dep.startswith("q:")])
     # The node is running before anything can fail, so a failed start routes it failed.
     prompt_at = time.time()
     worktree = worktree_of(root, node.agent)

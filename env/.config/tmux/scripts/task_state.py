@@ -73,6 +73,10 @@ MIGRATIONS = {
         """ALTER TABLE questions ADD COLUMN attempt INTEGER""",
         """ALTER TABLE questions ADD COLUMN scope_change INTEGER NOT NULL DEFAULT 0""",
     ],
+    9: [
+        # Why a question closed without an answer (the resolution, and the note given): the Answer: line of its dependents.
+        """ALTER TABLE questions ADD COLUMN note TEXT""",
+    ],
 }
 PLAN_RULE = "plan-invalid"
 
@@ -167,15 +171,16 @@ def researcher_qid(node_id):
     return match[1] if match else None
 
 
-def answer_paths_for(conn, deps):
-    """The answer files of the answered blocking questions that the plan nodes deps asked, in qid order."""
+def answers_for(conn, deps):
+    """The Answer: values of the blocking questions that the plan nodes deps asked, in qid order: the answer file of an
+    answered question, or none with its closing note. An open question is not listed: its dependents still wait."""
     if not deps:
         return []
     rows = conn.execute(
-        f"SELECT qid FROM questions WHERE blocking = 1 AND status = 'answered' AND node IN ({', '.join('?' * len(deps))}) "
+        f"SELECT qid, status, note FROM questions WHERE blocking = 1 AND status IN ('answered', 'closed') AND node IN ({', '.join('?' * len(deps))}) "
         "ORDER BY CAST(qid AS INTEGER)", deps,
     ).fetchall()
-    return [answer_path(row["qid"]) for row in rows]
+    return [answer_path(row["qid"]) if row["status"] == "answered" else f"none (question {row['qid']} closed: {row['note']})" for row in rows]
 
 
 def snapshot(conn):
@@ -435,12 +440,12 @@ def resolve(conn, wake_id, resolution, root, release=False, note=""):
             raise TransitionError(f"wake {wake_id} is already resolved")
         detail = f"wake {wake_id}: {resolution}" + (" (release)" if release else "") + (f": {note}" if note else "")
         if row["rule"] == "question" and resolution in ("ack", "continue"):
-            _settle_question(conn, json.loads(row["pointers"])["qid"], root)
+            _settle_question(conn, json.loads(row["pointers"])["qid"], root, f"{resolution}{': ' + note if note else ''}")
         elif resolution != "ack":
             if not row["node"] or row["rule"] in INFO_RULES:
                 raise TransitionError(f"wake {wake_id} ({row['rule']}) is informational: resolve it with ack")
             _mark_outcome(conn, row["node"], f"resolved:{resolution}")  # before _apply: a retry starts a new attempt
-            _apply(conn, row["node"], row["rule"], resolution, release, root)
+            _apply(conn, row["node"], row["rule"], resolution, release, root, note)
             if resolution != "continue":
                 closed = conn.execute(
                     "UPDATE wakes SET resolved_at = ?, resolution = ? WHERE node = ? AND id != ? AND rule != 'checkpoint' AND resolved_at IS NULL",
@@ -451,16 +456,20 @@ def resolve(conn, wake_id, resolution, root, release=False, note=""):
         _event(conn, row["node"], "resolve", detail)
 
 
-def _settle_question(conn, qid, root):
-    """Answers the question when its answer file exists under root, else closes it. Either way it no longer holds the
-    nodes that wait on it. Only an open question changes."""
+def _settle_question(conn, qid, root, note=""):
+    """Answers the question when its answer file exists under root, else closes it with the note. Either way it no longer
+    holds the nodes that wait on it. Only an open question changes."""
     if (Path(root) / answer_path(qid)).exists():
         conn.execute("UPDATE questions SET status = 'answered', answer_path = ? WHERE qid = ? AND status = 'open'", (answer_path(qid), qid))
     else:
-        conn.execute("UPDATE questions SET status = 'closed' WHERE qid = ? AND status = 'open'", (qid,))
+        close_question(conn, qid, note)
 
 
-def _apply(conn, node_id, rule, resolution, release, root):
+def close_question(conn, qid, note):
+    conn.execute("UPDATE questions SET status = 'closed', note = ? WHERE qid = ? AND status = 'open'", (note, qid))
+
+
+def _apply(conn, node_id, rule, resolution, release, root, note=""):
     row = _row(conn, node_id)
     status = row["status"]
     if resolution == "continue":
@@ -491,8 +500,10 @@ def _apply(conn, node_id, rule, resolution, release, root):
             raise TransitionError(f"{node_id} is done, so it cannot be cancelled")
         conn.execute("UPDATE nodes SET status = 'cancelled', route = 'cancelled' WHERE id = ?", (node_id,))
     qid = researcher_qid(node_id)
-    if qid and (resolution == "continue" or (resolution == "skip" and release)):
-        _settle_question(conn, qid, root)
+    if qid and resolution == "cancel":
+        close_question(conn, qid, f"cancelled{': ' + note if note else ''}")
+    elif qid and (resolution == "continue" or (resolution == "skip" and release)):
+        _settle_question(conn, qid, root, f"{resolution}{': ' + note if note else ''}")
 
 
 def fail_internal(conn, node_id, error):
