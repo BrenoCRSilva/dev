@@ -266,14 +266,16 @@ def code_route(formula, report):
 
 
 def glob_regex(pattern):
-    """'**/' matches any folders or none; a final '**' matches any depth below; '*' and '?' stay within one name."""
+    """'**' is any depth only as a whole segment: '**/' matches any folders or none, a final '/**' any depth below. In
+    other places '**' is one '*'; '*' and '?' stay within one name."""
     out = []
     i = 0
     while i < len(pattern):
-        if pattern.startswith("**/", i):
+        whole = (i == 0 or pattern[i - 1] == "/") and pattern.startswith("**", i) and pattern[i + 2:i + 3] in ("", "/")
+        if whole and pattern.startswith("**/", i):
             out.append("(?:.*/)?")
             i += 3
-        elif pattern.startswith("**", i):
+        elif whole:
             out.append(".*")
             i += 2
         elif pattern[i] == "*":

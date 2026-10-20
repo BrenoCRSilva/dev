@@ -31,8 +31,13 @@ case "$*" in
         fi ;;
     "agent read worker-dotfiles --source visible")
         case "$pending" in
-            background|background-stuck) echo "Background work is running. Exit anyway?" ;;
-            compact) echo "We recommend compacting earlier. Keep auto / Compact now" ;;
+            background|background-stuck) printf 'Background work is running. Exit anyway?\n❯ 1. Exit and stop tasks\n  2. Keep running\n' ;;
+            compact) printf 'We recommend compacting earlier.\n  1. Keep auto\n❯ 2. Compact now\n' ;;
+            text)
+                # The same words in normal output, far above the prompt: no option lines in the bottom lines, no keys.
+                echo "We recommend compacting earlier. Keep auto / Compact now"
+                for i in $(seq 1 14); do echo "output line $i"; done
+                echo "> " ;;
             *) echo "> " ;;
         esac ;;
     "agent send-keys worker-dotfiles enter")
@@ -83,6 +88,11 @@ run_stop compact idle
 check "$out" 'stopped worker-dotfiles' 'autocompact: stopped'
 [[ $(count 'agent send-keys worker-dotfiles up enter') -eq 1 ]] || fail "autocompact: Keep auto (up, enter) must be sent once"
 [[ $(count 'agent prompt worker-dotfiles /exit') -eq 2 ]] || fail "autocompact: /exit must be retried once after Keep auto"
+# --- the same words in normal output above a prompt: no keys, the stop gives up -------------
+run_stop text idle
+[[ $code -eq 1 ]] || fail "text above a prompt: exited $code, expected 1: $out"
+[[ $(count 'agent send-keys worker-dotfiles up enter') -eq 0 ]] || fail "text above a prompt: Keep auto keys sent"
+[[ $(count 'agent send-keys worker-dotfiles enter') -eq 0 ]] || fail "text above a prompt: Enter sent"
 
 # --- a confirm that never clears: bounded, Enter once, reported ---------------
 run_stop background-stuck idle

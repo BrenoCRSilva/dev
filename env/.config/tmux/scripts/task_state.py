@@ -385,7 +385,9 @@ def add_questions(conn, node_id, attempt, questions):
         _row(conn, node_id)
         for question in questions:
             text = str(question.get("text", ""))[:500]
-            if conn.execute("SELECT 1 FROM questions WHERE node = ? AND attempt = ? AND text = ?", (node_id, attempt, text)).fetchone():
+            # One question per node and text while the earlier one is open, across attempts; a re-run of its report adds nothing.
+            if conn.execute("SELECT 1 FROM questions WHERE node = ? AND text = ? AND (attempt = ? OR status = 'open')",
+                            (node_id, text, attempt)).fetchone():
                 continue
             qid = str(conn.execute("SELECT COALESCE(MAX(CAST(qid AS INTEGER)), 0) + 1 FROM questions").fetchone()[0])
             scope_change = bool(question.get("scope_change"))
@@ -405,7 +407,7 @@ def node_questions(conn):
     """The questions that get a researcher node (no scope_change): qid, asking node and its agent, text, blocking."""
     return conn.execute(
         "SELECT q.qid, q.node, n.agent, q.text, q.blocking FROM questions q JOIN nodes n ON n.id = q.node "
-        "WHERE q.scope_change = 0 ORDER BY CAST(q.qid AS INTEGER)"
+        "WHERE q.scope_change = 0 AND q.status NOT IN ('answered', 'closed') AND q.attempt IS NOT NULL ORDER BY CAST(q.qid AS INTEGER)"
     ).fetchall()
 
 

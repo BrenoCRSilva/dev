@@ -93,7 +93,8 @@ herdr_cmd() {
 # "Keep auto" (up, enter) followed by a second /exit. Failures return 1 rather
 # than exit, because finish_restart calls this and must log its own line.
 stop_agent() {
-    local dry=$1 name=${2:-} arg info state pane screen force=no enter_sent=no keep_sent=no
+    local dry=$1 name=${2:-} arg info state pane screen bottom keep mark n force=no enter_sent=no keep_sent=no
+    local -a keys=()
     [[ -n "$name" ]] || usage
     for arg in "${@:3}"; do
         [[ "$arg" == --force ]] || usage
@@ -115,13 +116,24 @@ stop_agent() {
     for _ in $(seq 1 40); do
         herdr_cmd agent get "$name" >/dev/null 2>&1 || { printf 'stopped %s\n' "$name"; return 0; }
         screen=$(herdr_cmd agent read "$name" --source visible 2>/dev/null) || screen=
-        if [[ $enter_sent == no && "$screen" == *"Background work is running"* ]]; then
+        # A dialog counts only in the last 12 lines and with its option lines, so the same text in normal output above a
+        # prompt sends no keys.
+        bottom=$(tail -n 12 <<< "$screen")
+        if [[ $enter_sent == no && "$bottom" == *"Background work is running"* && "$bottom" == *"Exit and stop tasks"* ]]; then
             herdr_cmd agent send-keys "$name" enter >/dev/null
             enter_sent=yes
-        elif [[ $keep_sent == no && "$screen" == *"compacting earlier"* ]]; then
-            herdr_cmd agent send-keys "$name" up enter >/dev/null
-            herdr_cmd agent prompt "$name" /exit >/dev/null
-            keep_sent=yes
+        elif [[ $keep_sent == no && "$bottom" == *"compacting earlier"* && "$bottom" == *"Keep auto"* ]]; then
+            # Keep auto is picked by moving the marker (❯) onto its row, not by a fixed Up; no marker, no keys.
+            keep=$(grep -n "Keep auto" <<< "$bottom" | head -n 1 | cut -d: -f1)
+            mark=$(grep -n "❯" <<< "$bottom" | head -n 1 | cut -d: -f1)
+            if [[ -n "$mark" ]]; then
+                keys=()
+                for (( n = mark; n > keep; n-- )); do keys+=(up); done
+                for (( n = mark; n < keep; n++ )); do keys+=(down); done
+                herdr_cmd agent send-keys "$name" "${keys[@]}" enter >/dev/null
+                herdr_cmd agent prompt "$name" /exit >/dev/null
+                keep_sent=yes
+            fi
         fi
         sleep 0.5
     done

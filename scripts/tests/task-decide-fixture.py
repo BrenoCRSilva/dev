@@ -536,6 +536,16 @@ def check_probe(tmp, home):
     write_key(home, KEY_LINE)
 
 
+def check_glob():
+    """`**` is any depth only as a whole segment; inside a name it is one `*`."""
+    expect("glob: a/** matches below a", bool(DD.glob_regex("a/**").match("a/x/y")), True)
+    expect("glob: a/** does not match a2", bool(DD.glob_regex("a/**").match("a2")), False)
+    expect("glob: a** stays one segment", bool(DD.glob_regex("a**").match("a/b")), False)
+    expect("glob: a** matches within a name", bool(DD.glob_regex("a**").match("ab")), True)
+    expect("glob: a**/b stays one segment", bool(DD.glob_regex("a**/b").match("ax/y/b")), False)
+    expect("glob: **/x.md matches any depth", bool(DD.glob_regex("**/x.md").match("d/e/x.md")), True)
+
+
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="task-decide-"))
     try:
@@ -565,6 +575,7 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         SERVER.shutdown()
+    check_glob()
     print("PASS: all task-decide and jev-probe checks")
 
 

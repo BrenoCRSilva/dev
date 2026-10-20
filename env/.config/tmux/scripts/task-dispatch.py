@@ -126,12 +126,13 @@ def _reply(text):
     return None
 
 
-def herdr(*args):
-    """Runs `herdr agent <args>` and returns its result. herdr writes an error reply to stderr with stdout empty."""
+def herdr(*args, group="agent"):
+    """Runs `herdr <group> <args>` (agent by default) and returns its result. herdr writes an error reply to stderr with
+    stdout empty."""
     cmd = ["herdr"]
     if os.environ.get("TASK_SESSION"):
         cmd += ["--session", os.environ["TASK_SESSION"]]
-    proc = subprocess.run([*cmd, "agent", *args], capture_output=True, text=True)
+    proc = subprocess.run([*cmd, group, *args], capture_output=True, text=True)
     reply = _reply(proc.stdout)
     if reply is None:
         reply = _reply(proc.stderr)
@@ -175,6 +176,24 @@ def relaunch(root, agent):
         _relaunch(root, agent)
     except Herdr as error:
         raise Launch(f"{agent} fresh start: {error}") from error
+
+
+def ensure_researcher(root):
+    """The researcher is started on demand: with no researcher agent, task-agent.sh starts it in the pane whose folder is
+    <root>/research. With no such pane, the node fails and the line says how to start it."""
+    try:
+        herdr("get", "researcher")
+        return
+    except Herdr:
+        pass  # absent (agent_not_found); a herdr failure shows again in the pane list
+    folder = str(root / "research")
+    panes = [pane for pane in herdr("list", group="pane")["panes"] if pane.get("cwd") == folder]
+    if not panes:
+        raise Launch(f"researcher is not running and no pane is in {folder}; start it with task-agent.sh start researcher "
+                     f"<pane_id> from a pane in that folder")
+    task_agent("start", "researcher", panes[0]["pane_id"])
+    if wait_status("researcher", "idle", LAUNCH_WAIT_MS) != "idle":
+        raise Launch(f"researcher is not idle {LAUNCH_WAIT_MS // 1000} s after its start")
 
 
 def _relaunch(root, agent):
@@ -737,6 +756,8 @@ def prompt_lane(results, root, nodes, node, attempt, prompt_at, handoff=None, an
     try:
         (root / "hooks").mkdir(exist_ok=True)
         (root / "hooks" / f"{node.agent}.md").write_text(hook_text(root, nodes, node, attempt, handoff, answers), encoding="utf-8")
+        if node.agent == "researcher":
+            ensure_researcher(root)
         if node.session == "fresh":
             relaunch(root, node.agent)
         herdr("prompt", node.agent, f"Read {root}/hooks/{node.agent}.md and follow it. End with the SUMMARY block.")
@@ -771,12 +792,14 @@ def with_questions(conn, root, nodes):
         text = (f"# {node_id}: answer a question from {row['node']}\n\n"
                 f"Asked{' as blocking' if row['blocking'] else ''} in reports/{row['agent']}/{row['node']}.json:\n\n"
                 f"> {' '.join(row['text'].split())}\n\n"
-                f"Write the answer to research/answers/{row['qid']}.md, then your report to reports/researcher/{node_id}.json.\n")
+                f"Write the answer to research/answers/{row['qid']}.md. Its report lists that file in files_changed as "
+                f"answers/{row['qid']}.md (paths there are relative to research/), then writes reports/researcher/{node_id}.json.\n")
         if not (root / spec).exists():
             (root / "specs").mkdir(exist_ok=True)
             (root / spec).write_text(text, encoding="utf-8")
+        answer = f"answers/{row['qid']}.md"  # the schema-relative form; answer_path is the worktree form
         generated[node_id] = task_plan.Node(
-            id=node_id, agent="researcher", spec=spec, after=[], scope=[task_state.answer_path(row["qid"])], contracts=[], checkpoint=False,
+            id=node_id, agent="researcher", spec=spec, after=[], scope=[task_state.answer_path(row["qid"]), answer], contracts=[], checkpoint=False,
             review=task_plan.DEFAULTS["review"], session=task_plan.DEFAULTS["session"],
             budget=dict(task_plan.DEFAULTS["budget"]), plan_hash=hashlib.sha256(text.encode()).hexdigest())
     return {**nodes, **generated}
