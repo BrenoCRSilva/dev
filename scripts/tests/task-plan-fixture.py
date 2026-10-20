@@ -164,7 +164,8 @@ def scenario_ready():
     nodes = task_plan.load_plan(root)
 
     def state(rows, answered=()):
-        return {"nodes": {k: {"agent": v[0], "status": v[1], "route": v[2]} for k, v in rows.items()}, "answered": set(answered)}
+        return {"nodes": {k: {"agent": v[0], "status": v[1], "route": v[2]} for k, v in rows.items()}, "answered": set(answered),
+                "blocking": {}}
 
     pending = {"a": ("worker-dotfiles", "pending", None), "b": ("worker-dotfiles", "pending", None),
                "r": ("researcher", "pending", None), "c": ("orchestrator", "pending", None)}
@@ -178,6 +179,13 @@ def scenario_ready():
     done_a = {**pending, "a": ("worker-dotfiles", "done", "continue"), "r": ("researcher", "running", None)}
     check("ready: a continue route releases dependents and the agent's next node",
           task_plan.ready(nodes, state(done_a)) == ["b"], task_plan.ready(nodes, state(done_a)))
+    dependent = {"d": task_plan.Node(id="d", agent="other", spec=None, after=["a"], scope=[], contracts=[], checkpoint=False,
+                                     review="judge", session="fresh", budget={}, plan_hash="")}
+    dep_rows = {**state(done_a)["nodes"], "d": {"agent": "other", "status": "pending", "route": None}}
+    check("ready: a dependent of a continued node is ready", task_plan.ready(dependent, {**state(done_a), "nodes": dep_rows}) == ["d"])
+    blocked = {**state(done_a), "nodes": dep_rows, "blocking": {"a": ["1"]}}
+    check("ready: an open blocking question holds the dependents of its node", task_plan.ready(dependent, blocked) == [],
+          task_plan.ready(dependent, blocked))
 
     checkpoint_ready = task_plan.ready(nodes, state({**done_a, "a": ("worker-dotfiles", "done", "continue")}, ["7"]))
     check("ready: an answered q: releases the checkpoint", checkpoint_ready == ["b", "c"], checkpoint_ready)
@@ -455,7 +463,7 @@ def scenario_schema():
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
     conn.close()
-    check("migrations apply once, in order", versions == [1, 2, 3, 4, 5, 6, 7], versions)
+    check("migrations apply once, in order", versions == [1, 2, 3, 4, 5, 6, 7, 8], versions)
     check("schema has the §3 tables", {"nodes", "attempts", "events", "wakes", "judgements", "questions"} <= tables, tables)
     check("state.db is in WAL mode", mode == "wal", mode)
 

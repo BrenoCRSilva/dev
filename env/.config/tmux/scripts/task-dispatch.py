@@ -101,7 +101,6 @@ INTERNAL = 22
 CHECKS_FAILED = 24
 BUDGET = 25
 STALE = 26
-QUESTION = 27
 LAUNCH = 28
 KEYWORD = 29  # a bare safety keyword: Opus decides, not the user
 LAUNCHED = "launched"  # a message from the launch thread, not an exit code
@@ -109,7 +108,7 @@ LOCKED = 23
 JEV_ESCALATE = 30  # route mode: jev's gate failed, so Opus decides with jev's answers in the wake
 DAEMON_STOPPED = 1
 ASK_USER = 11
-STOP_NAMES = {NEEDS_DECISION: "needs_decision", OUT_OF_SCOPE: "out_of_scope", CHECKS_FAILED: "checks", BUDGET: "budget", 10: "escalate", ASK_USER: "ask_user", 20: "decision_unavailable", QUESTION: "question", KEYWORD: "keyword-safety", JEV_ESCALATE: "jev-escalate"}
+STOP_NAMES = {NEEDS_DECISION: "needs_decision", OUT_OF_SCOPE: "out_of_scope", CHECKS_FAILED: "checks", BUDGET: "budget", 10: "escalate", ASK_USER: "ask_user", 20: "decision_unavailable", KEYWORD: "keyword-safety", JEV_ESCALATE: "jev-escalate"}
 FAIL_NAMES = {BLOCKED: "blocked", NOT_STARTED: "not_started", TIMED_OUT: "timed_out", HERDR: "herdr", INTERNAL: "internal", NO_REPORT: "no_report", STALE: "stale_report", LAUNCH: "launch"}
 V2_COMMANDS = ("run", "wake-wait", "status", "wakes", "resolve", "pause", "resume", "digest")
 TICK_S = 1
@@ -760,13 +759,10 @@ def over_budget(data, budget):
 
 
 def blocker(data, scope):
-    """The first T0 stop that sends the report back to Opus, as (exit code, one line), or None: needs_decision, a blocking
-    question, checks not all exit 0, a changed path outside scope."""
+    """The first T0 stop that sends the report back to Opus, as (exit code, one line), or None: needs_decision, checks not
+    all exit 0, a changed path outside scope. A question does not stop: it becomes a researcher node (finish)."""
     if data.get("needs_decision"):
         return NEEDS_DECISION, f"needs_decision is set: {str(data['needs_decision'])[:200]}"
-    blocking = [str(q.get("text", ""))[:200] for q in data.get("questions", []) if q.get("blocking")]
-    if blocking:
-        return QUESTION, f"blocking question: {blocking[0]}"
     failed = [check.get("cmd", "?") for check in data.get("checks", []) if check.get("exit") != 0]
     if failed:
         return CHECKS_FAILED, f"checks not all exit 0: {', '.join(failed)}"[:300]
@@ -779,8 +775,8 @@ def blocker(data, scope):
 
 
 def evaluate(root, agent, node, scope, budget, plan):
-    """T0 rules, free and first: the safety tiers, then needs_decision, blocking questions, checks exit 0, files within
-    scope, context and turns within budget. A user-tier safety hit wins over every other stop, and names it. Then jev
+    """T0 rules, free and first: the safety tiers, then needs_decision, checks exit 0, files within scope, context and
+    turns within budget. A user-tier safety hit wins over every other stop, and names it. Then jev
     (T1, after T0 passes or on a keyword-safety stop), then the report check and task-decide (v1). Returns (exit code,
     one line, judgement or None); 0 means continue."""
     report = report_path(root, agent, node)
@@ -857,11 +853,14 @@ def finish(conn, root, node, code, line, plan, judged=None):
         return stop_node(conn, node, "failed", "no_report", f"no readable report for {node}")
     if not task_state.settle(conn, node, str(report.relative_to(root)), mtime, data.get("head_sha")):
         return stop_node(conn, node, "failed", "stale_report", f"report for {node} was written before its prompt")
+    asked = task_state.add_questions(conn, node, snapshot["attempt"], data.get("questions") or [])
     if code == 0:
         task_state.route(conn, node, "continue")
         if node in plan and plan[node].review == "opus":
             task_state.wake(conn, node, "opus", "review", "review=opus: check this step before relying on it", pointers)
         return None
+    if asked:
+        line = f"{line}; questions {', '.join(f'q{qid}' for qid in asked)}"
     return stop_node(conn, node, "stopped", STOP_NAMES.get(code, "decide"), line, "user" if code == ASK_USER else "opus", pointers)
 
 
@@ -933,7 +932,28 @@ def load_nodes(conn, root):
         task_state.plan_invalid(conn, error.errors[0])
         return None
     task_state.plan_valid(conn)
-    return nodes
+    return with_questions(conn, root, nodes)
+
+
+def with_questions(conn, root, nodes):
+    """The plan's nodes plus a researcher node q<qid> for each question without scope_change. The node and its spec come
+    from the question row, so a restart rebuilds both the same way and reconcile keeps the node."""
+    generated = {}
+    for row in task_state.node_questions(conn):
+        node_id = f"q{row['qid']}"
+        spec = f"specs/{node_id}.md"
+        text = (f"# {node_id}: answer a question from {row['node']}\n\n"
+                f"Asked{' as blocking' if row['blocking'] else ''} in reports/{row['agent']}/{row['node']}.json:\n\n"
+                f"> {' '.join(row['text'].split())}\n\n"
+                f"Write the answer to research/answers/{row['qid']}.md, then your report to reports/researcher/{node_id}.json.\n")
+        if not (root / spec).exists():
+            (root / "specs").mkdir(exist_ok=True)
+            (root / spec).write_text(text, encoding="utf-8")
+        generated[node_id] = task_plan.Node(
+            id=node_id, agent="researcher", spec=spec, after=[], scope=["research/**"], contracts=[], checkpoint=False,
+            review=task_plan.DEFAULTS["review"], session=task_plan.DEFAULTS["session"],
+            budget=dict(task_plan.DEFAULTS["budget"]), plan_hash=hashlib.sha256(text.encode()).hexdigest())
+    return {**nodes, **generated}
 
 
 def daemon(root, start_ms, turn_ms):
@@ -1202,7 +1222,7 @@ def plan_main(argv):
     try:
         conn = task_state.connect(args.task_root)
         try:
-            counts = task_state.reconcile(conn, nodes)
+            counts = task_state.reconcile(conn, with_questions(conn, args.task_root, nodes))
         finally:
             conn.close()
     except (sqlite3.Error, task_state.TransitionError) as error:

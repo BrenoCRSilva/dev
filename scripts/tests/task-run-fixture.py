@@ -380,14 +380,57 @@ def scenario_review(tmp):
     stop(proc)
 
 
+def poll_rows(root, sql):
+    """db() for a poll: None until the daemon has created state.db and its tables."""
+    try:
+        return db(root, sql)
+    except sqlite3.OperationalError:
+        return None
+
+
 def scenario_question(tmp):
-    root, fake, env = plan_root(tmp, "question", [("q1", WORKER, [], False)])
-    v1.set_agent(fake, WORKER, [turn_for(root, "q1", questions=[{"text": "which path?", "blocking": True}])])
+    """A done report: its blocking and non-blocking questions become rows and researcher nodes; the node continues and
+    only its successor waits on the blocking one."""
+    root, fake, env = plan_root(tmp, "question", [("a", WORKER, [], False), ("b", WORKER, ["a"], False)])
+    v1.set_agent(fake, WORKER, [turn_for(root, "a", questions=[{"text": "which path?", "blocking": True},
+                                                              {"text": "which tests?", "blocking": False}])])
+    proc = daemon(env, root)
+    continued = wait_for(lambda: poll_rows(root, "SELECT route FROM nodes WHERE id = 'a'") == [("continue",)])
+    generated = wait_for(lambda: poll_rows(root, "SELECT id, agent FROM nodes WHERE id LIKE 'q%' ORDER BY id") == [("q1", "researcher"), ("q2", "researcher")])
+    stop(proc)
+    check("question: the asking node continues", continued, db(root, "SELECT route FROM nodes WHERE id = 'a'"))
+    check("question: two rows, numbered, blocking kept", db(root, "SELECT qid, node, blocking, status, scope_change FROM questions "
+          "ORDER BY CAST(qid AS INTEGER)") == [("1", "a", 1, "open", 0), ("2", "a", 0, "open", 0)])
+    check("question: each becomes a researcher node", generated, db(root, "SELECT id, agent FROM nodes WHERE id LIKE 'q%'"))
+    check("question: the spec quotes the question", "which path?" in (root / "specs" / "q1.md").read_text(encoding="utf-8"))
+    check("question: the successor waits on the open blocking question", db(root, "SELECT status FROM nodes WHERE id = 'b'") == [("pending",)])
+
+
+def scenario_question_scope(tmp):
+    """A scope_change question raises an Opus wake and creates no researcher node; the node still continues."""
+    root, fake, env = plan_root(tmp, "question-scope", [("a", WORKER, [], False), ("b", WORKER, ["a"], False)])
+    v1.set_agent(fake, WORKER, [turn_for(root, "a", questions=[{"text": "may the scope grow?", "blocking": True, "scope_change": True}])])
     proc = daemon(env, root)
     woke = cli(env, root, "wake-wait", timeout=60).stdout
-    check("question: a blocking question in the report stops the node for Opus", woke.startswith("wake ") and " opus q1 question: blocking question: which path?" in woke, woke)
-    check("question: routed stopped:question", db(root, "SELECT route FROM nodes WHERE id = 'q1'") == [("stopped:question",)])
+    continued = wait_for(lambda: poll_rows(root, "SELECT route FROM nodes WHERE id = 'a'") == [("continue",)])
     stop(proc)
+    check("scope change: wakes Opus with the question", woke.startswith("wake ") and " opus a question: scope change asked: q1: may the scope grow?" in woke, woke)
+    check("scope change: the asking node continues", continued, db(root, "SELECT route FROM nodes WHERE id = 'a'"))
+    check("scope change: no researcher node", db(root, "SELECT id FROM nodes WHERE id LIKE 'q%'") == [], db(root, "SELECT id FROM nodes"))
+    check("scope change: the blocking question keeps its successor waiting", db(root, "SELECT status FROM nodes WHERE id = 'b'") == [("pending",)])
+
+
+def scenario_question_stop(tmp):
+    """A report with needs_decision stops its node, but its questions are still recorded and named in the wake."""
+    root, fake, env = plan_root(tmp, "question-stop", [("a", WORKER, [], False)])
+    v1.set_agent(fake, WORKER, [turn_for(root, "a", needs="which branch?", questions=[{"text": "which path?", "blocking": False}])])
+    proc = daemon(env, root)
+    woke = cli(env, root, "wake-wait", timeout=60).stdout
+    stopped = wait_for(lambda: poll_rows(root, "SELECT route FROM nodes WHERE id = 'a'") == [("stopped:needs_decision",)])
+    stop(proc)
+    check("question stop: routed stopped:needs_decision", stopped, db(root, "SELECT route FROM nodes WHERE id = 'a'"))
+    check("question stop: the wake names the question", " opus a needs_decision: needs_decision is set: which branch?; questions q1" in woke, woke)
+    check("question stop: the question is recorded", db(root, "SELECT qid, status FROM questions") == [("1", "open")])
 
 
 def scenario_safety(tmp):
@@ -802,6 +845,8 @@ def main():
         scenario_info(tmp)
         scenario_review(tmp)
         scenario_question(tmp)
+        scenario_question_scope(tmp)
+        scenario_question_stop(tmp)
         scenario_safety(tmp)
         scenario_checks(tmp)
         scenario_internal(tmp)

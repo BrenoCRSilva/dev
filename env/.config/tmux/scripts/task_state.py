@@ -67,6 +67,11 @@ MIGRATIONS = {
         # The worktree HEAD when the attempt started: the base of its diffstat for jev (NULL before this migration).
         """ALTER TABLE attempts ADD COLUMN start_sha TEXT""",
     ],
+    8: [
+        # The attempt that asked a question (dedupes a re-run of its report) and whether it is a scope change (Opus, no node).
+        """ALTER TABLE questions ADD COLUMN attempt INTEGER""",
+        """ALTER TABLE questions ADD COLUMN scope_change INTEGER NOT NULL DEFAULT 0""",
+    ],
 }
 PLAN_RULE = "plan-invalid"
 
@@ -152,10 +157,14 @@ def start_sha_of(task_root, node_id):
 
 
 def snapshot(conn):
-    """The node rows by id and the answered q: question ids, as task_plan.ready() reads them."""
+    """The node rows by id, the answered q: question ids and the open blocking question ids by asking node, as
+    task_plan.ready() reads them."""
     rows = {row["id"]: dict(row) for row in conn.execute("SELECT * FROM nodes")}
     answered = {row["qid"] for row in conn.execute("SELECT qid FROM questions WHERE status = 'answered'")}
-    return {"nodes": rows, "answered": answered}
+    blocking = {}
+    for row in conn.execute("SELECT node, qid FROM questions WHERE status = 'open' AND blocking = 1"):
+        blocking.setdefault(row["node"], []).append(row["qid"])
+    return {"nodes": rows, "answered": answered, "blocking": blocking}
 
 
 def reconcile(conn, nodes):
@@ -334,9 +343,41 @@ def wake(conn, node_id, tier, rule, reason, pointers=None, options=None, audit=N
         return _wake(conn, node_id, tier, rule, reason, pointers, options, audit)
 
 
+def add_questions(conn, node_id, attempt, questions):
+    """Records a report's questions, once per attempt and text, numbered after the existing ones. A scope_change question
+    raises an Opus wake instead of a researcher node. Returns the qids recorded."""
+    qids = []
+    with transaction(conn):
+        _row(conn, node_id)
+        for question in questions:
+            text = str(question.get("text", ""))[:500]
+            if conn.execute("SELECT 1 FROM questions WHERE node = ? AND attempt = ? AND text = ?", (node_id, attempt, text)).fetchone():
+                continue
+            qid = str(conn.execute("SELECT COALESCE(MAX(CAST(qid AS INTEGER)), 0) + 1 FROM questions").fetchone()[0])
+            scope_change = bool(question.get("scope_change"))
+            conn.execute(
+                "INSERT INTO questions (qid, node, text, blocking, status, answer_path, attempt, scope_change) "
+                "VALUES (?, ?, ?, ?, 'open', NULL, ?, ?)",
+                (qid, node_id, text, int(bool(question.get("blocking"))), attempt, int(scope_change)),
+            )
+            _event(conn, node_id, "question", f"q{qid}: {text}"[:300])
+            if scope_change:
+                _wake(conn, node_id, "opus", "question", f"scope change asked: q{qid}: {text}"[:300])
+            qids.append(qid)
+    return qids
+
+
+def node_questions(conn):
+    """The questions that get a researcher node (no scope_change): qid, asking node and its agent, text, blocking."""
+    return conn.execute(
+        "SELECT q.qid, q.node, n.agent, q.text, q.blocking FROM questions q JOIN nodes n ON n.id = q.node "
+        "WHERE q.scope_change = 0 ORDER BY CAST(q.qid AS INTEGER)"
+    ).fetchall()
+
+
 RESOLUTIONS = ("continue", "retry", "skip", "cancel", "ack")
 # Wakes that report a change and need no node transition: only ack closes them.
-INFO_RULES = ("plan-changed", "removed-running", PLAN_RULE, "review")
+INFO_RULES = ("plan-changed", "removed-running", PLAN_RULE, "review", "question")
 
 
 def resolve(conn, wake_id, resolution, release=False, note=""):

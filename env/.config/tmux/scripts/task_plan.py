@@ -85,8 +85,9 @@ def ready(nodes, state):
     """Ids of the nodes that may install now, in file order.
 
     A node is ready when it is pending or ready, every after dep is routed continue (or its q: question is
-    answered), its agent has no running node, and no earlier ready node in this list is for that agent.
-    state is task_state.snapshot(): {"nodes": {id: row}, "answered": {qid}}.
+    answered) with no open blocking question of its own, its agent has no running node, and no earlier ready node
+    in this list is for that agent.
+    state is task_state.snapshot(): {"nodes": {id: row}, "answered": {qid}, "blocking": {node: [open qid]}}.
     """
     rows = state["nodes"]
     busy = {row["agent"] for row in rows.values() if row["status"] == "running"}
@@ -95,7 +96,9 @@ def ready(nodes, state):
         row = rows.get(node.id)
         if row is None or row["status"] not in ("pending", "ready") or node.agent in busy:
             continue
-        if all(_satisfied(dep, rows, state["answered"]) for dep in node.after):
+        if all(_satisfied(dep, rows, state["answered"]) for dep in node.after) and not any(
+            state["blocking"].get(dep) for dep in node.after
+        ):
             busy.add(node.agent)
             picked.append(node.id)
     return picked
