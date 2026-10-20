@@ -71,7 +71,12 @@ check "$dry" '--restarted' 'restart dry run types the fresh launch'
 check "$dry" 'fresh launch (dry run)' 'restart dry run shows the fresh launch'
 check "$dry" 'ENABLE_CLAUDEAI_MCP_SERVERS=false' 'fresh launch carries the orchestrator env'
 check "$dry" 'Decisions' 'restart kickoff re-asks open decisions'
-check "$dry" 'task-dispatch.py' 'restart kickoff re-runs watch for running workers'
+check "$dry" 'digest' 'restart kickoff reads the dispatcher digest'
+check "$dry" 'wake-wait' 'restart kickoff restarts wake-wait'
+check "$dry" 'task-dispatch.py\ run' 'restart kickoff reruns run' # the dry run prints the argv escaped
+for old in watch status.log queue; do
+    [[ "$dry" != *"$old"* ]] || fail "restart kickoff must not mention $old"
+done
 [[ "$dry" != *"--resume"* && "$dry" != *"--continue"* ]] || fail "restart launches fresh, never --resume"
 [[ ! -e "$FAKE_STATE/gone" && ! -e "$FAKE_STATE/ran" ]] || fail "dry run changed state"
 

@@ -74,6 +74,11 @@ implementation, repository reading/search, reviews, and tests to you.
   `python3 ~/.config/tmux/scripts/task-report.py check <path>` and fix every
   problem it prints. Your reports folder is the only place outside the worktree
   you write to; the hook file is read-only to you.
+- Optional `handoff`: up to 10 lines for the next session on this agent (layout,
+  quirks, failed attempts). The dispatcher points that session at it.
+- Optional `questions` (up to 10, each `text` and `blocking`): ask the researcher
+  through the report, not by reading context repos. Set `blocking` only when your
+  next work needs the answer; `scope_change` asks the orchestrator to decide.
 
 ## Work
 

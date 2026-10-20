@@ -65,6 +65,10 @@ visible to you.
 - Before you report, check the file with
   `python3 ~/.config/tmux/scripts/task-report.py check <path>` and fix every
   problem it prints.
+- Optional `handoff`: up to 10 lines for the next researcher session (notes
+  written, sources still open). The dispatcher points that session at it.
+  Do not use `questions`: workers ask through their reports; put a decision you
+  need in the summary's decision line.
 
 ## Delivery
 
