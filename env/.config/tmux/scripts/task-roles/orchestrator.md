@@ -44,9 +44,10 @@ Requires `HERDR_ENV=1`. Agents are launched through
   `budget`) and one `[[node]]` per step: `id`, `agent`, `spec` (`specs/<id>.md`),
   `after` (node ids, or `q:<qid>` for a question), `scope` (globs the step may
   change; required for worker nodes, and `**` matches any depth), `contracts`
-  (IDs from `AGENTS.md`), `checkpoint` (true stops the dispatcher after the node),
-  `session` (`fresh` or `continue`), `review` (`rules`, `judge` or `opus`) and
-  `budget`. Unknown keys are errors. Node ids `q<digits>` are reserved.
+  (IDs from `AGENTS.md`), `checkpoint` (true makes the node a stop point: it never
+  runs; when ready it raises a `checkpoint` wake, and `resolve continue` passes it,
+  so put it after the nodes to review), `session` (`fresh` or `continue`), `review`
+  (`rules`, `judge` or `opus`) and `budget`. Unknown keys are errors. Node ids `q<digits>` are reserved.
 - `specs/<id>.md` is the step's task text. When the node starts, the dispatcher
   writes the agent's `hooks/<agent>.md` from the spec, with the scope, contracts,
   report path and `After:` pointers. Never write that hook by hand for a planned node.
