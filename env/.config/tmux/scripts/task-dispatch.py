@@ -5,10 +5,10 @@
     task-dispatch.py wait <agent>... [--task-root <dir>]
     task-dispatch.py plan check|reconcile [--task-root <dir>]
 
-run, wake-wait, status, wakes, resolve <wake> continue|retry|skip|cancel [--note] [--release], pause|resume <agent|node>
-are the dispatcher commands (C7): run is the background daemon, which installs, starts and evaluates ready nodes
+run, wake-wait, status, wakes, resolve <wake> continue|retry|skip|cancel [--note] [--release], pause|resume <agent|node>,
+digest (the checkpoint packet, read-only) are the dispatcher commands (C7): run is the background daemon, which installs, starts and evaluates ready nodes
 and raises wakes. Its exit codes: 1 daemon stopped (wake-wait), 23 dispatch.lock held, 2 a refused resolve or pause.
-    task-dispatch.py run|status|wakes|wake-wait|resolve|pause|resume [--task-root <dir>]
+    task-dispatch.py run|status|wakes|wake-wait|resolve|pause|resume|digest [--task-root <dir>]
 
 plan check validates plan/dag.toml (C5) and prints `ok N nodes`, or one line per error and exit 2. plan
 reconcile applies the plan to state.db (C6) and prints the counts. Neither runs a step.
@@ -50,12 +50,14 @@ written after its prompt; the first step's prompt time is the hook's install tim
 herdr session. Stdlib only.
 """
 import argparse
+import collections
 import fcntl
 import hashlib
 import importlib.util
 import json
 import os
 import posixpath
+import random
 import re
 import shutil
 import signal
@@ -74,6 +76,7 @@ import task_plan  # noqa: E402 (sibling modules, found through the path above)
 import task_jev  # noqa: E402
 import task_state  # noqa: E402
 DECIDE = HERE / "task-decide.py"
+SPEND = HERE / "task-spend.py"
 REPORT_CHECK = HERE / "task-report.py"
 FORMULA = HERE / "task-roles" / "formulas" / "worker-step.toml"
 LOG_LINE = re.compile(r"(\S+) (\S+) route=(continue|checkpoint|stopped:\w+) step=(\S+)")
@@ -108,7 +111,7 @@ DAEMON_STOPPED = 1
 ASK_USER = 11
 STOP_NAMES = {NEEDS_DECISION: "needs_decision", OUT_OF_SCOPE: "out_of_scope", CHECKS_FAILED: "checks", BUDGET: "budget", 10: "escalate", ASK_USER: "ask_user", 20: "decision_unavailable", QUESTION: "question", KEYWORD: "keyword-safety", JEV_ESCALATE: "jev-escalate"}
 FAIL_NAMES = {BLOCKED: "blocked", NOT_STARTED: "not_started", TIMED_OUT: "timed_out", HERDR: "herdr", INTERNAL: "internal", NO_REPORT: "no_report", STALE: "stale_report", LAUNCH: "launch"}
-V2_COMMANDS = ("run", "wake-wait", "status", "wakes", "resolve", "pause", "resume")
+V2_COMMANDS = ("run", "wake-wait", "status", "wakes", "resolve", "pause", "resume", "digest")
 TICK_S = 1
 JEV_MODES = ("off", "shadow", "route")
 JEV_DEFAULT_THRESHOLD = 0.8  # shadow reporting only; route mode requires TASK_JEV_THRESHOLD
@@ -1044,12 +1047,98 @@ def status_main(root):
     return EMPTY
 
 
+DIGEST_NODES = 25  # the digest's node lines (the latest), so the packet stays near 40 lines
+
+
+def task_spend():
+    """task-spend as a module, so the digest prices the attempts with the CLI's own code, in process."""
+    spec = importlib.util.spec_from_file_location("task_spend", SPEND)
+    assert spec is not None and spec.loader is not None, SPEND
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def digest_main(root):
+    """The checkpoint packet (§6), read-only: the nodes that ended since the last passed checkpoint, their spend, two
+    audit picks, open wakes and questions, and jev's shadow agreement over the judged attempts with a final outcome."""
+    path = Path(root) / "state.db"
+    if not path.is_file():
+        print("digest: no state.db")
+        return EMPTY
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        checkpoints = {row["node"] for row in conn.execute("SELECT DISTINCT node FROM wakes WHERE rule = 'checkpoint'")}
+        last = conn.execute(
+            "SELECT node, resolved_at FROM wakes WHERE rule = 'checkpoint' AND resolved_at IS NOT NULL "
+            "ORDER BY resolved_at DESC LIMIT 1"
+        ).fetchone()
+        anchor = conn.execute(
+            "SELECT node FROM wakes WHERE rule = 'checkpoint' AND resolved_at IS NULL ORDER BY id LIMIT 1"
+        ).fetchone()
+        since = last["resolved_at"] if last else 0
+        nodes = []
+        for row in conn.execute(
+            "SELECT id, status, route, tier, report, head_sha FROM nodes WHERE status IN ('done', 'stopped', 'failed') "
+            "AND ended_at > ? ORDER BY ended_at, rowid", (since,)
+        ):
+            if row["id"] not in checkpoints:
+                nodes.append(dict(row))
+        open_wakes = conn.execute("SELECT COUNT(*) FROM wakes WHERE resolved_at IS NULL").fetchone()[0]
+        open_questions = conn.execute("SELECT COUNT(*) FROM questions WHERE status != 'answered'").fetchone()[0]
+        judged = conn.execute("SELECT derived_route, outcome FROM judgements WHERE outcome IS NOT NULL").fetchall()
+    finally:
+        conn.close()
+    spend = task_spend()
+    tasks = os.path.dirname(os.path.realpath(root))
+    counts = collections.Counter()
+    responses = spend.load_responses(
+        os.path.expanduser("~/.claude/projects"), os.path.expanduser("~/.codex/sessions"), tasks, spend.PRICES,
+        None if last is None else datetime.fromtimestamp(since, timezone.utc), None, counts,
+    )
+    parts = spend.attempt_spend(
+        responses, str(path), tasks, None if last is None else datetime.fromtimestamp(since, timezone.utc), None,
+        time.time(),
+    )
+    by_tier = {row["tier"]: row for row in spend.spend_rows(parts, "tier")}
+    usd = {row["node"]: row["usd"] for row in spend.spend_rows(parts, "node")}
+    passed = f"after {last['node']} passed {datetime.fromtimestamp(since).strftime('%Y-%m-%d %H:%M')}" if last else "from the task start"
+    print(f"digest {Path(root).name}: {passed}; checkpoint waiting: {anchor['node'] if anchor else 'none'}")
+    print(f"nodes ({len(nodes)}):")
+    for node in nodes[-DIGEST_NODES:]:
+        print(f"  {node['id']} {node['status']} route={node['route'] or '-'} tier={node['tier'] or '-'} "
+              f"report={node['report'] or '-'} head={(node['head_sha'] or '-')[:7]}")
+    if len(nodes) > DIGEST_NODES:
+        print(f"  ... {len(nodes) - DIGEST_NODES} earlier")
+    labels = [("work", "work"), ("T1 jev", "T1"), ("T2 orchestrator", "T2"), ("unattributed", "unattributed")]
+    print("spend: " + ", ".join(
+        f"{label} ${by_tier[tier]['usd']:.4f} ({by_tier[tier]['turns']})" for label, tier in labels if tier in by_tier
+    ))
+    continued = [node for node in nodes if node["route"] == "continue"]
+    picks = []
+    if continued:
+        top = max(continued, key=lambda node: usd.get(node["id"], 0.0))
+        picks.append(f"spend {top['id']} (${usd.get(top['id'], 0.0):.4f})")
+        rest = [node["id"] for node in continued if node["id"] != top["id"]]
+        if rest:
+            picks.append(f"random {random.Random(anchor['node'] if anchor else 'start').choice(rest)}")
+    print("audit: " + ("; ".join(picks) if picks else "no continued node since the last passed checkpoint"))
+    print(f"open wakes: {open_wakes}; open questions: {open_questions}")
+    if judged:
+        agree = sum(1 for derived, outcome in judged if (derived == "continue") == (outcome == "continue"))
+        print(f"jev shadow agreement: {agree}/{len(judged)} ({100 * agree / len(judged):.0f}%)")
+    else:
+        print("jev shadow agreement: no judged attempt has a final outcome yet")
+    return EMPTY
+
+
 def v2_main(argv):
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--task-root", type=Path, default=Path.cwd())
     parser = argparse.ArgumentParser(prog="task-dispatch.py", description="Run the dispatcher and read or resolve its wakes (C7).")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("run", "wake-wait", "status", "wakes"):
+    for name in ("run", "wake-wait", "status", "wakes", "digest"):
         sub.add_parser(name, parents=[common])
     resolve_parser = sub.add_parser("resolve", parents=[common])
     resolve_parser.add_argument("wake", type=int)
@@ -1073,6 +1162,8 @@ def v2_main(argv):
         return wake_wait(root)
     if args.command == "status":
         return status_main(root)
+    if args.command == "digest":
+        return digest_main(root)
     conn = task_state.connect(root)
     try:
         if args.command == "wakes":

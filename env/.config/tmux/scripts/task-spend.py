@@ -668,6 +668,33 @@ ATTEMPT_COLUMNS = [
 STATE_BY = ("node", "attempt", "tier")
 
 
+def load_responses(claude_dir, codex_dir, tasks, prices, since, until, counts):
+    """The priced responses in [since, until) from the Claude and Codex transcripts and the jev judgements: each with
+    its date, task, role, cost by kind, tier and tiered flag. counts takes the bad lines and unreadable files."""
+    merged = merge_responses(
+        list(claude_responses(claude_dir, counts)) + list(codex_responses(codex_dir, counts))
+    ) + judgement_responses(tasks)
+    responses = []
+    for response in merged:
+        if not sum(response[field] for field in TOKEN_FIELDS):
+            continue
+        ts = response["ts"]
+        if (since or until) and ts is None:
+            continue
+        if since and ts < since:
+            continue
+        if until and ts >= until:
+            continue
+        response["date"] = ts.astimezone().date().isoformat() if ts else "-"
+        if response["provider"] != JUDGE_PROVIDER:
+            response["task"], response["role"] = attribute(response["cwd"], response["sidechain"], tasks)
+        response["cost_by_kind"], response["tier"] = price_turn(response, prices)
+        response["cost"] = sum(response["cost_by_kind"].values()) if response["cost_by_kind"] else None
+        response["tiered"] = len(prices.get(response["model"]) or ()) > 1
+        responses.append(response)
+    return responses
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Spend and efficiency for the task agents (contracts C1, C2).")
     parser.add_argument("--since", type=parse_when, help="responses at or after this time")
@@ -711,27 +738,7 @@ def main(argv=None):
 
     counts = collections.Counter()
     tasks = real_path(args.tasks_dir)
-    merged = merge_responses(
-        list(claude_responses(args.claude_dir, counts)) + list(codex_responses(args.codex_dir, counts))
-    ) + judgement_responses(tasks)
-    responses = []
-    for response in merged:
-        if not sum(response[field] for field in TOKEN_FIELDS):
-            continue
-        ts = response["ts"]
-        if (args.since or args.until) and ts is None:
-            continue
-        if args.since and ts < args.since:
-            continue
-        if args.until and ts >= args.until:
-            continue
-        response["date"] = ts.astimezone().date().isoformat() if ts else "-"
-        if response["provider"] != JUDGE_PROVIDER:
-            response["task"], response["role"] = attribute(response["cwd"], response["sidechain"], tasks)
-        response["cost_by_kind"], response["tier"] = price_turn(response, prices)
-        response["cost"] = sum(response["cost_by_kind"].values()) if response["cost_by_kind"] else None
-        response["tiered"] = len(prices.get(response["model"]) or ()) > 1
-        responses.append(response)
+    responses = load_responses(args.claude_dir, args.codex_dir, tasks, prices, args.since, args.until, counts)
 
     unsplit = sum(response["write_unsplit"] for response in responses)
     notes = [f"cache writes with no 5m/1h split: {unsplit} response(s), counted as 5m."] if unsplit else []
