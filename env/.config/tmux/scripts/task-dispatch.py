@@ -510,9 +510,9 @@ def take_lock(root):
     return fd
 
 
-def hook_text(root, nodes, node, attempt, handoff=None):
+def hook_text(root, nodes, node, attempt, handoff=None, answers=()):
     """The pointer-sized hook for a node's attempt: spec, report, scope, contracts and the reports it depends on. handoff
-    is the report path to point at, not its text."""
+    is the report path to point at, not its text. answers are the answer files of the blocking questions it waits on."""
     lines = [
         f"# {node.id} (attempt {attempt})",
         f"Spec: {root / node.spec}" if node.spec else "Spec: none",
@@ -525,6 +525,7 @@ def hook_text(root, nodes, node, attempt, handoff=None):
             lines.append(f"After: research/answers/{dep[2:]}.md")
         else:
             lines.append(f"After: reports/{nodes[dep].agent}/{dep}.json")
+    lines.extend(f"Answer: {path}" for path in answers)
     if handoff:
         lines.append(f"Handoff: {handoff} (field handoff)")
     return "\n".join(lines) + "\n"
@@ -855,7 +856,10 @@ def finish(conn, root, node, code, line, plan, judged=None):
         return stop_node(conn, node, "failed", "stale_report", f"report for {node} was written before its prompt")
     asked = task_state.add_questions(conn, node, snapshot["attempt"], data.get("questions") or [])
     if code == 0:
-        task_state.route(conn, node, "continue")
+        qid = task_state.researcher_qid(node)
+        if qid and not (root / task_state.answer_path(qid)).exists():
+            return stop_node(conn, node, "stopped", "no_answer", f"no answer file {task_state.answer_path(qid)}", "opus", pointers)
+        task_state.route(conn, node, "continue", answered=qid)
         if node in plan and plan[node].review == "opus":
             task_state.wake(conn, node, "opus", "review", "review=opus: check this step before relying on it", pointers)
         return None
@@ -896,21 +900,22 @@ def launch(conn, root, nodes, node_id, results):
         return
     attempt = task_state.install(conn, node_id, node.budget)
     handoff = handoff_of(conn, root, node)
+    answers = task_state.answer_paths_for(conn, [dep for dep in node.after if not dep.startswith("q:")])
     # The node is running before anything can fail, so a failed start routes it failed.
     prompt_at = time.time()
     worktree = worktree_of(root, node.agent)
     task_state.start(conn, node_id, prompt_at=prompt_at, scope=node.scope, start_sha=task_jev.head_of(worktree) if worktree else None)
-    thread = threading.Thread(target=prompt_lane, args=(results, root, nodes, node, attempt, prompt_at, handoff), daemon=True)
+    thread = threading.Thread(target=prompt_lane, args=(results, root, nodes, node, attempt, prompt_at, handoff, answers), daemon=True)
     LAUNCHES[:] = [live for live in LAUNCHES if live.is_alive()] + [thread]
     thread.start()
 
 
-def prompt_lane(results, root, nodes, node, attempt, prompt_at, handoff=None):
+def prompt_lane(results, root, nodes, node, attempt, prompt_at, handoff=None, answers=()):
     """Writes the node's hook, relaunches its agent if the session is fresh, and prompts it. Puts (node, LAUNCHED, the
     watch's arguments) on results once the prompt is sent, or (node, code, line) when the launch fails."""
     try:
         (root / "hooks").mkdir(exist_ok=True)
-        (root / "hooks" / f"{node.agent}.md").write_text(hook_text(root, nodes, node, attempt, handoff), encoding="utf-8")
+        (root / "hooks" / f"{node.agent}.md").write_text(hook_text(root, nodes, node, attempt, handoff, answers), encoding="utf-8")
         if node.session == "fresh":
             relaunch(root, node.agent)
         herdr("prompt", node.agent, f"Read {root}/hooks/{node.agent}.md and follow it. End with the SUMMARY block.")
@@ -950,7 +955,7 @@ def with_questions(conn, root, nodes):
             (root / "specs").mkdir(exist_ok=True)
             (root / spec).write_text(text, encoding="utf-8")
         generated[node_id] = task_plan.Node(
-            id=node_id, agent="researcher", spec=spec, after=[], scope=["research/**"], contracts=[], checkpoint=False,
+            id=node_id, agent="researcher", spec=spec, after=[], scope=[task_state.answer_path(row["qid"])], contracts=[], checkpoint=False,
             review=task_plan.DEFAULTS["review"], session=task_plan.DEFAULTS["session"],
             budget=dict(task_plan.DEFAULTS["budget"]), plan_hash=hashlib.sha256(text.encode()).hexdigest())
     return {**nodes, **generated}
@@ -1106,7 +1111,7 @@ def digest_main(root):
             if row["id"] not in checkpoints:
                 nodes.append(dict(row))
         open_wakes = conn.execute("SELECT COUNT(*) FROM wakes WHERE resolved_at IS NULL").fetchone()[0]
-        open_questions = conn.execute("SELECT COUNT(*) FROM questions WHERE status != 'answered'").fetchone()[0]
+        open_questions = conn.execute("SELECT COUNT(*) FROM questions WHERE status = 'open'").fetchone()[0]
         judged = conn.execute("SELECT derived_route, outcome FROM judgements WHERE outcome IS NOT NULL").fetchall()
     finally:
         conn.close()
@@ -1191,7 +1196,7 @@ def v2_main(argv):
                 print(wake_line(row))
             return EMPTY
         if args.command == "resolve":
-            task_state.resolve(conn, args.wake, args.resolution, release=args.release, note=args.note)
+            task_state.resolve(conn, args.wake, args.resolution, root, release=args.release, note=args.note)
             print(f"resolved wake {args.wake}: {args.resolution}")
             return EMPTY
         task_state.pause(conn, args.target, paused=args.command == "pause")

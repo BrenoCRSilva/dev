@@ -69,6 +69,9 @@ def current(name):
         if turn.get("report"):
             Path(turn["report_path"]).parent.mkdir(parents=True, exist_ok=True)
             Path(turn["report_path"]).write_text(json.dumps(turn["report"]), encoding="utf-8")
+        for target, text in (turn.get("writes") or {}).items():  # files the turn leaves behind, e.g. a researcher's answer
+            Path(target).parent.mkdir(parents=True, exist_ok=True)
+            Path(target).write_text(text, encoding="utf-8")
         st["active"] = None
         st["blocked"] = turn["end"] == "blocked"
         status = turn["end"]

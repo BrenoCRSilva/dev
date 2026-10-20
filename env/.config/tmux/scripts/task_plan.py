@@ -19,6 +19,7 @@ NODE_KEYS = {"id", "agent", "spec", "after", "scope", "contracts", "checkpoint",
 DEFAULT_KEYS = {"session", "review", "budget"}
 BUDGET_KEYS = {"turns", "prompt_k"}
 ID = re.compile(r"[A-Za-z0-9][\w.-]*")
+RESERVED_ID = re.compile(r"q\d+")  # generated researcher nodes (task-dispatch.with_questions)
 QID = re.compile(r"q:([A-Za-z0-9][\w.-]*)")
 FIXED_AGENTS = {"orchestrator", "researcher"}
 WORKER_AGENT = re.compile(r"agent `(worker-[A-Za-z0-9._-]+)`")
@@ -144,6 +145,9 @@ def _node(root, index, raw, defaults, agents, errors):
     node_id = raw.get("id")
     if not (isinstance(node_id, str) and ID.fullmatch(node_id)):
         errors.append(f"{where}: id must be a name such as web-11")
+        return None
+    if RESERVED_ID.fullmatch(node_id):
+        errors.append(f"{where}: id {node_id} is reserved for a researcher node (q<qid>)")
         return None
     where = f"node {node_id}"
     for key in sorted(set(raw) - NODE_KEYS):

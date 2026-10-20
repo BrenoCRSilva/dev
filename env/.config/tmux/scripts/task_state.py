@@ -5,6 +5,7 @@ either not started or fully recorded. A report counts only if its mtime is after
 Only the dispatcher calls these functions. Times are epoch seconds.
 """
 import json
+import re
 import sqlite3
 import time
 import warnings
@@ -156,11 +157,32 @@ def start_sha_of(task_root, node_id):
     return row[0] if row else None
 
 
+def answer_path(qid):
+    return f"research/answers/{qid}.md"
+
+
+def researcher_qid(node_id):
+    """The qid of a generated researcher node (q<qid>), or None for a plan node."""
+    match = re.fullmatch(r"q(\d+)", node_id)
+    return match[1] if match else None
+
+
+def answer_paths_for(conn, deps):
+    """The answer files of the answered blocking questions that the plan nodes deps asked, in qid order."""
+    if not deps:
+        return []
+    rows = conn.execute(
+        f"SELECT qid FROM questions WHERE blocking = 1 AND status = 'answered' AND node IN ({', '.join('?' * len(deps))}) "
+        "ORDER BY CAST(qid AS INTEGER)", deps,
+    ).fetchall()
+    return [answer_path(row["qid"]) for row in rows]
+
+
 def snapshot(conn):
-    """The node rows by id, the answered q: question ids and the open blocking question ids by asking node, as
-    task_plan.ready() reads them."""
+    """The node rows by id, the q: question ids that are answered or closed (their waiters are released) and the open
+    blocking question ids by asking node, as task_plan.ready() reads them."""
     rows = {row["id"]: dict(row) for row in conn.execute("SELECT * FROM nodes")}
-    answered = {row["qid"] for row in conn.execute("SELECT qid FROM questions WHERE status = 'answered'")}
+    answered = {row["qid"] for row in conn.execute("SELECT qid FROM questions WHERE status IN ('answered', 'closed')")}
     blocking = {}
     for row in conn.execute("SELECT node, qid FROM questions WHERE status = 'open' AND blocking = 1"):
         blocking.setdefault(row["node"], []).append(row["qid"])
@@ -283,9 +305,11 @@ def settle(conn, node_id, report, report_mtime, head_sha=None):
         return True
 
 
-def route(conn, node_id, outcome, reason="", tier=None, wake=None):
+def route(conn, node_id, outcome, reason="", tier=None, wake=None, answered=None):
     """running -> done (outcome continue or checkpoint), stopped:<why> or failed:<why>. wake is (rule, reason, pointers) for
-    a wake to raise in the same transaction, so a stop and the wake that explains it land together or not at all."""
+    a wake to raise in the same transaction, so a stop and the wake that explains it land together or not at all.
+    answered is the qid of a researcher node's question: it is answered in the same transaction (the caller checks its
+    answer file exists first)."""
     status = _route_status(outcome)
     with transaction(conn):
         row = _row(conn, node_id)
@@ -297,6 +321,11 @@ def route(conn, node_id, outcome, reason="", tier=None, wake=None):
             "UPDATE nodes SET status = ?, route = ?, reason = ?, tier = ? WHERE id = ?",
             (status, outcome, reason, tier, node_id),
         )
+        if answered:
+            conn.execute(
+                "UPDATE questions SET status = 'answered', answer_path = ? WHERE qid = ? AND status = 'open'",
+                (answer_path(answered), answered),
+            )
         _mark_outcome(conn, node_id, outcome)
         _event(conn, node_id, "route", f"{outcome}: {reason}" if reason else outcome)
         if wake:
@@ -362,7 +391,7 @@ def add_questions(conn, node_id, attempt, questions):
             )
             _event(conn, node_id, "question", f"q{qid}: {text}"[:300])
             if scope_change:
-                _wake(conn, node_id, "opus", "question", f"scope change asked: q{qid}: {text}"[:300])
+                _wake(conn, node_id, "opus", "question", f"scope change asked: q{qid}: {text}"[:300], pointers={"qid": qid})
             qids.append(qid)
     return qids
 
@@ -380,7 +409,7 @@ RESOLUTIONS = ("continue", "retry", "skip", "cancel", "ack")
 INFO_RULES = ("plan-changed", "removed-running", PLAN_RULE, "review", "question")
 
 
-def resolve(conn, wake_id, resolution, release=False, note=""):
+def resolve(conn, wake_id, resolution, root, release=False, note=""):
     """Closes the wake and applies the resolution to its node. Refused with TransitionError, and nothing written, when it cannot apply.
 
     continue: a checkpoint passes (done, route continue); a stopped or failed node whose report was accepted is
@@ -392,22 +421,26 @@ def resolve(conn, wake_id, resolution, release=False, note=""):
     cancel: the node is cancelled with route cancelled. reconcile keeps it cancelled until its plan entry changes.
     retry, skip and cancel also close the node's other open wakes, except checkpoints.
     ack: closes the wake and changes no node. It is the only resolution for an informational wake (INFO_RULES) or
-    one with no node.
+    one with no node. For a question wake (scope change), ack or continue settles its question: answered when
+    research/answers/<qid>.md exists under root, else closed.
+    A researcher node continued, or skipped with release, settles its own question the same way.
     """
     if resolution not in RESOLUTIONS:
         raise TransitionError(f"unknown resolution {resolution!r}")
     with transaction(conn):
-        row = conn.execute("SELECT node, rule, resolved_at FROM wakes WHERE id = ?", (wake_id,)).fetchone()
+        row = conn.execute("SELECT node, rule, resolved_at, pointers FROM wakes WHERE id = ?", (wake_id,)).fetchone()
         if row is None:
             raise TransitionError(f"unknown wake {wake_id}")
         if row["resolved_at"] is not None:
             raise TransitionError(f"wake {wake_id} is already resolved")
         detail = f"wake {wake_id}: {resolution}" + (" (release)" if release else "") + (f": {note}" if note else "")
-        if resolution != "ack":
+        if row["rule"] == "question" and resolution in ("ack", "continue"):
+            _settle_question(conn, json.loads(row["pointers"])["qid"], root)
+        elif resolution != "ack":
             if not row["node"] or row["rule"] in INFO_RULES:
                 raise TransitionError(f"wake {wake_id} ({row['rule']}) is informational: resolve it with ack")
             _mark_outcome(conn, row["node"], f"resolved:{resolution}")  # before _apply: a retry starts a new attempt
-            _apply(conn, row["node"], row["rule"], resolution, release)
+            _apply(conn, row["node"], row["rule"], resolution, release, root)
             if resolution != "continue":
                 closed = conn.execute(
                     "UPDATE wakes SET resolved_at = ?, resolution = ? WHERE node = ? AND id != ? AND rule != 'checkpoint' AND resolved_at IS NULL",
@@ -418,7 +451,16 @@ def resolve(conn, wake_id, resolution, release=False, note=""):
         _event(conn, row["node"], "resolve", detail)
 
 
-def _apply(conn, node_id, rule, resolution, release):
+def _settle_question(conn, qid, root):
+    """Answers the question when its answer file exists under root, else closes it. Either way it no longer holds the
+    nodes that wait on it. Only an open question changes."""
+    if (Path(root) / answer_path(qid)).exists():
+        conn.execute("UPDATE questions SET status = 'answered', answer_path = ? WHERE qid = ? AND status = 'open'", (answer_path(qid), qid))
+    else:
+        conn.execute("UPDATE questions SET status = 'closed' WHERE qid = ? AND status = 'open'", (qid,))
+
+
+def _apply(conn, node_id, rule, resolution, release, root):
     row = _row(conn, node_id)
     status = row["status"]
     if resolution == "continue":
@@ -448,6 +490,9 @@ def _apply(conn, node_id, rule, resolution, release):
         if status == "done":
             raise TransitionError(f"{node_id} is done, so it cannot be cancelled")
         conn.execute("UPDATE nodes SET status = 'cancelled', route = 'cancelled' WHERE id = ?", (node_id,))
+    qid = researcher_qid(node_id)
+    if qid and (resolution == "continue" or (resolution == "skip" and release)):
+        _settle_question(conn, qid, root)
 
 
 def fail_internal(conn, node_id, error):

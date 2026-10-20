@@ -278,7 +278,7 @@ def scenario_checkpoint():
         task_state.install(conn, "c", {"turns": 60, "prompt_k": 90})
         wake = task_state.wake(conn, "c", "opus", "checkpoint", "A is in; continue to B?")
         check("b waits while the checkpoint is open", "b" not in task_plan.ready(nodes, task_state.snapshot(conn)))
-        task_state.resolve(conn, wake, "continue")
+        task_state.resolve(conn, wake, "continue", root)
         row = task_state.snapshot(conn)["nodes"]["c"]
         check("resolve(continue) passes the checkpoint", row["status"] == "done" and row["route"] == "continue", row)
         check("b is ready only after the resolve", task_plan.ready(nodes, task_state.snapshot(conn)) == ["b"])
@@ -344,12 +344,12 @@ def scenario_reconcile():
         check("second reconcile raises no second wake", again["woken"] == 0 and again["edited"] == 0, again)
         wake_id = conn.execute("SELECT id FROM wakes WHERE node = 'a'").fetchone()[0]
         try:
-            task_state.resolve(conn, wake_id, "continue")
+            task_state.resolve(conn, wake_id, "continue", root)
             refused = False
         except task_state.TransitionError:
             refused = True
         check("an informational wake refuses continue", refused and conn.execute("SELECT resolved_at FROM wakes WHERE id = ?", (wake_id,)).fetchone()[0] is None)
-        task_state.resolve(conn, wake_id, "ack")
+        task_state.resolve(conn, wake_id, "ack", root)
         check("resolve(ack) closes the wake", conn.execute("SELECT resolved_at FROM wakes WHERE id = ?", (wake_id,)).fetchone()[0])
 
         (root / "plan/dag.toml").write_text(node("a") + node("r", "researcher"), encoding="utf-8")
@@ -364,7 +364,7 @@ def scenario_reconcile():
         check("removed running node raises a wake and keeps running",
               counts["woken"] == 1 and task_state.snapshot(conn)["nodes"]["r"]["status"] == "running", counts)
         wake_r = conn.execute("SELECT id FROM wakes WHERE node = 'r'").fetchone()[0]
-        task_state.resolve(conn, wake_r, "ack")
+        task_state.resolve(conn, wake_r, "ack", root)
         again = task_state.reconcile(conn, task_plan.load_plan(root))
         check("a resolved removed-running wake does not repeat", again["woken"] == 0, again)
 

@@ -433,6 +433,93 @@ def scenario_question_stop(tmp):
     check("question stop: the question is recorded", db(root, "SELECT qid, status FROM questions") == [("1", "open")])
 
 
+def plan_module():
+    """task_plan.py as a module, to load a plan the way the dispatcher does."""
+    spec = importlib.util.spec_from_file_location("task_plan", DISPATCH.parent / "task_plan.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def scenario_answer(tmp):
+    """End to end: a blocking question's researcher node writes the answer, which answers the question and releases the
+    successor, whose hook points at the answer file."""
+    root, fake, env = plan_root(tmp, "answer", [("a", WORKER, [], False), ("b", WORKER, ["a"], False)])
+    v1.set_agent(fake, WORKER, [turn_for(root, "a", questions=[{"text": "which path?", "blocking": True}]), turn_for(root, "b")])
+    researcher = turn_for(root, "q1", agent="researcher", files=["research/answers/1.md"])
+    researcher["writes"] = {str(root / "research" / "answers" / "1.md"): "Use path X.\n"}
+    v1.set_agent(fake, "researcher", [researcher])
+    proc = daemon(env, root)
+    done = wait_for(lambda: poll_rows(root, "SELECT route FROM nodes WHERE id = 'b'") == [("continue",)])
+    stop(proc)
+    hook = (root / "hooks" / f"{WORKER}.md").read_text(encoding="utf-8")
+    check("answer: the researcher node continues", poll_rows(root, "SELECT route FROM nodes WHERE id = 'q1'") == [("continue",)],
+          db(root, "SELECT id, route FROM nodes"))
+    check("answer: the question is answered with its file", db(root, "SELECT qid, status, answer_path FROM questions")
+          == [("1", "answered", "research/answers/1.md")], db(root, "SELECT qid, status, answer_path FROM questions"))
+    check("answer: the successor starts once the answer exists", done, db(root, "SELECT id, status FROM nodes"))
+    check("answer: the successor's hook points at the answer", "Answer: research/answers/1.md" in hook.splitlines()
+          and "# b (attempt 1)" in hook, hook)
+
+
+def scenario_answer_missing(tmp):
+    """A researcher node that writes no answer stops with no_answer and its successor waits. Opus resolves the stop with
+    continue: the question is closed (no answer file), and the successor starts."""
+    root, fake, env = plan_root(tmp, "answer-missing", [("a", WORKER, [], False), ("b", WORKER, ["a"], False)])
+    v1.set_agent(fake, WORKER, [turn_for(root, "a", questions=[{"text": "which path?", "blocking": True}]), turn_for(root, "b")])
+    v1.set_agent(fake, "researcher", [turn_for(root, "q1", agent="researcher", files=["research/answers/1.md"])])
+    proc = daemon(env, root)
+    woke = cli(env, root, "wake-wait", timeout=60).stdout
+    wake_id = woke.split()[1] if woke.startswith("wake ") else "0"
+    check("no answer: the researcher node stops with no_answer", " opus q1 no_answer: no answer file research/answers/1.md" in woke, woke)
+    check("no answer: the successor waits", db(root, "SELECT status FROM nodes WHERE id = 'b'") == [("pending",)], db(root, "SELECT id, status FROM nodes"))
+    resolved = cli(env, root, "resolve", wake_id, "continue")
+    done = wait_for(lambda: poll_rows(root, "SELECT route FROM nodes WHERE id = 'b'") == [("continue",)])
+    stop(proc)
+    check("no answer: continue resolves the wake", resolved.returncode == 0, resolved.stdout + resolved.stderr)
+    check("no answer: continue closes the question and releases the successor",
+          done and db(root, "SELECT qid, status, answer_path FROM questions") == [("1", "closed", None)], db(root, "SELECT qid, status FROM questions"))
+
+
+def scenario_question_settle(tmp):
+    """A scope-change question's ack answers it when its answer file exists and closes it when not; either way its q:
+    waiters are released. A question wake takes no retry."""
+    ts = state_module()
+    root = tmp / "settle"
+    (root / "research" / "answers").mkdir(parents=True)
+    conn = ts.connect(root)
+    conn.execute("INSERT INTO nodes (id, agent, status) VALUES ('a', 'worker-dotfiles', 'running')")
+    for text in ("may the scope grow?", "may tests move?", "may docs move?"):
+        ts.add_questions(conn, "a", 1, [{"text": text, "scope_change": True}])
+    (root / "research" / "answers" / "2.md").write_text("Yes.\n", encoding="utf-8")
+    wakes = [row[0] for row in conn.execute("SELECT id FROM wakes ORDER BY id")]
+    ts.resolve(conn, wakes[0], "ack", root)
+    ts.resolve(conn, wakes[1], "continue", root)
+    rows = conn.execute("SELECT qid, status, answer_path FROM questions ORDER BY CAST(qid AS INTEGER)").fetchall()
+    check("settle: no file closes, a file answers", [tuple(row) for row in rows][:2] == [("1", "closed", None), ("2", "answered", "research/answers/2.md")],
+          [tuple(row) for row in rows])
+    check("settle: closed and answered questions release their q: waiters", ts.snapshot(conn)["answered"] == {"1", "2"}, ts.snapshot(conn)["answered"])
+    try:
+        ts.resolve(conn, wakes[2], "retry", root)
+        refused = False
+    except ts.TransitionError:
+        refused = True
+    check("settle: a question wake takes no retry", refused, "retry was accepted")
+
+
+def scenario_reserved_id(tmp):
+    """A plan node id q<digits> is refused: those ids belong to the researcher nodes the dispatcher generates."""
+    root, _, _ = plan_root(tmp, "reserved", [("q1", WORKER, [], False)])
+    refused = ""
+    plan = plan_module()
+    try:
+        plan.load_plan(root)
+    except plan.PlanError as error:
+        refused = " ".join(error.errors)
+    check("reserved: a plan node id q<digits> is refused", "id q1 is reserved for a researcher node" in refused, refused)
+
+
 def scenario_safety(tmp):
     root, fake, env = plan_root(tmp, "safety", [("y1", WORKER, [], False)])
     v1.set_agent(fake, WORKER, [turn_for(root, "y1", files=["env/.config/tmux/scripts/deploy-check.sh"])])
@@ -847,6 +934,10 @@ def main():
         scenario_question(tmp)
         scenario_question_scope(tmp)
         scenario_question_stop(tmp)
+        scenario_answer(tmp)
+        scenario_answer_missing(tmp)
+        scenario_question_settle(tmp)
+        scenario_reserved_id(tmp)
         scenario_safety(tmp)
         scenario_checks(tmp)
         scenario_internal(tmp)
