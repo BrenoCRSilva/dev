@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# With TMUX set, tmux ignores TMUX_TMPDIR and uses the caller's server, which this fixture would then kill.
+unset TMUX
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 SESSIONIZER="$ROOT/env/.config/tmux/scripts/task-sessionizer.sh"
@@ -54,6 +56,14 @@ wait_nvim_line() {
     done
     return 1
 }
+# A shell starts its command after send-keys returns, so the pane's command is polled, not slept for.
+wait_pane_command() {
+    for _ in $(seq 1 100); do
+        [[ "$(tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null)" == "$2" ]] && return 0
+        sleep 0.1
+    done
+    return 1
+}
 make_repo() { mkdir -p "$TASKS_DIR/$1/$2"; : > "$TASKS_DIR/$1/$2/.git"; }
 run_task() { TASK_SEARCH=1 "$SESSIONIZER" open "$1"; }
 expect_windows() {
@@ -82,7 +92,7 @@ done
 
 # A live server in a correctly rooted srv tab is kept in place on re-entry.
 tmux send-keys -t '=fixture-multi:srv-dotfiles' 'sleep 30' Enter
-sleep 0.2
+wait_pane_command '=fixture-multi:srv-dotfiles' sleep || fail 'srv-dotfiles never started its server'
 tmux new-window -d -t '=fixture-multi:' -n extra -c "$TASKS_DIR/fixture-multi/dotfiles" 'sleep 30'
 tmux select-window -t '=fixture-multi:agent'
 active_before=$(tmux list-windows -t '=fixture-multi' -F '#W|#{window_active}' | awk -F'|' '$2 == "1" { print $1 }')
