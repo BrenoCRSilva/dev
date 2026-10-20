@@ -360,10 +360,12 @@ agent_args() {
     if [[ $provider == claude ]]; then
         # Each role's settings file: the status line for the orchestrator, the
         # assignment hook for the others, and the write guard for workers only.
-        ARGS=(--model "${MODEL[claude:$role]}" --effort "${EFFORT[claude:$role]}" --append-system-prompt-file "$file"
-              --settings "$ROLES_DIR/$role.claude-settings.json")
+        ARGS=()
         # The orchestrator loads no MCP server: its tool names and instructions would otherwise be in context.
+        # These go first: --mcp-config takes several values and would swallow a trailing prompt argument.
         if [[ $role == orchestrator ]]; then ARGS+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}'); fi
+        ARGS+=(--model "${MODEL[claude:$role]}" --effort "${EFFORT[claude:$role]}" --append-system-prompt-file "$file"
+              --settings "$ROLES_DIR/$role.claude-settings.json")
         if [[ $role == worker || $role == researcher ]]; then tool_args claude; fi
         if [[ $role == worker ]]; then
             dirs=("$canonical_repo/.git")

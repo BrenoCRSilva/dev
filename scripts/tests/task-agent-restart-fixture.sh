@@ -51,6 +51,11 @@ done
 for token in '--bare' '--setting-sources' '--disable-slash-commands' 'disableBundledSkills' '--resume' '--continue'; do
     [[ "$claude_line" != *"$token"* ]] || fail "orchestrator launch must not carry $token"
 done
+# --mcp-config takes several values: the next argument must be an option, or a trailing prompt is read as a config file.
+for line in "$claude_line" "$("$TASK_AGENT" --dry-run orchestrator --restarted)"; do
+    after_mcp=${line#*'--mcp-config '}; after_mcp=${after_mcp#* }
+    [[ "$after_mcp" == --* ]] || fail "orchestrator launch: an option must follow the --mcp-config value, got: ${after_mcp:0:40}"
+done
 codex_line=$("$TASK_AGENT" --dry-run --provider codex orchestrator)
 [[ "$codex_line" != *ENABLE_CLAUDEAI* && "$codex_line" != *strict-mcp* ]] || fail "codex orchestrator gets no claude-only flags"
 
