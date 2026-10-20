@@ -1,53 +1,29 @@
 #!/usr/bin/env python3
-"""Wait for worker turns and route each finished step, so the orchestrator wakes only when a decision is needed (C3).
+"""Dispatcher CLI: waits for worker turns (wait), checks the plan graph (plan) and runs the plan daemon (C5-C7).
 
-    task-dispatch.py watch <agent>... [--task-root <dir>]
     task-dispatch.py wait <agent>... [--task-root <dir>]
     task-dispatch.py plan check|reconcile [--task-root <dir>]
-
-run, wake-wait, status, wakes, resolve <wake> continue|retry|skip|cancel [--note] [--release], pause|resume <agent|node>,
-digest (the checkpoint packet, read-only) are the dispatcher commands (C7): run is the background daemon, which installs, starts and evaluates ready nodes
-and raises wakes. Its exit codes: 1 daemon stopped (wake-wait), 23 dispatch.lock held, 2 a refused resolve or pause.
     task-dispatch.py run|status|wakes|wake-wait|resolve|pause|resume|digest [--task-root <dir>]
+    task-dispatch.py jev calibrate|smoke [--task-root <dir>]
+
+run is the background daemon, which installs, starts and evaluates ready nodes and raises wakes. wake-wait, status,
+wakes, resolve <wake> continue|retry|skip|cancel [--note] [--release], pause|resume <agent|node> and digest (the
+checkpoint packet, read-only) are the dispatcher commands (C7). Its exit codes: 1 daemon stopped (wake-wait), 23
+dispatch.lock held, 2 a refused resolve or pause.
 
 plan check validates plan/dag.toml (C5) and prints `ok N nodes`, or one line per error and exit 2. plan
 reconcile applies the plan to state.db (C6) and prints the counts. Neither runs a step.
 
-watch runs as the orchestrator (TASK_ROLE=orchestrator) in the background. For each agent it takes the
-first queued step not yet in <task-root>/status.log, waits for that step's turn to start and then settle
-(herdr's own agent wait; no early return on an idle agent), checks the report with task-report.py and
-routes it with task-decide.py (worker-step formula, TASK_DECIDE_LIVE=1). Then it stops, without sending
-anything more, when the report needs a decision (needs_decision set) or changes a file outside the hook's
-Scope: line (no Scope: line means no file is in scope), or when the step is a checkpoint. Otherwise it
-appends one line to status.log, copies the next queued hook to hooks/<agent>.md, sends the next prompt and
-keeps watching. Queue files are queue/<agent>/<NN>-<step>.md (hook body) and .prompt (one line).
+wait only waits for each named agent's current turn to settle and reports it; it routes nothing. watch was
+removed (v1, status.log and queue/): it prints `removed: use run + wake-wait` and exits 2.
 
-A hook is a checkpoint when its first line is `checkpoint: true`, or it opens with front matter that holds
-that line, or a `<NN>-<step>.checkpoint` marker sits beside it. A checkpoint step is logged as
-`route=checkpoint` and counts as done: watch stops after its report (exit 17), and the orchestrator
-installs and prompts the next step itself, then runs watch again.
-
-A hook may carry one `Requires:` line, comma-separated: `file:<path>` (relative to the task root unless
-absolute) must exist, and `report:<step>:<field>` needs the step's report to hold a non-empty field. An
-unmet item, or an unknown one, stops watch before the step is installed (exit 21).
-
-A stop after a report (18 needs_decision, 19 out-of-scope) is logged as `route=stopped:<reason>`, so a later
-watch does not route that report again. task-decide asks the user on needs_decision before watch reads it,
-so 18 is a backstop there; 11 is not logged. The orchestrator then decides: accept the step, or queue a fix step with a
-new number. Either way, it installs and prompts the next queued step itself, then runs watch again.
-
-wait only waits for each named agent's current turn to settle and reports it; it routes nothing.
-
-Exit codes: 0 queue empty (watch) or settled (wait); 2 usage; 3 invalid formula or report; 10 escalate;
-11 ask_user; 12 agent blocked; 13 agent did not start the step; 14 no valid report for the step; 15 turn
-timed out; 16 herdr refused or failed a call; 17 checkpoint reached; 18 report sets needs_decision;
-19 report changed a file outside Scope:; 20 decision service unavailable; 21 Requires: not met;
-22 internal error (a bug here, not herdr; the line starts with internal:).
-The 2, 3, 10, 11 and 20 codes come from task-decide. Env: TASK_DISPATCH_START_MS (wait for a turn to start,
-default 30000), TASK_DISPATCH_TURN_MS (wait for it to settle, default 4 hours), TASK_DISPATCH_SLICE_MS (the
-longest single herdr wait, default 10 minutes). A turn that never visibly starts counts only with a report
-written after its prompt; the first step's prompt time is the hook's install time. TASK_SESSION names the
-herdr session. Stdlib only.
+Exit codes: 0 settled (wait); 2 usage; 3 invalid formula or report; 10 escalate; 11 ask_user; 12 agent blocked;
+13 agent did not start the step; 14 no valid report for the step; 15 turn timed out; 16 herdr refused or failed a
+call; 18 report sets needs_decision; 19 report changed a file outside Scope:; 20 decision service unavailable;
+22 internal error (a bug here, not herdr; the line starts with internal:). The 2, 3, 10, 11 and 20 codes come
+from task-decide. Env: TASK_DISPATCH_START_MS (wait for a turn to start, default 30000), TASK_DISPATCH_TURN_MS
+(wait for it to settle, default 4 hours), TASK_DISPATCH_SLICE_MS (the longest single herdr wait, default 10
+minutes). TASK_SESSION names the herdr session. Stdlib only.
 """
 import argparse
 import collections
@@ -59,7 +35,6 @@ import os
 import posixpath
 import random
 import re
-import shutil
 import signal
 import sqlite3
 import subprocess
@@ -79,8 +54,6 @@ DECIDE = HERE / "task-decide.py"
 SPEND = HERE / "task-spend.py"
 REPORT_CHECK = HERE / "task-report.py"
 FORMULA = HERE / "task-roles" / "formulas" / "worker-step.toml"
-LOG_LINE = re.compile(r"(\S+) (\S+) route=(continue|checkpoint|stopped:\w+) step=(\S+)")
-QUEUE_FILE = re.compile(r"(\d+)-(.+)\.md")
 SLICE_MS = int(os.environ.get("TASK_DISPATCH_SLICE_MS", 10 * 60 * 1000))
 LAUNCH_WAIT_MS = 60 * 1000
 SHUTDOWN_S = 30  # how long a stopping daemon waits for launch threads (a fresh start can take LAUNCH_WAIT_MS)
@@ -93,10 +66,8 @@ NOT_STARTED = 13
 NO_REPORT = 14
 TIMED_OUT = 15
 HERDR = 16
-CHECKPOINT = 17
 NEEDS_DECISION = 18
 OUT_OF_SCOPE = 19
-REQUIRES_UNMET = 21
 INTERNAL = 22
 CHECKS_FAILED = 24
 BUDGET = 25
@@ -115,7 +86,6 @@ TICK_S = 1
 JEV_MODES = ("off", "shadow", "route")
 JEV_DEFAULT_THRESHOLD = 0.8  # shadow reporting only; route mode requires TASK_JEV_THRESHOLD
 JEV_USD_PER_MTOK = 0.042  # jev's input price (list-price equivalent)
-STOP_ROUTES = {NEEDS_DECISION: "stopped:needs_decision", OUT_OF_SCOPE: "stopped:out_of_scope"}
 
 
 def _task_decide():
@@ -243,12 +213,6 @@ def wait_status(agent, until, timeout_ms):
                 return None
 
 
-def installed_at(root, agent):
-    """When the agent's hook was installed: the first step's prompt time, since the orchestrator installs the hook just before it prompts."""
-    hook = root / "hooks" / f"{agent}.md"
-    return hook.stat().st_mtime if hook.exists() else None
-
-
 def fresh_report(path, since):
     """True when the report exists and was written at or after the prompt (since, epoch seconds)."""
     return since is not None and path.exists() and path.stat().st_mtime >= since
@@ -294,42 +258,8 @@ def route(agent, step, root):
     return decide.returncode, (decide.stdout or decide.stderr).strip()
 
 
-def queued(root, agent):
-    """The agent's queued steps in order, as (step, hook file, prompt file)."""
-    folder = root / "queue" / agent
-    found = []
-    for path in folder.glob("*.md") if folder.is_dir() else []:
-        match = QUEUE_FILE.fullmatch(path.name)
-        if match:
-            found.append((int(match[1]), match[2], path))
-    return [(step, hook, hook.with_suffix(".prompt")) for _, step, hook in sorted(found)]
-
-
-def recorded(root, agent):
-    """Steps already continued for this agent, from status.log."""
-    log = root / "status.log"
-    if not log.exists():
-        return set()
-    matches = (LOG_LINE.match(line) for line in log.read_text(encoding="utf-8").splitlines())
-    return {m[4] for m in matches if m and m[2] == agent}
-
-
-def pending(root, agent):
-    done = recorded(root, agent)
-    return [item for item in queued(root, agent) if item[0] not in done]
-
-
-def checkpoint_marked(hook):
-    """True when the hook's first line, or its front matter, says checkpoint: true, or a .checkpoint marker sits beside it."""
-    if hook.with_suffix(".checkpoint").exists():
-        return True
-    lines = hook.read_text(encoding="utf-8").splitlines()
-    head = lines[1 : lines.index("---", 1)] if lines[:1] == ["---"] and "---" in lines[1:] else lines[:1]
-    return any(re.fullmatch(r"checkpoint:\s*true", line.strip()) for line in head)
-
-
 def scope_regexes(scope):
-    """The worktree paths a Scope list allows. A plain path also covers the files under it, as in v1."""
+    """The worktree paths a Scope list allows. A plain path also covers the files under it."""
     regexes = []
     for item in scope:
         item = item.strip().strip("`").rstrip("/")
@@ -340,116 +270,6 @@ def scope_regexes(scope):
         else:
             regexes += [glob_regex(item), glob_regex(item + "/**/*")]
     return regexes
-
-
-def hook_scope(hook):
-    """The items of a hook's Scope: line."""
-    match = re.search(r"^Scope:\s*(.*)$", hook.read_text(encoding="utf-8"), re.M)
-    return match[1].split(",") if match else []
-
-
-def stop_reason(hook, report):
-    """Why watch stops after this step's report, as (code, why), or None to continue."""
-    data = json.loads(report.read_text(encoding="utf-8"))
-    if data.get("needs_decision"):
-        return NEEDS_DECISION, f"needs_decision is set: {str(data['needs_decision'])[:200]}"
-    regexes = scope_regexes(hook_scope(hook))
-    outside = [path for path in data.get("files_changed", []) if not any(r.match(path) for r in regexes)]
-    if outside:
-        return OUT_OF_SCOPE, f"changed outside Scope: {', '.join(outside)}"[:300]
-    if checkpoint_marked(hook):
-        return CHECKPOINT, "checkpoint step: review it, then install and prompt the next step, then run watch"
-    return None
-
-
-def unmet_requires(root, agent, hook):
-    """The first Requires: item of the hook that does not hold, as text, or None when all hold (or none is set)."""
-    match = re.search(r"^Requires:\s*(.+)$", hook.read_text(encoding="utf-8"), re.M)
-    for item in (match[1].split(",") if match else []):
-        item = item.strip().strip("`")
-        if not item:
-            continue
-        if item.startswith("file:"):
-            path = Path(item[5:])
-            held = (path if path.is_absolute() else root / path).exists()
-        elif item.startswith("report:"):
-            step, _, field = item[7:].partition(":")
-            try:
-                held = bool(json.loads(report_path(root, agent, step).read_text(encoding="utf-8")).get(field))
-            except (OSError, ValueError, AttributeError):
-                held = False
-        else:
-            return f"unknown Requires item {item}"
-        if not held:
-            return f"Requires {item} is not met"
-    return None
-
-
-def record(root, agent, step, report, route, lock):
-    """Appends the step's status.log line. A stop is logged too, so a later watch does not route the same report."""
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    head = json.loads(report.read_text(encoding="utf-8"))["head_sha"]
-    with lock:
-        with (root / "status.log").open("a", encoding="utf-8") as log:
-            log.write(f"{stamp} {agent} route={route} step={step} report={report.relative_to(root)} head_sha={head}\n")
-
-
-def drive(agent, root, start_ms, turn_ms, lock):
-    """Runs one agent's queue until it is empty (EMPTY) or needs the orchestrator. Returns (code, line)."""
-    steps = pending(root, agent)
-    if steps and (why := unmet_requires(root, agent, steps[0][1])):
-        return REQUIRES_UNMET, f"{agent} step {steps[0][0]}: {why}"
-    since = installed_at(root, agent)
-    while steps:
-        step, hook, prompt = steps[0]
-        code, line = await_turn(agent, step, root, start_ms, turn_ms, since)
-        if code is None:
-            code, line = route(agent, step, root)
-        if code != 0:
-            return code, f"{agent} step {step}: {line}"
-        report = report_path(root, agent, step)
-        stop = stop_reason(hook, report)
-        if stop and stop[0] != CHECKPOINT:
-            record(root, agent, step, report, STOP_ROUTES[stop[0]], lock)
-            return stop[0], f"{agent} step {step}: {stop[1]}"
-        record(root, agent, step, report, "checkpoint" if stop else "continue", lock)
-        steps.pop(0)
-        if stop:
-            return CHECKPOINT, f"{agent} step {step}: {stop[1]}"
-        if steps:
-            step, hook, prompt = steps[0]
-            if why := unmet_requires(root, agent, hook):
-                return REQUIRES_UNMET, f"{agent} step {step}: {why}"
-            shutil.copyfile(hook, root / "hooks" / f"{agent}.md")
-            since = time.time()
-            herdr("prompt", agent, " ".join(prompt.read_text(encoding="utf-8").split()))
-    return EMPTY, f"{agent}: queue empty"
-
-
-def watch(agents, root, start_ms, turn_ms):
-    lock = threading.Lock()
-    results = queue.Queue()
-
-    def lane(agent):
-        result = (INTERNAL, f"internal: {agent}: lane ended without a result")
-        try:
-            result = drive(agent, root, start_ms, turn_ms, lock)
-        except Herdr as error:
-            result = (HERDR, f"{agent}: {error}")
-        except Exception as error:
-            result = (INTERNAL, f"internal: {agent}: {error!r}")
-        finally:
-            results.put(result)
-
-    for agent in agents:
-        threading.Thread(target=lane, args=(agent,), daemon=True).start()
-    lines = []
-    for _ in agents:
-        code, line = results.get()
-        if code != EMPTY:
-            return code, line
-        lines.append(line)
-    return EMPTY, "; ".join(lines)
 
 
 def wait(agents, root, start_ms, turn_ms):
@@ -912,7 +732,7 @@ def launch(conn, root, nodes, node_id, results):
 
 def prompt_lane(results, root, nodes, node, attempt, prompt_at, handoff=None, answers=()):
     """Writes the node's hook, relaunches its agent if the session is fresh, and prompts it. Puts (node, LAUNCHED, the
-    watch's arguments) on results once the prompt is sent, or (node, code, line) when the launch fails."""
+    wait's arguments) on results once the prompt is sent, or (node, code, line) when the launch fails."""
     try:
         (root / "hooks").mkdir(exist_ok=True)
         (root / "hooks" / f"{node.agent}.md").write_text(hook_text(root, nodes, node, attempt, handoff, answers), encoding="utf-8")
@@ -978,7 +798,7 @@ def daemon(root, start_ms, turn_ms):
         nodes = load_nodes(conn, root)
         known = nodes or {}
         for row in task_state.running(conn):
-            # A running node stays running across a restart: watch its turn again from its prompt time, with the budget
+            # A running node stays running across a restart: wait for its turn again from its prompt time, with the budget
             # and scope its attempt started with. A node gone from the plan has no scope to check (None skips it).
             node = known.get(row["id"])
             if nodes is not None and node is None:
@@ -1008,7 +828,7 @@ def daemon(root, start_ms, turn_ms):
                 fail_node(conn, node, repr(error))
     finally:
         # A launch still sending its prompt gets SHUTDOWN_S to finish, so its attempt is prompted before the daemon exits.
-        # shortcut: a launch still running after SHUTDOWN_S is left unprompted, and a restart watches it until its turn
+        # shortcut: a launch still running after SHUTDOWN_S is left unprompted, and a restart waits for it until its turn
         # budget ends; upgrade: mark attempts prompted and re-prompt on restart.
         deadline = time.monotonic() + SHUTDOWN_S
         for thread in LAUNCHES:
@@ -1245,20 +1065,17 @@ def main(argv=None):
         return task_jev.main(argv[1:])
     if argv[:1] and argv[0] in V2_COMMANDS:
         return v2_main(argv)
-    parser = argparse.ArgumentParser(description="Wait for worker turns and route finished steps.")
-    parser.add_argument("command", choices=["watch", "wait"])
+    if argv[:1] == ["watch"]:
+        print("removed: use run + wake-wait")
+        return USAGE
+    parser = argparse.ArgumentParser(description="Wait for each named agent's current turn to settle.")
+    parser.add_argument("command", choices=["wait"])
     parser.add_argument("agents", nargs="+")
     parser.add_argument("--task-root", type=Path, default=Path.cwd())
     args = parser.parse_args(argv)
     start_ms = int(os.environ.get("TASK_DISPATCH_START_MS", 30000))
     turn_ms = int(os.environ.get("TASK_DISPATCH_TURN_MS", 4 * 60 * 60 * 1000))
-    if args.command == "watch" and os.environ.get("TASK_ROLE") != "orchestrator":
-        print("task-dispatch: watch routes steps for the orchestrator only: TASK_ROLE must be orchestrator", file=sys.stderr)
-        return USAGE
-    if args.command == "watch":
-        code, line = watch(args.agents, args.task_root, start_ms, turn_ms)
-    else:
-        code, line = wait(args.agents, args.task_root, start_ms, turn_ms)
+    code, line = wait(args.agents, args.task_root, start_ms, turn_ms)
     print(line)
     return code
 
