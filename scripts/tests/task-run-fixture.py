@@ -296,6 +296,31 @@ def scenario_no_report(tmp):
     stop(proc)
 
 
+def scenario_late_stop(tmp):
+    """A late report goes through evaluate as a report on time does: a safety path wakes the user, a path outside the
+    Scope wakes Opus, and either stops the node (not done) with its successor waiting."""
+    cases = (("late-safety", "env/.config/tmux/scripts/deploy-check.sh", "ask_user", "user"),
+             ("late-scope", "docs/outside.md", "out_of_scope", "opus"))
+    for name, changed, rule, tier in cases:
+        root, fake, env = plan_root(tmp, name, [("l1", WORKER, [], False), ("l2", WORKER, ["l1"], False)])
+        env["TASK_DISPATCH_BACKGROUND_POLL_MS"] = "100"
+        v1.set_agent(fake, WORKER, [turn_for(root, "l1", report=False), turn_for(root, "l2")])
+        proc = daemon(env, root)
+        woke = cli(env, root, "wake-wait", timeout=60).stdout
+        wake_id = woke.split()[1]
+        report = root / "reports" / WORKER / "l1.json"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps({**v1.report("l1"), "files_changed": [changed]}), encoding="utf-8")
+        resolved = cli(env, root, "resolve", wake_id, "continue")
+        check(f"{name}: continue on the late report is resolved", resolved.returncode == 0, resolved.stdout + resolved.stderr)
+        check(f"{name}: the node is stopped, not done", db(root, "SELECT status, route FROM nodes WHERE id = 'l1'") == [("stopped", f"stopped:{rule}")],
+              db(root, "SELECT status, route FROM nodes WHERE id = 'l1'"))
+        check(f"{name}: its wake goes to {tier}", db(root, "SELECT tier, rule FROM wakes WHERE node = 'l1' AND resolved_at IS NULL") == [(tier, rule)],
+              db(root, "SELECT tier, rule, resolved_at FROM wakes WHERE node = 'l1'"))
+        check(f"{name}: the successor keeps waiting", db(root, "SELECT status FROM nodes WHERE id = 'l2'") == [("pending",)], status(env, root))
+        stop(proc)
+
+
 def scenario_pause(tmp):
     root, fake, env = plan_root(tmp, "pause", [("p1", WORKER, [], False)])
     v1.set_agent(fake, WORKER, [turn_for(root, "p1")])
@@ -1127,6 +1152,7 @@ def main():
         scenario_stale(tmp)
         scenario_background(tmp)
         scenario_no_report(tmp)
+        scenario_late_stop(tmp)
         scenario_pause(tmp)
         scenario_fresh(tmp)
         scenario_continue(tmp)

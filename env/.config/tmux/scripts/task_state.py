@@ -434,7 +434,7 @@ def resolve(conn, wake_id, resolution, root, release=False, note="", late=None):
 
     continue: a checkpoint passes (done, route continue); a stopped or failed node whose report was accepted is
     accepted (done, route continue). late (a no_report node's report, see _accept_late) is recorded first, in the same
-    transaction, so the continue accepts it.
+    transaction, so the continue accepts it; a stop in it (see _stop_late) stops the node instead, with its wake.
     retry: a stopped or failed node goes back to pending, so its next install is a new attempt; route, report,
     head_sha and ended_at are cleared.
     skip: the node is done with route skipped, so its successors stay blocked. With release, route is continue,
@@ -460,10 +460,13 @@ def resolve(conn, wake_id, resolution, root, release=False, note="", late=None):
         elif resolution != "ack":
             if not row["node"] or row["rule"] in INFO_RULES:
                 raise TransitionError(f"wake {wake_id} ({row['rule']}) is informational: resolve it with ack")
-            _mark_outcome(conn, row["node"], f"resolved:{resolution}")  # before _apply: a retry starts a new attempt
-            if late is not None and resolution == "continue":
-                _accept_late(conn, row["node"], late)
-            _apply(conn, row["node"], row["rule"], resolution, release, root, note)
+            if late is not None and late["stop"]:
+                _stop_late(conn, row["node"], late)
+            else:
+                _mark_outcome(conn, row["node"], f"resolved:{resolution}")  # before _apply: a retry starts a new attempt
+                if late is not None and resolution == "continue":
+                    _accept_late(conn, row["node"], late)
+                _apply(conn, row["node"], row["rule"], resolution, release, root, note)
             if resolution != "continue":
                 closed = conn.execute(
                     "UPDATE wakes SET resolved_at = ?, resolution = ? WHERE node = ? AND id != ? AND rule != 'checkpoint' AND resolved_at IS NULL",
@@ -487,21 +490,44 @@ def close_question(conn, qid, note):
     conn.execute("UPDATE questions SET status = 'closed', note = ? WHERE qid = ? AND status = 'open'", (note, qid))
 
 
-def _accept_late(conn, node_id, late):
-    """A no_report node whose report was written after its attempt's prompt gets that report recorded, with its questions
-    and review wake, as a normal report is. late: {report, mtime, head_sha, questions, review}, checked by the dispatcher."""
+def attempt_of(conn, node_id):
+    """The node's current attempt: prompt time, budget and scope."""
+    return conn.execute(
+        "SELECT a.* FROM attempts a JOIN nodes n ON n.id = a.node AND n.attempt = a.attempt WHERE n.id = ?", (node_id,)
+    ).fetchone()
+
+
+def _record_late(conn, node_id, late):
+    """A no_report node's late report, written after its attempt's prompt, is recorded with its questions, as a normal
+    report is. late: {report, mtime, head_sha, questions, review, stop}, checked by the dispatcher."""
     row = _row(conn, node_id)
     if row["status"] != "failed" or row["route"] != "failed:no_report":
         raise TransitionError(f"{node_id} is {row['status']} ({row['route']}), not failed:no_report")
-    attempt = conn.execute("SELECT prompt_at FROM attempts WHERE node = ? AND attempt = ?", (node_id, row["attempt"])).fetchone()
+    attempt = attempt_of(conn, node_id)
     if not report_accepted(late["mtime"], attempt["prompt_at"]):
         raise TransitionError(f"{late['report']} was written before its prompt")
     conn.execute("UPDATE nodes SET report = ?, head_sha = ? WHERE id = ?", (late["report"], late["head_sha"], node_id))
     conn.execute("UPDATE attempts SET report_mtime = ? WHERE node = ? AND attempt = ?", (late["mtime"], node_id, row["attempt"]))
     _event(conn, node_id, "settle", f"accepted late {late['report']}")
     _add_questions(conn, node_id, row["attempt"], late["questions"])
+
+
+def _accept_late(conn, node_id, late):
+    """A late report that passes evaluate: recorded, and the review wake when the plan asks for one."""
+    _record_late(conn, node_id, late)
     if late["review"]:
         _wake(conn, node_id, "opus", "review", "review=opus: check this step before relying on it")
+
+
+def _stop_late(conn, node_id, late):
+    """A late report that evaluate stops (scope, budget, needs_decision, safety...): recorded, then the node is stopped
+    with that reason and its wake, as a report on time is. late["stop"] is (rule, reason, tier, pointers)."""
+    _record_late(conn, node_id, late)
+    rule, reason, tier, pointers = late["stop"]
+    _mark_outcome(conn, node_id, f"stopped:{rule}")
+    conn.execute("UPDATE nodes SET status = 'stopped', route = ?, reason = ?, tier = ? WHERE id = ?", (f"stopped:{rule}", reason, tier, node_id))
+    _event(conn, node_id, "route", f"stopped:{rule}: {reason}")
+    _wake(conn, node_id, tier, rule, reason, pointers)
 
 
 def _apply(conn, node_id, rule, resolution, release, root, note=""):

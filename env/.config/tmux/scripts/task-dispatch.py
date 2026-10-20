@@ -727,6 +727,14 @@ def stop_node(conn, node, kind, name, reason, tier="opus", pointers=None):
     task_state.route(conn, node, f"{kind}:{name}", reason, tier, wake=(name, reason, pointers))
 
 
+def record_judged(conn, node, attempt, judged):
+    """Records jev's judgement for the attempt. A judgement that fails to record never changes the route."""
+    try:
+        task_state.record_judgement(conn, node, attempt, judged)
+    except Exception as error:
+        task_state.judgement_failed(conn, node, f"{type(error).__name__}: {error}")
+
+
 def finish(conn, root, node, code, line, plan, judged=None):
     """Settles a finished turn: records jev's judgement, writes the report to state if it is fresh, then routes the node by
     the outcome. A passing node with review: opus also raises an Opus wake; its successors are not held for it."""
@@ -734,10 +742,7 @@ def finish(conn, root, node, code, line, plan, judged=None):
     agent = snapshot["agent"]
     pointers = None
     if judged:
-        try:
-            task_state.record_judgement(conn, node, snapshot["attempt"], judged)
-        except Exception as error:  # a judgement that fails to record never changes the route
-            task_state.judgement_failed(conn, node, f"{type(error).__name__}: {error}")
+        record_judged(conn, node, snapshot["attempt"], judged)
         pointers = {"jev": jev_pointer(judged)}
     if code in FAIL_NAMES:
         return stop_node(conn, node, "failed", FAIL_NAMES[code], line, pointers=pointers)
@@ -773,9 +778,11 @@ def fail_node(conn, node, error):
 
 
 def late_report(conn, root, wake_id):
-    """For resolve continue on a no_report wake: the node's report as it stands now, if it passes task-report check and
-    the node's answer exists when it is a researcher's. Returns what task_state.resolve records, else None (resolve then
-    refuses as it does without a report)."""
+    """For resolve continue on a no_report wake: the node's report as it stands now, if it passes task-report check, the
+    node's answer exists when it is a researcher's, and it was written after its attempt's prompt. evaluate judges it as a
+    report on time is, and its judgement is recorded. Returns what task_state.resolve records (stop is set when evaluate
+    stops the node), else None (resolve then refuses as it does without a report). Raises TransitionError for a report
+    written before its prompt."""
     wake = task_state.wake_of(conn, wake_id)
     node = wake["node"] if wake is not None and wake["rule"] == "no_report" else None
     row = task_state.snapshot(conn)["nodes"].get(node) if node else None
@@ -788,17 +795,36 @@ def late_report(conn, root, wake_id):
     qid = task_state.researcher_qid(node)
     if check.returncode != 0 or (qid and not (root / task_state.answer_path(qid)).exists()):
         return None
+    mtime = report.stat().st_mtime
+    attempt = task_state.attempt_of(conn, node)
+    if not task_state.report_accepted(mtime, attempt["prompt_at"]):
+        raise task_state.TransitionError(f"{report.relative_to(root)} was written before its prompt")
     data = json.loads(report.read_text(encoding="utf-8"))
     try:
-        plan = task_plan.load_plan(root)
+        plan = with_questions(conn, root, task_plan.load_plan(root))
     except task_plan.PlanError:
-        return None  # the review flag comes from the plan, so an invalid plan refuses the late report
+        return None  # the plan's review flags and scope come from it, so an invalid plan refuses the late report
+    if node not in plan:
+        scope = None  # gone from the plan: no scope to check against
+    elif attempt["scope"] is not None:
+        scope = json.loads(attempt["scope"])
+    else:
+        scope = plan[node].scope  # an attempt from before migration 4
+    budget = {"turns": attempt["budget_turns"], "prompt_k": attempt["budget_prompt_k"]}
+    code, line, judged = evaluate(root, row["agent"], node, scope, budget, plan)
+    if code in FAIL_NAMES:
+        return None
+    if judged:
+        record_judged(conn, node, attempt["attempt"], judged)
+    stop = None if code == 0 else (STOP_NAMES.get(code, "decide"), line, "user" if code == ASK_USER else "opus",
+                                   {"jev": jev_pointer(judged)} if judged else None)
     return {
         "report": str(report.relative_to(root)),
-        "mtime": report.stat().st_mtime,
+        "mtime": mtime,
         "head_sha": data.get("head_sha"),
         "questions": data.get("questions") or [],
-        "review": node in plan and plan[node].review == "opus",
+        "review": code == 0 and node in plan and plan[node].review == "opus",
+        "stop": stop,
     }
 
 
