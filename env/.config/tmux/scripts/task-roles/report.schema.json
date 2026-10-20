@@ -79,6 +79,28 @@
       "minLength": 1,
       "maxLength": 200,
       "pattern": "^[^\\r\\n]*$"
+    },
+    "handoff": {
+      "description": "Optional. What the next step of this agent needs from this one. The dispatcher points that step's hook at this report; it does not copy the text.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1200,
+      "maxLines": 10
+    },
+    "questions": {
+      "description": "Optional. Questions for the researcher. blocking holds the asking step's successors until the answer is in; scope_change asks Opus to decide instead of the researcher.",
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["text", "blocking"],
+        "properties": {
+          "text": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "blocking": { "type": "boolean" },
+          "scope_change": { "type": "boolean" }
+        }
+      }
     }
   }
 }

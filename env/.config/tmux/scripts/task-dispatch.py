@@ -508,8 +508,9 @@ def take_lock(root):
     return fd
 
 
-def hook_text(root, nodes, node, attempt):
-    """The pointer-sized hook for a node's attempt: spec, report, scope, contracts and the reports it depends on."""
+def hook_text(root, nodes, node, attempt, handoff=None):
+    """The pointer-sized hook for a node's attempt: spec, report, scope, contracts and the reports it depends on. handoff
+    is the report path to point at, not its text."""
     lines = [
         f"# {node.id} (attempt {attempt})",
         f"Spec: {root / node.spec}" if node.spec else "Spec: none",
@@ -522,7 +523,24 @@ def hook_text(root, nodes, node, attempt):
             lines.append(f"After: research/answers/{dep[2:]}.md")
         else:
             lines.append(f"After: reports/{nodes[dep].agent}/{dep}.json")
+    if handoff:
+        lines.append(f"Handoff: {handoff} (field handoff)")
     return "\n".join(lines) + "\n"
+
+
+def handoff_of(conn, root, node):
+    """The report path of the agent's last done step when that report has a handoff, else None."""
+    last = conn.execute(
+        "SELECT report FROM nodes WHERE agent = ? AND status = 'done' AND id != ? AND report IS NOT NULL ORDER BY ended_at DESC LIMIT 1",
+        (node.agent, node.id),
+    ).fetchone()
+    if last is None:
+        return None
+    try:
+        data = json.loads((root / last["report"]).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return last["report"] if isinstance(data, dict) and isinstance(data.get("handoff"), str) else None
 
 
 # Concrete privileged commands in the report's text: user tier. A bare keyword ("install" in prose) is not one.
@@ -875,21 +893,22 @@ def launch(conn, root, nodes, node_id, results):
         task_state.wake_once(conn, node_id, "opus", "checkpoint", f"checkpoint {node_id}: review, then resolve continue")
         return
     attempt = task_state.install(conn, node_id, node.budget)
+    handoff = handoff_of(conn, root, node)
     # The node is running before anything can fail, so a failed start routes it failed.
     prompt_at = time.time()
     worktree = worktree_of(root, node.agent)
     task_state.start(conn, node_id, prompt_at=prompt_at, scope=node.scope, start_sha=task_jev.head_of(worktree) if worktree else None)
-    thread = threading.Thread(target=prompt_lane, args=(results, root, nodes, node, attempt, prompt_at), daemon=True)
+    thread = threading.Thread(target=prompt_lane, args=(results, root, nodes, node, attempt, prompt_at, handoff), daemon=True)
     LAUNCHES[:] = [live for live in LAUNCHES if live.is_alive()] + [thread]
     thread.start()
 
 
-def prompt_lane(results, root, nodes, node, attempt, prompt_at):
+def prompt_lane(results, root, nodes, node, attempt, prompt_at, handoff=None):
     """Writes the node's hook, relaunches its agent if the session is fresh, and prompts it. Puts (node, LAUNCHED, the
     watch's arguments) on results once the prompt is sent, or (node, code, line) when the launch fails."""
     try:
         (root / "hooks").mkdir(exist_ok=True)
-        (root / "hooks" / f"{node.agent}.md").write_text(hook_text(root, nodes, node, attempt), encoding="utf-8")
+        (root / "hooks" / f"{node.agent}.md").write_text(hook_text(root, nodes, node, attempt, handoff), encoding="utf-8")
         if node.session == "fresh":
             relaunch(root, node.agent)
         herdr("prompt", node.agent, f"Read {root}/hooks/{node.agent}.md and follow it. End with the SUMMARY block.")

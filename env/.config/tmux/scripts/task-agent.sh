@@ -86,11 +86,14 @@ herdr_cmd() {
 }
 
 # Ends a worker or researcher agent by sending it /exit, as if typed. An agent
-# that is working is left alone unless --force is given. Nothing is killed: if
-# the agent is still there after the wait, that is reported. Failures return 1
-# rather than exit, because finish_restart calls this and must log its own line.
+# that is working is left alone unless --force is given (--force only skips that
+# check). Nothing is killed: if the agent is still there after the wait, that is
+# reported. Two dialogs can hold /exit, and each is answered once while the wait
+# runs: the background-work confirm gets Enter, and the autocompact dialog gets
+# "Keep auto" (up, enter) followed by a second /exit. Failures return 1 rather
+# than exit, because finish_restart calls this and must log its own line.
 stop_agent() {
-    local dry=$1 name=${2:-} arg info state pane force=no
+    local dry=$1 name=${2:-} arg info state pane screen force=no enter_sent=no keep_sent=no
     [[ -n "$name" ]] || usage
     for arg in "${@:3}"; do
         [[ "$arg" == --force ]] || usage
@@ -111,6 +114,15 @@ stop_agent() {
     herdr_cmd agent prompt "$name" /exit >/dev/null
     for _ in $(seq 1 40); do
         herdr_cmd agent get "$name" >/dev/null 2>&1 || { printf 'stopped %s\n' "$name"; return 0; }
+        screen=$(herdr_cmd agent read "$name" --source visible 2>/dev/null) || screen=
+        if [[ $enter_sent == no && "$screen" == *"Background work is running"* ]]; then
+            herdr_cmd agent send-keys "$name" enter >/dev/null
+            enter_sent=yes
+        elif [[ $keep_sent == no && "$screen" == *"compacting earlier"* ]]; then
+            herdr_cmd agent send-keys "$name" up enter >/dev/null
+            herdr_cmd agent prompt "$name" /exit >/dev/null
+            keep_sent=yes
+        fi
         sleep 0.5
     done
     echo "task-agent: $name is still running after /exit; left as it is" >&2

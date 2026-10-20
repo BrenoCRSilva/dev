@@ -96,13 +96,14 @@ def plan_root(tmp, name, nodes, session=None):
     return root, fake, env
 
 
-def turn_for(root, step, agent=WORKER, work=0.5, needs=None, report=True, turns=None, checks=None, questions=None, files=None):
+def turn_for(root, step, agent=WORKER, work=0.5, needs=None, report=True, turns=None, checks=None, questions=None, files=None,
+             handoff=None):
     body = v1.turn(root, step, work=work, agent=agent)
     if needs and body["report"]:
         body["report"]["needs_decision"] = needs
     if turns is not None and body["report"]:
         body["report"]["turns"] = turns
-    for key, value in {"checks": checks, "questions": questions, "files_changed": files}.items():
+    for key, value in {"checks": checks, "questions": questions, "files_changed": files, "handoff": handoff}.items():
         if value is not None and body["report"]:
             body["report"][key] = value
     if not report:
@@ -177,6 +178,33 @@ def scenario_dag(tmp):
     check("dag: checkpoint routed continue", db(root, "SELECT status, route FROM nodes WHERE id = 'n3'") == [("done", "continue")])
     out = stop(proc)
     check("dag: SIGTERM stops the daemon cleanly", "dispatcher stopped" in out and "dispatcher: not running" in cli(env, root, "status").stdout, out)
+
+
+def scenario_handoff(tmp):
+    """M4a item 2: the next hook of an agent points at its last done report when that report has a handoff. h2 gets
+    the pointer to h1's report; h3 follows h2, whose report has none, so its hook has no pointer."""
+    root, fake, env = plan_root(tmp, "handoff", [
+        ("h1", WORKER, [], False), ("h2", WORKER, ["h1"], False), ("h3", WORKER, ["h2"], False),
+    ])
+    v1.set_agent(fake, WORKER, [
+        turn_for(root, "h1", handoff="Port 8080 is free.\nThe schema is in state.db."),
+        turn_for(root, "h2", work=2.0),
+        turn_for(root, "h3"),
+    ])
+    hook = root / "hooks" / f"{WORKER}.md"
+    proc = daemon(env, root)
+    seen = wait_for(lambda: hook.exists() and "# h2 (attempt 1)" in hook.read_text(encoding="utf-8"))
+    h2_hook = hook.read_text(encoding="utf-8") if seen else ""
+    check("handoff: the hook of the step after a handoff points at its report",
+          "Handoff: reports/worker-dotfiles/h1.json (field handoff)" in h2_hook.splitlines(), h2_hook)
+    check("handoff: the hook holds the pointer, not the text", "Port 8080" not in h2_hook, h2_hook)
+    done = wait_for(lambda: "worker-dotfiles: idle; done 3" in status(env, root))
+    check("handoff: the chain finishes", done, status(env, root))
+    h3_hook = hook.read_text(encoding="utf-8")
+    check("handoff: a step whose previous report has no handoff gets no pointer",
+          not any(line.startswith("Handoff:") for line in h3_hook.splitlines()), h3_hook)
+    out = stop(proc)
+    check("handoff: SIGTERM stops the daemon cleanly", "dispatcher stopped" in out, out)
 
 
 def scenario_retry(tmp):
@@ -761,6 +789,7 @@ def main():
     with tempfile.TemporaryDirectory() as scratch:
         tmp = Path(scratch)
         scenario_dag(tmp)
+        scenario_handoff(tmp)
         scenario_retry(tmp)
         scenario_stale(tmp)
         scenario_pause(tmp)

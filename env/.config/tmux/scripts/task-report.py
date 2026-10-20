@@ -7,8 +7,9 @@ Validates the file against task-roles/report.schema.json and checks that its
 path names the same agent and step as its contents. Prints each problem and
 exits 1; exits 0 and prints "ok" when the report is valid; exits 2 on bad
 usage. Stdlib only. The schema subset is what the schema uses: type, required,
-properties, additionalProperties, items, minLength, maxLength, minItems,
-maxItems, minimum, maximum and pattern.
+properties, additionalProperties, items, minLength, maxLength, maxLines,
+minItems, maxItems, minimum, maximum and pattern. maxLines counts the lines of
+a string (not in JSON Schema; other validators ignore it).
 """
 import json
 import re
@@ -46,6 +47,8 @@ def check(value, schema, where, errors):
             errors.append(f"{where}: shorter than {schema['minLength']} characters")
         if len(value) > schema.get("maxLength", len(value)):
             errors.append(f"{where}: longer than {schema['maxLength']} characters")
+        if len(value.splitlines()) > schema.get("maxLines", len(value.splitlines())):
+            errors.append(f"{where}: more than {schema['maxLines']} lines")
         # Whole-value match: a plain $ would also accept a trailing newline.
         if "pattern" in schema and not re.fullmatch(schema["pattern"], value):
             errors.append(f"{where}: does not match {schema['pattern']}")

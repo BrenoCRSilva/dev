@@ -88,6 +88,28 @@ expect_bad "$REPORTS/worker-dotfiles/9.json" 'context estimate as text' 'report.
 write_report 'r["needs_decision"] = ""' "$REPORTS/worker-dotfiles/9.json"
 expect_bad "$REPORTS/worker-dotfiles/9.json" 'empty needs_decision' 'report.needs_decision: shorter than 1'
 
+# handoff and questions are optional; when present they keep their shape, line and length limits.
+write_report 'r["handoff"] = "\n".join(["x"] * 10); r["questions"] = [{"text": "Which ports?", "blocking": True, "scope_change": False}]' "$REPORTS/worker-dotfiles/9.json"
+expect_ok "$REPORTS/worker-dotfiles/9.json" 'handoff of 10 lines and a question'
+write_report 'r["handoff"] = "\n".join(["x"] * 11)' "$REPORTS/worker-dotfiles/9.json"
+expect_bad "$REPORTS/worker-dotfiles/9.json" 'handoff over 10 lines' 'report.handoff: more than 10 lines'
+write_report 'r["handoff"] = "x" * 1201' "$REPORTS/worker-dotfiles/9.json"
+expect_bad "$REPORTS/worker-dotfiles/9.json" 'handoff over 1200 characters' 'report.handoff: longer than 1200'
+write_report 'r["handoff"] = ""' "$REPORTS/worker-dotfiles/9.json"
+expect_bad "$REPORTS/worker-dotfiles/9.json" 'empty handoff' 'report.handoff: shorter than 1'
+write_report 'r["handoff"] = ["x"]' "$REPORTS/worker-dotfiles/9.json"
+expect_bad "$REPORTS/worker-dotfiles/9.json" 'handoff as a list' 'report.handoff: expected string'
+write_report 'r["questions"] = {"text": "Which ports?", "blocking": True}' "$REPORTS/worker-dotfiles/9.json"
+expect_bad "$REPORTS/worker-dotfiles/9.json" 'questions as an object' 'report.questions: expected array'
+write_report 'r["questions"] = [{"text": "Which ports?"}]' "$REPORTS/worker-dotfiles/9.json"
+expect_bad "$REPORTS/worker-dotfiles/9.json" 'question without blocking' 'report.questions[0]: missing blocking'
+write_report 'r["questions"] = [{"text": "Which ports?", "blocking": "yes"}]' "$REPORTS/worker-dotfiles/9.json"
+expect_bad "$REPORTS/worker-dotfiles/9.json" 'question blocking as text' 'report.questions[0].blocking: expected boolean'
+write_report 'r["questions"] = [{"text": "Which ports?", "blocking": False, "urgent": True}]' "$REPORTS/worker-dotfiles/9.json"
+expect_bad "$REPORTS/worker-dotfiles/9.json" 'question with an unknown field' 'report.questions[0]: unknown field urgent'
+write_report 'r["questions"] = [{"text": "q", "blocking": False}] * 11' "$REPORTS/worker-dotfiles/9.json"
+expect_bad "$REPORTS/worker-dotfiles/9.json" 'more than 10 questions' 'report.questions: more than 10 items'
+
 # The path must name the same agent and step as the contents.
 valid > "$REPORTS/worker-dotfiles/10.json"
 expect_bad "$REPORTS/worker-dotfiles/10.json" 'file name that is not the step' 'path: file must be reports/<agent>/<step>.json'

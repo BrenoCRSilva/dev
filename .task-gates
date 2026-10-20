@@ -13,6 +13,7 @@ fixture-task-agent-dry-runs: bash scripts/tests/task-agent-dry-runs.sh
 fixture-task-agent-repo-tools: bash scripts/tests/task-agent-repo-tools-fixture.sh
 fixture-task-assignment: bash scripts/tests/task-assignment-fixture.sh
 fixture-task-agent-restart: bash scripts/tests/task-agent-restart-fixture.sh
+fixture-task-agent-stop: bash scripts/tests/task-agent-stop-fixture.sh
 fixture-task-context-guard: python3 -I scripts/tests/task-context-guard-fixture.py
 fixture-task-codegraph-index: bash scripts/tests/task-codegraph-index-fixture.sh
 fixture-task-gates: bash scripts/tests/task-gates-fixture.sh
