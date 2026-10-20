@@ -4,12 +4,14 @@
 Builds a task's state.db with fixed times (the nodes, attempts, wakes, judgements and questions a checkpoint
 packet reads) and the transcripts its spend reads under a temporary HOME, then runs the real CLI on it. Checks
 the window since the last passed checkpoint, the spend per tier, the audit picks, open wakes and questions, jev's
-shadow agreement, a task with no checkpoint, a missing state.db, and that the digest writes nothing.
+shadow agreement, a task with no checkpoint, a missing state.db, that the digest writes nothing, and that transcripts
+last written before the task's first event, or outside the task's Claude folders, are not opened.
 Writes only inside a temporary folder.
 """
 import hashlib
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -55,6 +57,11 @@ def add_node(conn, node_id, status, route=None, tier=None, report=None, head=Non
                      (node_id, epoch(started), epoch(ended) if ended else None))
 
 
+def project_folder(root):
+    """Claude Code's transcript folder for a working directory: every character but a letter or digit becomes '-'."""
+    return re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(root))
+
+
 def build(home):
     """The task t5 under home/tasks, with the spend transcripts under home/.claude/projects."""
     root = os.path.join(home, "tasks", "t5")
@@ -88,7 +95,7 @@ def build(home):
     conn.close()
     # Every response is 1000 input and 100 output tokens: $0.003 at Sonnet's list price.
     dotfiles = os.path.join(root, "dotfiles")
-    claude = os.path.join(home, ".claude", "projects")
+    claude = os.path.join(home, ".claude", "projects", project_folder(root))
     write_lines(os.path.join(claude, "s", "main.jsonl"), [
         assistant("o1", "claude-sonnet-5-5", stamp("10:30:00"), root, "s-orch", 1000, 100),
         assistant("o2", "claude-sonnet-5-5", stamp("10:45:00"), root, "s-orch", 1000, 100),
@@ -102,6 +109,23 @@ def build(home):
     ])
     write_lines(os.path.join(claude, "s", "subagents", "agent-a.jsonl"), [
         assistant("sa1", "claude-sonnet-5-5", stamp("10:47:00"), dotfiles, "s-w", 1000, 100, sidechain=True),
+    ])
+    # Last written at 09:00, before the first event at 10:00: its records are in the window, so reading it would
+    # change the spend. Also a Codex rollout of the same kind, and one in another folder, for this task's cwd.
+    stale = os.path.join(claude, "old", "stale.jsonl")
+    write_lines(stale, [assistant("st1", "claude-sonnet-5-5", stamp("10:47:00"), dotfiles, "s-old", 1000, 100)])
+    os.utime(stale, (epoch("09:00:00"), epoch("09:00:00")))
+    rollout = os.path.join(home, ".codex", "sessions", "2026", "10", "16", "rollout.jsonl")
+    write_lines(rollout, [
+        {"type": "session_meta", "payload": {"session_id": "cx-old", "cwd": dotfiles}},
+        {"type": "turn_context", "payload": {"turn_id": "t-old", "model": "gpt-6-astra", "cwd": dotfiles}},
+        {"type": "token_usage_record", "timestamp": stamp("10:47:00"),
+         "payload": {"turn_id": "t-old", "response_id": "r-old", "session_id": "cx-old",
+                     "usage": {"input_tokens": 1000, "output_tokens": 100}}},
+    ])
+    os.utime(rollout, (epoch("09:00:00"), epoch("09:00:00")))
+    write_lines(os.path.join(home, ".claude", "projects", "-home-pontual-Projects-dotfiles", "s", "other.jsonl"), [
+        assistant("ot1", "claude-sonnet-5-5", stamp("10:47:00"), dotfiles, "s-other", 1000, 100),
     ])
     return root
 

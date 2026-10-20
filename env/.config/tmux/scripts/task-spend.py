@@ -50,6 +50,7 @@ import glob
 import json
 import math
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -153,8 +154,36 @@ def read_lines(path, counts):
         counts["unreadable_files"] += 1
 
 
-def claude_responses(root, counts):
-    for path in sorted(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True)):
+def transcripts(pattern, modified_since):
+    """The transcript files matching pattern, sorted, last modified at or after modified_since (epoch seconds or None).
+    A file older than that holds no response that late, so it is not opened."""
+    paths = sorted(glob.glob(pattern, recursive=True))
+    if modified_since is None:
+        return paths
+    kept = []
+    for path in paths:
+        try:
+            if os.path.getmtime(path) >= modified_since:
+                kept.append(path)
+        except OSError:
+            continue
+    return kept
+
+
+def project_dir(task_root):
+    """The name Claude Code gives a working directory's transcript folder: every character but a letter or digit
+    becomes '-' (so /home/u/tasks/t/dotfiles is -home-u-tasks-t-dotfiles)."""
+    return re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(task_root))
+
+
+def claude_responses(root, counts, modified_since=None, task_root=None):
+    # shortcut: folders matched by the task root's name, so a session started outside the task's folder is missed;
+    # upgrade: read each file's first cwd instead.
+    if task_root:
+        pattern = os.path.join(root, project_dir(task_root) + "*", "**", "*.jsonl")
+    else:
+        pattern = os.path.join(root, "**", "*.jsonl")
+    for path in transcripts(pattern, modified_since):
         subagent_file = "subagents" in path.split(os.sep)
         for number, record in enumerate(read_lines(path, counts)):
             if not isinstance(record, dict) or record.get("type") != "assistant":
@@ -214,12 +243,12 @@ def codex_response(path, stamp, response_id, session, model, cwd, usage, tools):
     }
 
 
-def codex_responses(root, counts):
+def codex_responses(root, counts, modified_since=None):
     """Responses of each rollout. token_usage_record (one per response) is preferred. A rollout without
     any uses its token_count events instead: last_token_usage is the per-call delta, and a repeated total
     is skipped. A tool item sits just before its response's record, so a response takes the tool items
     since the previous record (or token_count)."""
-    for path in sorted(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True)):
+    for path in transcripts(os.path.join(root, "**", "*.jsonl"), modified_since):
         turns, records, counted = {}, [], []
         cwd, session, model_now, cwd_now = None, None, None, None
         pending_records, pending_counts = set(), set()
@@ -668,11 +697,13 @@ ATTEMPT_COLUMNS = [
 STATE_BY = ("node", "attempt", "tier")
 
 
-def load_responses(claude_dir, codex_dir, tasks, prices, since, until, counts):
+def load_responses(claude_dir, codex_dir, tasks, prices, since, until, counts, modified_since=None, task_root=None):
     """The priced responses in [since, until) from the Claude and Codex transcripts and the jev judgements: each with
-    its date, task, role, cost by kind, tier and tiered flag. counts takes the bad lines and unreadable files."""
+    its date, task, role, cost by kind, tier and tiered flag. counts takes the bad lines and unreadable files.
+    modified_since skips transcripts last written before it; task_root reads only that task's Claude folders."""
     merged = merge_responses(
-        list(claude_responses(claude_dir, counts)) + list(codex_responses(codex_dir, counts))
+        list(claude_responses(claude_dir, counts, modified_since, task_root))
+        + list(codex_responses(codex_dir, counts, modified_since))
     ) + judgement_responses(tasks)
     responses = []
     for response in merged:

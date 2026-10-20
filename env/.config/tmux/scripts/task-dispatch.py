@@ -31,6 +31,7 @@ import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import posixpath
 import random
@@ -933,14 +934,17 @@ def digest_main(root):
         open_wakes = conn.execute("SELECT COUNT(*) FROM wakes WHERE resolved_at IS NULL").fetchone()[0]
         open_questions = conn.execute("SELECT COUNT(*) FROM questions WHERE status = 'open'").fetchone()[0]
         judged = conn.execute("SELECT derived_route, outcome FROM judgements WHERE outcome IS NOT NULL").fetchall()
+        first = conn.execute("SELECT MIN(ts) FROM events").fetchone()[0]
     finally:
         conn.close()
     spend = task_spend()
     tasks = os.path.dirname(os.path.realpath(root))
     counts = collections.Counter()
+    # No event means no attempt, so no transcript can hold this task's spend: the window then opens at infinity.
     responses = spend.load_responses(
         os.path.expanduser("~/.claude/projects"), os.path.expanduser("~/.codex/sessions"), tasks, spend.PRICES,
         None if last is None else datetime.fromtimestamp(since, timezone.utc), None, counts,
+        modified_since=first if first is not None else math.inf, task_root=root,
     )
     parts = spend.attempt_spend(
         responses, str(path), tasks, None if last is None else datetime.fromtimestamp(since, timezone.utc), None,
