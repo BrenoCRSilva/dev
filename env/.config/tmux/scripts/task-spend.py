@@ -4,6 +4,7 @@
     task-spend.py [--since WHEN] [--until WHEN] [--by day|task] [--json]
                   [--split WHEN] [--prices FILE]
                   [--efficiency [--group role|model|task|role,task|session]]
+                  [--state FILE --by node|attempt|tier]
                   [--claude-dir DIR] [--codex-dir DIR] [--tasks-dir DIR]
 
 Reads <claude-dir>/**/*.jsonl (subagent sidechains included) and <codex-dir>/**/*.jsonl
@@ -32,8 +33,16 @@ kind (cache writes split 5m and 1h), USD per turn, session and task, prompt size
 share of turns in a price tier above the first. The task group adds the orchestrator's share
 of task USD and worker turns per orchestrator turn. With --split it prints the tables before
 and after WHEN (text only).
+
+--state FILE reads one task's state.db (read-only) and prints spend per node, per attempt or per
+tier (--by node|attempt|tier; node is the default). A response counts for the attempt of its agent
+(worker-<repo> or researcher; a subagent counts under the agent whose worktree it ran in) whose
+window [started_at, ended_at or now] holds it, the latest-started one when they overlap. The
+orchestrator's responses from the task's first dispatcher event on are tier T2. jev judgement cost
+is judgements.cost_usd, tier T1.
 """
 import argparse
+import bisect
 import collections
 import datetime
 import functools
@@ -43,6 +52,7 @@ import math
 import os
 import sqlite3
 import sys
+import time
 
 # USD per million tokens: Claude API list prices from the claude-api skill, cached 2026-10-06
 # (prompts/prices.json in the task root). A model's tiers are picked by its response's prompt
@@ -460,6 +470,100 @@ def efficiency_rows(responses, group):
     return [efficiency_row(group, members) for _, members in sorted(groups.items())]
 
 
+def read_state(path):
+    """Attempts (node, attempt, agent, started_at, ended_at), judgements (node, attempt, cost_usd, judged_at) and the
+    task's first event time, from state.db, read-only. A running attempt has no ended_at."""
+    conn = sqlite3.connect(f"file:{real_path(path)}?mode=ro", uri=True)
+    try:
+        attempts = conn.execute(
+            "SELECT a.node, a.attempt, n.agent, a.started_at, a.ended_at FROM attempts a "
+            "JOIN nodes n ON n.id = a.node WHERE a.started_at IS NOT NULL ORDER BY a.node, a.attempt"
+        ).fetchall()
+        judged = conn.execute("SELECT node, attempt, cost_usd, judged_at FROM judgements").fetchall()
+        first = conn.execute("SELECT MIN(ts) FROM events").fetchone()[0]
+    finally:
+        conn.close()
+    return attempts, judged, first
+
+
+def in_span(when, since, until):
+    """Whether an epoch time is in [since, until); either bound may be None."""
+    return (since is None or when >= since.timestamp()) and (until is None or when < until.timestamp())
+
+
+def attempt_spend(responses, state, tasks, since, until, now):
+    """Spend of one task's attempts, from the priced responses and state.db. Returns the parts spend_rows reads:
+    attempts (one dict each), orchestrator and unattributed as [turns, USD] (the orchestrator's T2 turns, and the
+    usage no window holds), and judge as [judgements, jev USD]."""
+    task = os.path.basename(os.path.dirname(real_path(state)))
+    attempts, judged, first = read_state(state)
+    windows = collections.defaultdict(list)
+    for node, attempt, agent, started, ended in attempts:
+        windows[agent].append((started, now if ended is None else ended, node, attempt))
+    for held in windows.values():
+        held.sort()
+    usage = collections.defaultdict(lambda: [0, 0.0])
+    orchestrator, unattributed = [0, 0.0], [0, 0.0]
+    for response in responses:
+        if response["provider"] == JUDGE_PROVIDER or response["task"] != task or response["ts"] is None:
+            continue
+        agent = attribute(response["cwd"], False, tasks)[1] if response["role"] == "subagent" else response["role"]
+        when, cost = response["ts"].timestamp(), response["cost"] or 0.0
+        if agent == "orchestrator" and first is not None and when >= first:
+            orchestrator[0] += 1
+            orchestrator[1] += cost
+            continue
+        held = windows.get(agent, [])
+        index = bisect.bisect_right(held, (when, math.inf))
+        window = held[index - 1] if index else None
+        if agent != "orchestrator" and window and window[1] >= when:
+            bucket = usage[(window[2], window[3])]
+        else:
+            bucket = unattributed
+        bucket[0] += 1
+        bucket[1] += cost
+    jev, judges = collections.defaultdict(float), [0, 0.0]
+    for node, attempt, cost, judged_at in judged:
+        if (since or until) and (judged_at is None or not in_span(judged_at, since, until)):
+            continue
+        jev[(node, attempt)] += cost or 0.0
+        judges[0] += 1
+        judges[1] += cost or 0.0
+    rows = []
+    for node, attempt, agent, _, _ in attempts:
+        turns, usd = usage.get((node, attempt), (0, 0.0))
+        rows.append({"node": node, "attempt": attempt, "agent": agent, "tier": "work", "turns": turns,
+                     "usd": usd, "jev_usd": jev.get((node, attempt), 0.0)})
+    return {"attempts": rows, "orchestrator": orchestrator, "unattributed": unattributed, "judge": judges}
+
+
+def spend_rows(parts, by):
+    """Rows for --by node (per node), attempt (per attempt) or tier (work, T1 judge, T2 orchestrator). Each row:
+    node, attempt, agent, tier, turns, usd (the tier's or the agent's own spend) and jev_usd (the judge's cost)."""
+    def row(node, attempt, agent, tier, turns, usd, jev_usd=0.0):
+        return {"node": node, "attempt": attempt, "agent": agent, "tier": tier, "turns": turns, "usd": usd,
+                "jev_usd": jev_usd}
+
+    orchestrator = row("-", None, "orchestrator", "T2", *parts["orchestrator"])
+    unattributed = [row("-", None, "-", "unattributed", *parts["unattributed"])] if parts["unattributed"][0] else []
+    if by == "tier":
+        work = [0, 0.0]
+        for item in parts["attempts"]:
+            work[0] += item["turns"]
+            work[1] += item["usd"]
+        judge = row("-", None, "jev", "T1", *parts["judge"])
+        return [row("-", None, "-", "work", *work), judge, orchestrator] + unattributed
+    if by == "attempt":
+        return parts["attempts"] + [orchestrator] + unattributed
+    per_node = {}
+    for item in parts["attempts"]:
+        total = per_node.setdefault(item["node"], row(item["node"], None, item["agent"], "work", 0, 0.0))
+        total["turns"] += item["turns"]
+        total["usd"] += item["usd"]
+        total["jev_usd"] += item["jev_usd"]
+    return list(per_node.values()) + [orchestrator] + unattributed
+
+
 def cell(value, kind):
     if value is None:
         return "-"
@@ -557,12 +661,21 @@ def print_efficiency(rows, group, out):
         print(file=out)
 
 
+ATTEMPT_COLUMNS = [
+    ("node", "node", "text"), ("attempt", "attempt", "int"), ("agent", "agent", "text"), ("tier", "tier", "text"),
+    ("turns", "turns", "int"), ("USD", "usd", "usd4"), ("jev USD", "jev_usd", "usd4"),
+]
+STATE_BY = ("node", "attempt", "tier")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Spend and efficiency for the task agents (contracts C1, C2).")
     parser.add_argument("--since", type=parse_when, help="responses at or after this time")
     parser.add_argument("--until", type=parse_when, help="responses before this time (exclusive)")
-    parser.add_argument("--by", choices=["day", "task"],
-                        help="rows per day (default), or per task over all days (date is then '-')")
+    parser.add_argument("--by", choices=["day", "task", *STATE_BY],
+                        help="rows per day (default), or per task over all days (date is then '-'); with --state, "
+                             "per node (default), attempt or tier")
+    parser.add_argument("--state", metavar="FILE", help="a task's state.db: spend per node, attempt or tier")
     parser.add_argument("--split", type=parse_when, metavar="WHEN",
                         help="per-role averages before and after WHEN; with --efficiency, the tables (text only)")
     parser.add_argument("--json", action="store_true", help="print the rows as a JSON list")
@@ -581,6 +694,16 @@ def main(argv=None):
         parser.error("--by applies to spend rows, not --efficiency")
     if args.group and not args.efficiency:
         parser.error("--group needs --efficiency")
+    if args.state:
+        if args.split or args.efficiency:
+            parser.error("--state does not combine with --split or --efficiency")
+        if not os.path.isfile(args.state):
+            parser.error(f"--state: no such file: {args.state}")
+        args.by = args.by or "node"
+        if args.by not in STATE_BY:
+            parser.error("--state goes with --by node, attempt or tier")
+    elif args.by in STATE_BY:
+        parser.error("--by node, attempt and tier need --state")
     try:
         prices = load_prices(args.prices) if args.prices else PRICES
     except (OSError, ValueError) as error:
@@ -618,7 +741,23 @@ def main(argv=None):
         notes.append("Codex USD is a list-price equivalent (plan-billed).")
     if any(response["model"] == "codex-auto-review" for response in responses):
         notes.append("codex-auto-review has no official price: it is priced at gpt-6-luna rates as a placeholder.")
-    if args.efficiency:
+    if args.state:
+        try:
+            parts = attempt_spend(responses, args.state, tasks, args.since, args.until, time.time())
+        except sqlite3.Error as error:
+            parser.error(f"--state: {error}")
+        if args.json:
+            json.dump(spend_rows(parts, args.by), sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        else:
+            print_table(ATTEMPT_COLUMNS, spend_rows(parts, args.by), sys.stdout)
+            print("* usd is the agent's own turns inside its attempt windows (a subagent counts under the agent whose "
+                  "worktree it ran in); jev USD is the judge's cost_usd for the attempt.")
+            print("* tier work is the attempts, T1 the judge, T2 the orchestrator from the task's first event on "
+                  "(window end: now); unattributed is usage no window or T2 holds.")
+            for note in notes:
+                print(f"* {note}")
+    elif args.efficiency:
         group = args.group or "role"
         if args.split:
             timed = [response for response in responses if response["ts"] is not None]

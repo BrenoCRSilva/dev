@@ -6,9 +6,13 @@ dedup, role attribution from cwd, a subagent sidechain, the Haiku prompt-size ti
 unpriced model, a Codex rollout, a bad line, --since/--until, --by task, --split, the
 --json and --prices options and their refusals. The --efficiency checks cover tool-call
 counting, the 5m/1h cache-write split with an unsplit write, prompt-size ratios and p95,
-the task view and the unpriced Codex turn. Writes only inside a temporary folder.
+the task view and the unpriced Codex turn. The --state checks cover spend per node, attempt and tier against a state.db
+built by task_state, the window and attribution rules, --since and --until, and the refusals. Writes only
+inside a temporary folder.
 Run: python3 -I scripts/tests/task-spend-fixture.py
 """
+import datetime
+import hashlib
 import json
 import os
 import subprocess
@@ -17,6 +21,9 @@ import tempfile
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 CLI = os.path.join(ROOT, "env", ".config", "tmux", "scripts", "task-spend.py")
+sys.path.insert(0, os.path.join(ROOT, "env", ".config", "tmux", "scripts"))
+
+import task_state  # noqa: E402
 
 
 def fail(message):
@@ -161,6 +168,126 @@ def build_efficiency(base):
                                "reasoning_output_tokens": 5}}},
     ])
     return ["--claude-dir", claude, "--codex-dir", codex, "--tasks-dir", tasks]
+
+
+def stamp(clock):
+    return f"2026-10-16T{clock}Z"
+
+
+def epoch(clock):
+    return datetime.datetime.fromisoformat(f"2026-10-16T{clock}+00:00").timestamp()
+
+
+def build_state(base):
+    """Task t3 with a state.db and transcripts; returns the state.db path and the CLI's directory flags.
+    Two worker attempts (a1 10:05-10:20, a2 10:30 and still running), a researcher attempt (b1 10:12-10:14)."""
+    tasks = os.path.join(base, "home", "tasks")
+    root = os.path.join(tasks, "t3")
+    dotfiles = os.path.join(root, "dotfiles")
+    research = os.path.join(root, "research")
+    claude = os.path.join(base, "claude")
+    os.makedirs(root)
+    conn = task_state.connect(root)
+    conn.execute("INSERT INTO nodes (id, agent, status) VALUES ('n-a', 'worker-dotfiles', 'running')")
+    conn.execute("INSERT INTO nodes (id, agent, status) VALUES ('n-b', 'researcher', 'done')")
+    attempts = "INSERT INTO attempts (node, attempt, started_at, ended_at) VALUES (?, ?, ?, ?)"
+    conn.execute(attempts, ("n-a", 1, epoch("10:05:00"), epoch("10:20:00")))
+    conn.execute(attempts, ("n-a", 2, epoch("10:30:00"), None))
+    conn.execute(attempts, ("n-b", 1, epoch("10:12:00"), epoch("10:14:00")))
+    conn.execute("INSERT INTO events (ts, node, kind) VALUES (?, NULL, 'reconcile')", (epoch("10:00:00"),))
+    judged = "INSERT INTO judgements (node, attempt, model, cost_usd, judged_at) VALUES (?, ?, ?, ?, ?)"
+    conn.execute(judged, ("n-a", 1, "typesafe/jev-1.14", 0.01, epoch("10:15:00")))
+    conn.execute(judged, ("n-a", 2, "typesafe/jev-1.14", 0.02, epoch("10:40:00")))
+    conn.execute(judged, ("n-b", 1, "typesafe/jev-1.14", 0.005, epoch("10:13:30")))
+    conn.close()
+    # Every response is 1000 input and 100 output tokens: $0.003 at Sonnet's list price.
+    write_lines(os.path.join(claude, "s", "main.jsonl"), [
+        assistant("o0", "claude-sonnet-5-5", stamp("09:59:00"), root, "s-orch", 1000, 100),
+        assistant("o1", "claude-sonnet-5-5", stamp("10:30:00"), root, "s-orch", 1000, 100),
+        assistant("w1", "claude-sonnet-5-5", stamp("10:10:00"), dotfiles, "s-w", 1000, 100),
+        assistant("w2", "claude-sonnet-5-5", stamp("10:25:00"), dotfiles, "s-w", 1000, 100),
+        assistant("w3", "claude-sonnet-5-5", stamp("10:31:00"), dotfiles, "s-w", 1000, 100),
+        assistant("x1", "claude-sonnet-5-5", stamp("10:10:30"), os.path.join(tasks, "t4", "dotfiles"), "s-x",
+                  1000, 100),
+    ])
+    write_lines(os.path.join(claude, "s", "subagents", "agent-a.jsonl"), [
+        assistant("sa1", "claude-sonnet-5-5", stamp("10:12:00"), dotfiles, "s-w", 1000, 100, sidechain=True),
+    ])
+    write_lines(os.path.join(claude, "r", "r.jsonl"), [
+        assistant("r1", "claude-sonnet-5-5", stamp("10:13:00"), research, "s-r", 1000, 100),
+    ])
+    flags = ["--claude-dir", claude, "--codex-dir", os.path.join(base, "none"), "--tasks-dir", tasks]
+    return os.path.join(root, "state.db"), flags
+
+
+def check_state(env):
+    with tempfile.TemporaryDirectory() as base:
+        state, flags = build_state(base)
+
+        def digest():
+            with open(state, "rb") as handle:
+                return hashlib.sha256(handle.read()).hexdigest()
+
+        before = digest()
+
+        def rows(*args, key):
+            return {key(row): row for row in json.loads(run(["--json", "--state", state, *args, *flags], env).stdout)}
+
+        def want(row, turns, usd, jev=0.0):
+            check(row["turns"] == turns and close(row["usd"], usd, 1e-9) and close(row["jev_usd"], jev, 1e-9),
+                  f"{row['node']} {row['attempt']} {row['tier']}: {row}")
+
+        # By node: n-a has a1 (worker and subagent turns) and a2; the orchestrator at 10:30 is T2; the 09:59
+        # orchestrator turn and the 10:25 worker turn fall outside every window.
+        by_node = rows("--by", "node", key=lambda row: (row["node"], row["tier"]))
+        check(sorted(by_node) == [("-", "T2"), ("-", "unattributed"), ("n-a", "work"), ("n-b", "work")],
+              f"node rows: {sorted(by_node)}")
+        want(by_node[("n-a", "work")], 3, 0.009, 0.03)
+        want(by_node[("n-b", "work")], 1, 0.003, 0.005)
+        want(by_node[("-", "T2")], 1, 0.003)
+        want(by_node[("-", "unattributed")], 2, 0.006)
+        check(by_node[("n-b", "work")]["agent"] == "researcher" and by_node[("-", "T2")]["agent"] == "orchestrator",
+              f"agents: {by_node}")
+
+        # By attempt: the same figures split per attempt; the default --by is node.
+        by_attempt = rows("--by", "attempt", key=lambda row: (row["node"], row["attempt"], row["tier"]))
+        want(by_attempt[("n-a", 1, "work")], 2, 0.006, 0.01)
+        want(by_attempt[("n-a", 2, "work")], 1, 0.003, 0.02)
+        want(by_attempt[("n-b", 1, "work")], 1, 0.003, 0.005)
+        check(run(["--json", "--state", state, *flags], env).stdout == run(
+            ["--json", "--state", state, "--by", "node", *flags], env).stdout, "default --by is node")
+
+        # By tier: work is the attempts, T1 the judge (3 judgements), T2 the orchestrator.
+        by_tier = rows("--by", "tier", key=lambda row: row["tier"])
+        check(sorted(by_tier) == ["T1", "T2", "unattributed", "work"], f"tier rows: {sorted(by_tier)}")
+        want(by_tier["work"], 4, 0.012)
+        want(by_tier["T1"], 3, 0.035)
+        want(by_tier["T2"], 1, 0.003)
+        want(by_tier["unattributed"], 2, 0.006)
+        check(by_tier["T1"]["agent"] == "jev", f"judge row: {by_tier['T1']}")
+
+        # --since is inclusive and --until exclusive: 10:12 to 10:31 holds the subagent, the researcher, the
+        # orchestrator and the 10:25 worker turn; the judgements count by judged_at.
+        window = ["--since", "2026-10-16T10:12:00Z", "--until", "2026-10-16T10:31:00Z"]
+        ranged = rows(*window, "--by", "node", key=lambda row: (row["node"], row["tier"]))
+        want(ranged[("n-a", "work")], 1, 0.003, 0.01)
+        want(ranged[("n-b", "work")], 1, 0.003, 0.005)
+        want(ranged[("-", "T2")], 1, 0.003)
+        want(ranged[("-", "unattributed")], 1, 0.003)
+
+        # The text table prints, and the database is read-only.
+        text = run(["--state", state, "--by", "tier", *flags], env).stdout
+        check("T2" in text and "unattributed" in text, f"text table: {text}")
+        check(digest() == before, "state.db changed")
+
+        # Refusals: --by node without --state, --state with another --by, a split, a missing file, a non-database.
+        run(["--by", "node", *flags], env, expect=2)
+        run(["--state", state, "--by", "day", *flags], env, expect=2)
+        run(["--state", state, "--split", "2026-10-16", *flags], env, expect=2)
+        run(["--state", os.path.join(base, "missing.db"), *flags], env, expect=2)
+        bad = os.path.join(base, "bad.db")
+        write_lines(bad, ["not a database"])
+        run(["--state", bad, *flags], env, expect=2)
 
 
 def check_efficiency(env):
@@ -363,6 +490,7 @@ def main():
 
         check_efficiency(env)
     check_codex_fallback(env)
+    check_state(env)
 
     print("task-spend fixture: ok")
 
