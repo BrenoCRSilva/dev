@@ -782,26 +782,31 @@ def load_nodes(conn, root):
     return with_questions(conn, root, nodes)
 
 
+def question_spec(node_id, row):
+    """The spec of a researcher node q<qid>: the question, and where its answer goes."""
+    return (f"# {node_id}: answer a question from {row['node']}\n\n"
+            f"Asked{' as blocking' if row['blocking'] else ''} in reports/{row['agent']}/{row['node']}.json:\n\n"
+            f"> {' '.join(row['text'].split())}\n\n"
+            f"Write the answer to research/answers/{row['qid']}.md. Its report lists that file in files_changed as "
+            f"answers/{row['qid']}.md (paths there are relative to research/), then writes reports/researcher/{node_id}.json.\n")
+
+
 def with_questions(conn, root, nodes):
     """The plan's nodes plus a researcher node q<qid> for each question without scope_change. The node and its spec come
-    from the question row, so a restart rebuilds both the same way and reconcile keeps the node."""
+    from the question row, so a restart rebuilds both the same way and reconcile keeps the node. The plan hash is the
+    question's (qid, text), so a change to the spec text does not reopen a resolved node."""
     generated = {}
     for row in task_state.node_questions(conn):
         node_id = f"q{row['qid']}"
         spec = f"specs/{node_id}.md"
-        text = (f"# {node_id}: answer a question from {row['node']}\n\n"
-                f"Asked{' as blocking' if row['blocking'] else ''} in reports/{row['agent']}/{row['node']}.json:\n\n"
-                f"> {' '.join(row['text'].split())}\n\n"
-                f"Write the answer to research/answers/{row['qid']}.md. Its report lists that file in files_changed as "
-                f"answers/{row['qid']}.md (paths there are relative to research/), then writes reports/researcher/{node_id}.json.\n")
         if not (root / spec).exists():
             (root / "specs").mkdir(exist_ok=True)
-            (root / spec).write_text(text, encoding="utf-8")
+            (root / spec).write_text(question_spec(node_id, row), encoding="utf-8")
         answer = f"answers/{row['qid']}.md"  # the schema-relative form; answer_path is the worktree form
         generated[node_id] = task_plan.Node(
             id=node_id, agent="researcher", spec=spec, after=[], scope=[task_state.answer_path(row["qid"]), answer], contracts=[], checkpoint=False,
             review=task_plan.DEFAULTS["review"], session=task_plan.DEFAULTS["session"],
-            budget=dict(task_plan.DEFAULTS["budget"]), plan_hash=hashlib.sha256(text.encode()).hexdigest())
+            budget=dict(task_plan.DEFAULTS["budget"]), plan_hash=hashlib.sha256(f"{row['qid']}\n{row['text']}".encode()).hexdigest())
     return {**nodes, **generated}
 
 

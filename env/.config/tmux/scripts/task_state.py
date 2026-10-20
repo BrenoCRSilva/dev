@@ -214,6 +214,8 @@ def reconcile(conn, nodes):
                     (node_id, node.agent, node.plan_hash),
                 )
                 counts["added"] += 1
+            elif researcher_qid(node_id) and row["status"] in ("cancelled", "done"):
+                continue  # a generated node keeps its resolved state: its question row is its source, not the spec text
             elif row["status"] == "cancelled" and (row["route"] != "cancelled" or row["plan_hash"] != node.plan_hash):
                 conn.execute(
                     "UPDATE nodes SET agent = ?, status = 'pending', plan_hash = ?, route = NULL WHERE id = ?",
@@ -379,15 +381,17 @@ def wake(conn, node_id, tier, rule, reason, pointers=None, options=None, audit=N
 
 def add_questions(conn, node_id, attempt, questions):
     """Records a report's questions, once per attempt and text, numbered after the existing ones. A scope_change question
-    raises an Opus wake instead of a researcher node. Returns the qids recorded."""
+    raises an Opus wake instead of a researcher node. Returns the qids: the new ones, and the earlier qid of a repeated one."""
     qids = []
     with transaction(conn):
         _row(conn, node_id)
         for question in questions:
             text = str(question.get("text", ""))[:500]
             # One question per node and text while the earlier one is open, across attempts; a re-run of its report adds nothing.
-            if conn.execute("SELECT 1 FROM questions WHERE node = ? AND text = ? AND (attempt = ? OR status = 'open')",
-                            (node_id, text, attempt)).fetchone():
+            earlier = conn.execute("SELECT qid FROM questions WHERE node = ? AND text = ? AND (attempt = ? OR status = 'open')",
+                                   (node_id, text, attempt)).fetchone()
+            if earlier:
+                qids.append(earlier[0])
                 continue
             qid = str(conn.execute("SELECT COALESCE(MAX(CAST(qid AS INTEGER)), 0) + 1 FROM questions").fetchone()[0])
             scope_change = bool(question.get("scope_change"))

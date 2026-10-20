@@ -531,6 +531,132 @@ def scenario_question_settle(tmp):
     check("settle: a question wake takes no retry", refused, "retry was accepted")
 
 
+def dispatch_module():
+    """task-dispatch.py as a module, so a scenario can swap its herdr or task-agent calls for a fake."""
+    spec = importlib.util.spec_from_file_location("task_dispatch_fixture", DISPATCH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def scenario_answer_relative(tmp):
+    """A researcher's report lists its answer as the schema-relative answers/<qid>.md (relative to research/), as the
+    generated spec asks: the file is in scope, so the answer is accepted and the successor released."""
+    root, fake, env = plan_root(tmp, "answer-relative", [("a", WORKER, [], False), ("b", WORKER, ["a"], False)])
+    v1.set_agent(fake, WORKER, [turn_for(root, "a", questions=[{"text": "which path?", "blocking": True}]), turn_for(root, "b")])
+    researcher = turn_for(root, "q1", agent="researcher", files=["answers/1.md"])
+    researcher["writes"] = {str(root / "research" / "answers" / "1.md"): "Use path X.\n"}
+    v1.set_agent(fake, "researcher", [researcher])
+    proc = daemon(env, root)
+    done = wait_for(lambda: poll_rows(root, "SELECT route FROM nodes WHERE id = 'b'") == [("continue",)])
+    stop(proc)
+    check("relative answer: the researcher node continues", poll_rows(root, "SELECT route FROM nodes WHERE id = 'q1'") == [("continue",)],
+          db(root, "SELECT id, route, reason FROM nodes"))
+    check("relative answer: the question is answered with its file", db(root, "SELECT qid, status, answer_path FROM questions")
+          == [("1", "answered", "research/answers/1.md")], db(root, "SELECT qid, status, answer_path FROM questions"))
+    check("relative answer: the successor starts once the answer exists", done, db(root, "SELECT id, status FROM nodes"))
+
+
+def scenario_researcher_start(tmp):
+    """A researcher node with no researcher agent: the dispatcher starts it in the pane whose folder is research/. With
+    no such pane, it raises a launch failure that names the start command (the node's wake says it)."""
+    dispatch = dispatch_module()
+    root = tmp / "researcher-start"
+    (root / "research").mkdir(parents=True)
+    calls, state = [], {"absent": True, "panes": [{"pane_id": "p9", "cwd": str(root / "research")}]}
+
+    def fake_herdr(*args, group="agent"):
+        calls.append((group, *args))
+        if group == "pane":
+            return {"panes": state["panes"]}
+        if args[0] == "get" and state["absent"]:
+            raise dispatch.Herdr("agent_not_found: agent target researcher not found")
+        return {"agent": {"agent_status": "idle"}}
+
+    def fake_task_agent(*args):
+        calls.append(("task-agent", *args))
+        state["absent"] = False
+
+    original = dispatch.herdr, dispatch.task_agent
+    dispatch.herdr, dispatch.task_agent = fake_herdr, fake_task_agent
+    try:
+        dispatch.ensure_researcher(root)
+        check("researcher start: starts it in the research pane", ("task-agent", "start", "researcher", "p9") in calls, calls)
+        calls.clear()
+        state.update(absent=True, panes=[{"pane_id": "p1", "cwd": str(root)}])
+        try:
+            dispatch.ensure_researcher(root)
+            check("researcher start: no pane in research/ is a launch failure", False, "no exception")
+        except dispatch.Launch as error:
+            check("researcher start: no pane in research/ names the start command",
+                  "no pane is in" in str(error) and "task-agent.sh start researcher" in str(error), str(error))
+        check("researcher start: nothing started without a pane", not any(call[0] == "task-agent" for call in calls), calls)
+    finally:
+        dispatch.herdr, dispatch.task_agent = original
+
+
+def scenario_question_repeat(tmp):
+    """Attempt 2 of a node repeats the question attempt 1 left open: it is named by the same qid, adds no row and so
+    generates no second researcher node."""
+    ts = state_module()
+    root = tmp / "question-repeat"
+    root.mkdir()
+    conn = ts.connect(root)
+    conn.execute("INSERT INTO nodes (id, agent, status) VALUES ('a', 'worker-dotfiles', 'running')")
+    first = ts.add_questions(conn, "a", 1, [{"text": "which path?", "blocking": True}])
+    again = ts.add_questions(conn, "a", 2, [{"text": "which path?", "blocking": True}])
+    rows = [tuple(row) for row in conn.execute("SELECT qid, attempt, status FROM questions").fetchall()]
+    check("repeat: attempt 2 names the same qid", first == ["1"] and again == ["1"], f"{first} {again}")
+    check("repeat: one row, from attempt 1", rows == [("1", 1, "open")], rows)
+    check("repeat: one researcher node", [tuple(row)[0] for row in ts.node_questions(conn)] == ["1"], [tuple(row) for row in ts.node_questions(conn)])
+    conn.close()
+
+
+def scenario_question_filter(tmp):
+    """Only an open or unsettled question with an attempt gets a researcher node: answered and closed questions and one
+    with no attempt make none."""
+    ts = state_module()
+    root = tmp / "question-filter"
+    root.mkdir()
+    conn = ts.connect(root)
+    conn.execute("INSERT INTO nodes (id, agent, status) VALUES ('a', 'worker-dotfiles', 'running')")
+    ts.add_questions(conn, "a", 1, [{"text": "open one?"}])
+    for qid, status, attempt in (("2", "answered", 1), ("3", "closed", 1), ("4", "open", None)):
+        conn.execute("INSERT INTO questions (qid, node, text, blocking, status, answer_path, attempt, scope_change) "
+                     "VALUES (?, 'a', ?, 0, ?, NULL, ?, 0)", (qid, f"{status} one?", status, attempt))
+    conn.commit()
+    generated = [tuple(row)[0] for row in ts.node_questions(conn)]
+    check("filter: only the open question with an attempt gets a node", generated == ["1"], generated)
+    conn.close()
+
+
+def scenario_generated_cancel(tmp):
+    """A cancelled researcher node stays cancelled through reconcile when its spec template changes: its plan hash is the
+    question's (qid, text), not the spec text, so the change does not reopen it."""
+    ts, dispatch = state_module(), dispatch_module()
+    root = tmp / "generated-cancel"
+    (root / "specs").mkdir(parents=True)
+    conn = ts.connect(root)
+    conn.execute("INSERT INTO nodes (id, agent, status) VALUES ('a', 'worker-dotfiles', 'running')")
+    ts.add_questions(conn, "a", 1, [{"text": "which path?", "blocking": True}])
+    ts.reconcile(conn, dispatch.with_questions(conn, root, {}))
+    before = [tuple(row) for row in conn.execute("SELECT status, plan_hash FROM nodes WHERE id = 'q1'").fetchall()]
+    with ts.transaction(conn):
+        conn.execute("UPDATE nodes SET status = 'cancelled', route = 'cancelled' WHERE id = 'q1'")
+    (root / "specs" / "q1.md").unlink()  # so the next generation renders the spec again
+    original = dispatch.question_spec
+    dispatch.question_spec = lambda node_id, row: original(node_id, row) + "A changed template.\n"
+    try:
+        ts.reconcile(conn, dispatch.with_questions(conn, root, {}))
+    finally:
+        dispatch.question_spec = original
+    after = [tuple(row) for row in conn.execute("SELECT status, route, plan_hash FROM nodes WHERE id = 'q1'").fetchall()]
+    check("generated cancel: the cancelled node is still cancelled", after and after[0][:2] == ("cancelled", "cancelled"), after)
+    check("generated cancel: the plan hash did not move with the template", after and after[0][2] == before[0][1], (before, after))
+    conn.close()
+
+
 def scenario_reserved_id(tmp):
     """A plan node id q<digits> is refused: those ids belong to the researcher nodes the dispatcher generates."""
     root, _, _ = plan_root(tmp, "reserved", [("q1", WORKER, [], False)])
@@ -964,6 +1090,11 @@ def main():
         scenario_answer_missing(tmp)
         scenario_question_cancel(tmp)
         scenario_question_settle(tmp)
+        scenario_answer_relative(tmp)
+        scenario_researcher_start(tmp)
+        scenario_question_repeat(tmp)
+        scenario_question_filter(tmp)
+        scenario_generated_cancel(tmp)
         scenario_reserved_id(tmp)
         scenario_safety(tmp)
         scenario_checks(tmp)
