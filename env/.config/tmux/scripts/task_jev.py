@@ -70,7 +70,7 @@ QUESTIONS = {
 
 # shortcut: regex redaction covers the common secret shapes, not every format; add a pattern when a new kind shows up.
 # Every pattern runs on one string (a tree leaf), never on dumped JSON, so an escaped quote stays intact.
-SECRET_WORD = r"(?:key|token|secret|passw(?:or)?d|passwd|authorization)"
+SECRET_WORD = r"(?:key|token|secret|passw(?:or)?d|passwd|authorization|cookie)"  # cookie also covers Set-Cookie
 SECRET_NAME = re.compile(SECRET_WORD, re.I)  # a dict key with this in it has its value redacted whole
 VALUE = r"""(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s"',;]+)"""  # quoted (may hold spaces) or bare
 REDACTIONS = (
@@ -80,6 +80,7 @@ REDACTIONS = (
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer [token]"),
     (re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_\w{20,}"
                 r"|\bAKIA[0-9A-Z]{16}\b|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAIza[\w-]{35}"), "[token]"),
+    (re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]*"), "[token]"),  # a JWT: header.payload.signature (the signature may be empty)
     (re.compile(rf'(?i)"([^"\\]*{SECRET_WORD}[^"\\]*)"\s*:\s*(?:"(?:[^"\\]|\\.)*"|-?\d[\d.eE+-]*)'),
      r'"\1": "[redacted]"'),
     (re.compile(rf"(?i)(--[\w.-]*{SECRET_WORD}[\w.-]*)[ \t]+{VALUE}"), r"\1 [redacted]"),  # --token x
@@ -260,10 +261,15 @@ def live_gate(env, key_path):
 
 
 def load_key(env, key_path):
-    """Called only after live_gate passes: the env key, else the key file's line."""
-    key = env.get("OPENROUTER_API_KEY", "").strip()
-    if key:
-        return key
+    """Called only after live_gate passes: the env key, else the key file's line. A key with a space, control or non-ASCII
+    character is refused without being shown: http.client would echo such a header in its error."""
+    key = env.get("OPENROUTER_API_KEY", "").strip() or key_from_file(key_path)
+    if not re.fullmatch(r"[!-~]+", key):
+        raise Usage("OPENROUTER_API_KEY must be printable ASCII with no spaces; the value is not shown")
+    return key
+
+
+def key_from_file(key_path):
     try:
         lines = key_path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -339,20 +345,21 @@ def parse_answers(response, shape, asked=None):
 
 
 def send(post, url, key, body, sleep):
-    """One retry on 429 or 529, after 2 s. Any other failure raises JevError without the key."""
+    """One retry on 429 or 529, after 2 s. Any other failure raises JevError with only the exception's type name: a
+    ValueError from http.client can echo the header, so its text is never kept."""
     try:
         return post(url, key, body)
     except urllib.error.HTTPError as error:
         if error.code not in RETRY_STATUS:
             raise JevError(f"HTTP {error.code}")
-    except (OSError, http.client.HTTPException) as error:
+    except (OSError, http.client.HTTPException, ValueError) as error:
         raise JevError(type(error).__name__)
     sleep(2)
     try:
         return post(url, key, body)
     except urllib.error.HTTPError as error:
         raise JevError(f"HTTP {error.code}")
-    except (OSError, http.client.HTTPException) as error:
+    except (OSError, http.client.HTTPException, ValueError) as error:
         raise JevError(type(error).__name__)
 
 
@@ -362,8 +369,11 @@ def ask(body, *, url, shape, env, key_path, post=_post, sleep=time.sleep, asked=
     check_url(url)
     key = load_key(env, key_path)
     started = time.monotonic()
-    response = send(post, url, key, body, sleep)
-    answers = parse_answers(response, shape, asked)
+    try:
+        response = send(post, url, key, body, sleep)
+        answers = parse_answers(response, shape, asked)
+    except JevError as error:  # no message holds the key; this removes it from one that somehow does
+        raise JevError(str(error).replace(key, "[key]")) from None
     usage = response.get("usage") if isinstance(response, dict) else None
     tokens = usage.get("prompt_tokens", usage.get("input_tokens")) if isinstance(usage, dict) else None
     return {"answers": answers, "latency_ms": round((time.monotonic() - started) * 1000), "input_tokens": tokens}

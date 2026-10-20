@@ -98,6 +98,12 @@ def test_redaction_outputs():
         "password: hunter two": "password: [redacted]",  # an unquoted value runs to the end of its line
         'password: "a b" more': 'password: [redacted] more',  # a quoted value ends at its quote
         "note password: PLANTEDline hunter two\nnext line": "note password: [redacted]\nnext line",
+        "eyJhbGciOiJIUzI1NiJ9.PLANTEDpayload.sig_1-x": "[token]",  # a JWT
+        "eyJhbGciOiJIUzI1NiJ9.PLANTEDpayload.": "[token]",  # an unsigned one
+        "Set-Cookie: sid=PLANTEDck; Path=/": "Set-Cookie: [redacted]",
+        "Cookie: a=PLANTEDc; b=2": "Cookie: [redacted]",
+        "--cookie PLANTEDflag": "--cookie [redacted]",
+        '{"Cookie": "PLANTEDjson"}': '{"Cookie": "[redacted]"}',
     }
     for raw, expected in cases.items():
         assert jev.redact(raw) == expected, (raw, jev.redact(raw))
@@ -300,6 +306,32 @@ def test_parse_rejects_bad_replies():
         raise AssertionError("a non-JSON chat reply must raise JevError")
 
 
+def test_bad_keys_are_refused_unseen(tmp):
+    """M3f item 2: a key with a space, newline or non-ASCII character is refused, and the refusal does not show it."""
+    key_path = key_file(tmp)
+    for bad in ("sk-or-v1-PLANTEDKEY\nECHOLINE", "sk-or-v1 PLANTEDSPACE", "sk-or-v1-PLANTEDé", "sk-or-v1-PLANTED\x01"):
+        try:
+            jev.load_key({"OPENROUTER_API_KEY": bad}, key_path)
+        except jev.Usage as error:
+            assert "PLANTED" not in str(error) and "ECHOLINE" not in str(error), str(error)
+        else:
+            raise AssertionError(f"accepted {bad!r}")
+    assert jev.load_key({"OPENROUTER_API_KEY": KEY_VALUE}, key_path) == KEY_VALUE
+
+
+def test_library_errors_keep_no_text():
+    """M3f item 2: a ValueError from http.client can echo the header, so send keeps only its type name."""
+    def echo(url, key_value, body):
+        raise ValueError(f"Invalid header value b'Bearer {key_value}\\n'")
+
+    try:
+        jev.send(echo, URL, KEY_VALUE, {}, lambda seconds: None)
+    except jev.JevError as error:
+        assert str(error) == "ValueError" and KEY_VALUE not in str(error), str(error)
+    else:
+        raise AssertionError("a ValueError must raise JevError")
+
+
 def test_cli_gate_refuses_without_network(tmp):
     report = tmp / "cli-report.json"
     report.write_text(json.dumps(planted_report()), encoding="utf-8")
@@ -324,6 +356,8 @@ def main():
         test_redirects_are_not_followed()
         test_answers_and_retry(tmp)
         test_parse_rejects_bad_replies()
+        test_bad_keys_are_refused_unseen(tmp)
+        test_library_errors_keep_no_text()
         test_cli_gate_refuses_without_network(tmp)
     print("task-jev fixture: ok")
     return 0

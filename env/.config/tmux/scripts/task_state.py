@@ -274,8 +274,9 @@ def settle(conn, node_id, report, report_mtime, head_sha=None):
         return True
 
 
-def route(conn, node_id, outcome, reason="", tier=None):
-    """running -> done (outcome continue or checkpoint), stopped:<why> or failed:<why>."""
+def route(conn, node_id, outcome, reason="", tier=None, wake=None):
+    """running -> done (outcome continue or checkpoint), stopped:<why> or failed:<why>. wake is (rule, reason, pointers) for
+    a wake to raise in the same transaction, so a stop and the wake that explains it land together or not at all."""
     status = _route_status(outcome)
     with transaction(conn):
         row = _row(conn, node_id)
@@ -289,6 +290,9 @@ def route(conn, node_id, outcome, reason="", tier=None):
         )
         _mark_outcome(conn, node_id, outcome)
         _event(conn, node_id, "route", f"{outcome}: {reason}" if reason else outcome)
+        if wake:
+            rule, wake_reason, pointers = wake
+            _wake(conn, node_id, tier, rule, wake_reason, pointers)
 
 
 def record_judgement(conn, node_id, attempt, judged):

@@ -241,6 +241,23 @@ def test_spend_judgements(tmp):
     check("judgement priced as jev input", abs(cost_by_kind["input"] - 0.042) < 1e-9 and tier == 0, cost_by_kind)
 
 
+def test_bad_key_never_shown(tmp):
+    """M3f item 2: a key with a newline is refused before any request. Its text reaches no judgement, wake or summary line."""
+    root, plan = make_root(tmp)
+    key_path = tmp / "openrouter.env"
+    key_path.write_text("OPENROUTER_API_KEY=sk-or-v1-FILEKEY\n", encoding="utf-8")
+    key_path.chmod(0o600)
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(Path.home()), "TASK_JEV_MODE": "shadow", "TASK_ROLE": "orchestrator",
+           "TASK_JEV_LIVE": "1", "OPENROUTER_API_KEY": "sk-or-v1-PLANTEDKEY\nECHOLINE", "TASK_JEV_KEYFILE": str(key_path)}
+    with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(dispatch, "route", return_value=(0, "decided")):
+        code, line, judged = dispatch.evaluate(root, "worker-dotfiles", "a", ["env/x"], BUDGET, plan)
+    check("a bad key routes as shadow does", code == 0, code)
+    check("a bad key is a Usage error with no answers",
+          judged["answers"] is None and judged["error"].startswith("Usage: "), judged)
+    shown = repr([judged["error"], dispatch.jev_pointer(judged), dispatch.jev_summary(judged), line])
+    check("the key text reaches no judgement, wake or line", "PLANTEDKEY" not in shown and "ECHOLINE" not in shown, shown)
+
+
 def main():
     test_settings()
     with tempfile.TemporaryDirectory(prefix="jev-route-fixture-") as folder:
@@ -252,6 +269,7 @@ def main():
         test_next_ready_only_with_a_successor(tmp / "next")
         test_calibrate(tmp)
         test_spend_judgements(tmp)
+        test_bad_key_never_shown(tmp / "key")
     print("task-jev-route fixture: ok")
     return 0
 

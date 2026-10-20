@@ -526,21 +526,42 @@ def hook_text(root, nodes, node, attempt):
 
 
 # Concrete privileged commands in the report's text: user tier. A bare keyword ("install" in prose) is not one.
+# Gaps are bounded at 300 characters, and a gap stops before its own anchor word again (the (?!...) parts): a repeated
+# anchor otherwise makes each start rescan the rest of the line.
 PRIVILEGED = [re.compile(p, re.IGNORECASE) for p in (
     r"\bsudo\b|\b(?:doas|pkexec|systemctl|chown|stow)\b",
-    r"\bsu\b(?:\s+\S+)*\s+-c\b",
-    r"\bpacman\s+(?:\S+\s+)*?(?:-\w*[SUR]\w*|--sync|--upgrade|--remove)\b",
-    r"\b(?:yay|paru|apt(?:-get)?|dnf|brew)\s+(?:\S+\s+)*?(?:install|-S\w*|add)\b",
-    r"\b(?:pip3?|npm|pnpm|yarn|cargo|gem)\s+(?:\S+\s+)*?install\b[^\n]*(?:\s-g\b|--global\b|--system\b|--user\b|\s/usr\b)",
-    r"\bnpm\b[^\n]*?(?:\s-g\b|--global\b)",  # -g before the verb too
+    r"\bsu\b(?:\s+\S+){0,10}?\s+-c\b",
+    r"\bpacman\s+(?:\S+\s+){0,30}?(?:-\w*[SUR]\w*|--sync|--upgrade|--remove)\b",
+    r"\b(?:yay|paru|apt(?:-get)?|dnf|brew)\s+(?:\S+\s+){0,30}?(?:install|-S\w*|add)\b",
+    r"\b(?:pip3?|npm|pnpm|yarn|cargo|gem)\s+(?:\S+\s+){0,30}?install\b"
+    r"(?:(?!\b(?:pip3?|npm|pnpm|yarn|cargo|gem)\b)[^\n]){0,300}?(?:\s-g\b|--global\b|--system\b|--user\b|\s/usr\b)",
+    r"\bnpm\b(?:(?!\bnpm\b)[^\n]){0,300}?(?:\s-g\b|--global\b)",  # -g before the verb too
     r"\bcargo\s+install\b",
-    r"\bln\b(?=[^\n]*\s-\w*s\w*)[^\n]*?(?:~|\$\{?HOME\}?|/home/|/root\b)",
-    r"\bgit\b(?:\s+-\S+(?:\s+\S+)?)*?\s+push\b",
-    r"\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b",
-    r"\b(?:ba|z|da)?sh\s+<\(\s*(?:curl|wget)\b|\b(?:ba|z|da)?sh\b[^\n]*\$\(\s*(?:curl|wget)\b",
-    r"\b(?:curl|wget)\b[^\n]*?(?:\s-\w*[oO]\b|--output\b)[^\n]*?(?:;|&&|\|\|)\s*(?:sudo\s+)?(?:ba|z|da)?sh\b",  # -fsSLo too
+    r"\bln\b(?=(?:(?!\bln\b)[^\n]){0,300}\s-\w*s\w*)(?:(?!\bln\b)[^\n]){0,300}?(?:~|\$\{?HOME\}?|/home/|/root\b)",
+    # Each flag takes at most one argument that does not start with '-', so the groups parse one way (no exponential backtrack).
+    r"\bgit\b(?:\s+-\S+(?:\s+[^-\s]\S*)?){0,15}?\s+push\b",
+    r"\b(?:curl|wget)\b[^|\n]{0,300}\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b",
+    r"\b(?:ba|z|da)?sh\s+<\(\s*(?:curl|wget)\b"
+    r"|\b(?:ba|z|da)?sh\b(?:(?!\b(?:ba|z|da)?sh\b)[^\n]){0,300}?\$\(\s*(?:curl|wget)\b",
+    # A download, then a run of the file, after ; && || | or a newline. The download's gap holds no second curl/wget,
+    # so each download is searched only up to the next one.
+    r"\b(?:curl|wget)\b(?:(?!\b(?:curl|wget)\b)[^\n]){0,300}?(?:\s-\w*[oO]\b|--output\b)[^\n]{0,300}?"
+    r"(?:;|&&|\|\|?|\n)\s*(?:sudo\s+)?(?:(?:ba|z|da)?sh\b|\./\S+|(?:python3?|node|perl|bash|sh|source|\.)\s+)",  # -fsSLo too
     r"\b(?:apply|deploy)\.sh\b",
 )]
+# The privileged rules run over windows of the text, not whole lines: a long line is still checked in full, and no
+# window is long enough for a match to take long. A match longer than the overlap can be missed.
+PRIVILEGED_WINDOW, PRIVILEGED_STEP = 2000, 1000
+
+
+def privileged_match(text):
+    """The text of the first PRIVILEGED match, or None."""
+    for start in range(0, max(len(text) - PRIVILEGED_WINDOW + PRIVILEGED_STEP, 1), PRIVILEGED_STEP):
+        window = text[start:start + PRIVILEGED_WINDOW]
+        for pattern in PRIVILEGED:
+            if found := pattern.search(window):
+                return found.group(0)
+    return None
 
 
 def outside_worktree(path):
@@ -574,12 +595,9 @@ def t0_safety(formula, data):
     outside = [p for p in base["files_changed"] if outside_worktree(p)]
     if outside:
         return ASK_USER, f"safety: writes outside the worktree: {', '.join(outside)}"[:300]
-    texts = report_texts(data)
-    for pattern in PRIVILEGED:
-        for text in texts:
-            found = pattern.search(text)
-            if found:
-                return ASK_USER, f"safety: privileged {found.group(0)[:80]}"
+    for text in report_texts(data):
+        if found := privileged_match(text):
+            return ASK_USER, f"safety: privileged {found[:80]}"
     keyword = DECIDE_MODULE.safety_hit(formula, {**base, "files_changed": []})
     if keyword:
         return KEYWORD, f"safety: {keyword}"[:300]
@@ -692,8 +710,10 @@ def judge(root, plan, node_id, agent, data, mode, threshold):
               "latency_ms": None, "input_tokens": None, "cost_usd": None}
     try:
         judged.update(ask_jev(root, plan, node_id, agent, data))
-    except Exception as error:  # the key is never in an error message: the client keeps it out
+    except (task_jev.JevError, task_jev.Usage, task_jev.InputError) as error:  # our own messages, never the key
         judged["error"] = f"{type(error).__name__}: {error}"[:300]
+    except Exception as error:  # a library error can echo a header value, so only its type name is kept
+        judged["error"] = type(error).__name__
     judged["derived_route"] = task_jev.derive_route(judged["answers"], threshold)
     return judged
 
@@ -718,31 +738,41 @@ def over_budget(data, budget):
     return None
 
 
+def blocker(data, scope):
+    """The first T0 stop that sends the report back to Opus, as (exit code, one line), or None: needs_decision, a blocking
+    question, checks not all exit 0, a changed path outside scope."""
+    if data.get("needs_decision"):
+        return NEEDS_DECISION, f"needs_decision is set: {str(data['needs_decision'])[:200]}"
+    blocking = [str(q.get("text", ""))[:200] for q in data.get("questions", []) if q.get("blocking")]
+    if blocking:
+        return QUESTION, f"blocking question: {blocking[0]}"
+    failed = [check.get("cmd", "?") for check in data.get("checks", []) if check.get("exit") != 0]
+    if failed:
+        return CHECKS_FAILED, f"checks not all exit 0: {', '.join(failed)}"[:300]
+    if scope is not None:  # None: the node is gone from the plan, so there is no scope to check against
+        regexes = scope_regexes(scope)
+        outside = [path for path in data.get("files_changed", []) if not any(r.match(path) for r in regexes)]
+        if outside:
+            return OUT_OF_SCOPE, f"changed outside scope: {', '.join(outside)}"[:300]
+    return None
+
+
 def evaluate(root, agent, node, scope, budget, plan):
-    """T0 rules, free and first: needs_decision, blocking questions, checks exit 0, files within scope, no safety
-    paths, context and turns within budget. Then jev (T1, after T0 passes or on a keyword-safety stop), then the report
-    check and task-decide (v1). Returns (exit code, one line, judgement or None); 0 means continue."""
+    """T0 rules, free and first: the safety tiers, then needs_decision, blocking questions, checks exit 0, files within
+    scope, context and turns within budget. A user-tier safety hit wins over every other stop, and names it. Then jev
+    (T1, after T0 passes or on a keyword-safety stop), then the report check and task-decide (v1). Returns (exit code,
+    one line, judgement or None); 0 means continue."""
     report = report_path(root, agent, node)
     try:
         data = json.loads(report.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return NO_REPORT, f"no readable report for {node}", None
-    if data.get("needs_decision"):
-        return NEEDS_DECISION, f"needs_decision is set: {str(data['needs_decision'])[:200]}", None
-    blocking = [str(q.get("text", ""))[:200] for q in data.get("questions", []) if q.get("blocking")]
-    if blocking:
-        return QUESTION, f"blocking question: {blocking[0]}", None
-    failed = [check.get("cmd", "?") for check in data.get("checks", []) if check.get("exit") != 0]
-    if failed:
-        return CHECKS_FAILED, f"checks not all exit 0: {', '.join(failed)}"[:300], None
-    if scope is not None:  # None: the node is gone from the plan, so there is no scope to check against
-        regexes = scope_regexes(scope)
-        outside = [path for path in data.get("files_changed", []) if not any(r.match(path) for r in regexes)]
-        if outside:
-            return OUT_OF_SCOPE, f"changed outside scope: {', '.join(outside)}"[:300], None
     tiered = t0_safety(DECIDE_MODULE.load_formula(FORMULA), data)
-    if tiered and tiered[0] != KEYWORD:
-        return (*tiered, None)
+    stop = blocker(data, scope)
+    if tiered and tiered[0] == ASK_USER:
+        return ASK_USER, (f"{tiered[1]}; {stop[1]}" if stop else tiered[1])[:300], None
+    if stop:
+        return (*stop, None)
     if over := over_budget(data, budget):  # before any jev clearance, keyword stops included
         return (*over, None)
     mode, threshold = jev_settings()
@@ -781,8 +811,7 @@ def spawn(results, root, agent, node, scope, budget, since, start_ms, turn_ms, p
 
 def stop_node(conn, node, kind, name, reason, tier="opus", pointers=None):
     """Routes the running node stopped or failed, and raises the wake for Opus (or the user) that says why."""
-    task_state.route(conn, node, f"{kind}:{name}", reason, tier)
-    task_state.wake(conn, node, tier, name, reason, pointers)
+    task_state.route(conn, node, f"{kind}:{name}", reason, tier, wake=(name, reason, pointers))
 
 
 def finish(conn, root, node, code, line, plan, judged=None):
