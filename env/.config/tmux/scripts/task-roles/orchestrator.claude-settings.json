@@ -26,6 +26,18 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.config/tmux/scripts/task-compact-context.py",
+            "timeout": 20
+          }
+        ]
+      }
     ]
   }
 }

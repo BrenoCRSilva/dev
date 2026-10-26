@@ -85,7 +85,7 @@ def plan_root(tmp, name, nodes, session=None):
     agent.write_text(FAKE_TASK_AGENT, encoding="utf-8")
     agent.chmod(0o755)
     env["TASK_AGENT_SCRIPT"] = str(agent)
-    text = "[defaults]\nbudget = { turns = 60, prompt_k = 90 }\n"
+    text = "[defaults]\nbudget = { turns = 60, prompt_k = 300 }\n"
     if session:
         text += f'session = "{session}"\n'
 
@@ -991,7 +991,7 @@ def scenario_keyword_path(tmp):
         ("kw-route-edge", {"TASK_JEV_MODE": "route", "TASK_JEV_THRESHOLD": "0.8"}, {"FAKE_JEV_CONF": "0.8"}, {}, "done", "continue"),
         ("kw-route-unfav", {"TASK_JEV_MODE": "route", "TASK_JEV_THRESHOLD": "0.8"}, {"FAKE_JEV_FLIP": "risk_material"}, {}, "keyword", "escalate"),
         ("kw-route-low", {"TASK_JEV_MODE": "route", "TASK_JEV_THRESHOLD": "0.8"}, {"FAKE_JEV_CONF": "0.5"}, {}, "keyword", "escalate"),
-        ("kw-budget-ctx", {"TASK_JEV_MODE": "route", "TASK_JEV_THRESHOLD": "0.8"}, {}, {"context_k": 95}, "budget", None),
+        ("kw-budget-ctx", {"TASK_JEV_MODE": "route", "TASK_JEV_THRESHOLD": "0.8"}, {}, {"context_k": 350}, "budget", None),
         ("kw-budget-turns", {"TASK_JEV_MODE": "route", "TASK_JEV_THRESHOLD": "0.8"}, {}, {"turns": 99}, "budget", None),
     )
     for name, mode_env, jev_env, extra, outcome, derived in cases:
@@ -1005,7 +1005,7 @@ def scenario_keyword_path(tmp):
             rule = "keyword-safety" if outcome == "keyword" else "budget"
             check(f"{name}: a {rule} wake goes to Opus, not the user", woke.startswith("wake ") and f" opus k1 {rule}: " in woke, woke)
             if outcome == "budget":
-                check(f"{name}: budget is named as the reason", "over the 90k budget" in woke or "over the 60-turn budget" in woke, woke)
+                check(f"{name}: budget is named as the reason", "over the 300k budget" in woke or "over the 60-turn budget" in woke, woke)
         judged = db(root, "SELECT mode, derived_route FROM judgements WHERE node = 'k1'")
         check(f"{name}: jev is asked only when the keyword or the gate needs it", bool(judged) == (derived is not None), str(judged))
         if derived is not None:

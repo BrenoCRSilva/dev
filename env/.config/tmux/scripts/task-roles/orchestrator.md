@@ -118,12 +118,17 @@ A report's `handoff` is what the next session on that agent reads first.
   Use `status-reader` (Haiku, `.claude/agents/`) for any read longer than the answer you need.
 - Record each user decision in `AGENTS.md` `## Decisions` when it happens, so a
   restart needs no write-up.
-- The context guard (task-context-guard.py) adds a checkpoint line at 120k and a
-  restart request at 150k. Restart with `task-agent.sh restart orchestrator` from
-  your own pane, only when no user question is pending and work remains. Make it
-  your turn's last action: work after it in the turn is not carried over. The fresh
-  session re-asks the open Decisions, runs `digest` and `wakes`, and restarts `run`
-  and `wake-wait` itself; you do not redo them.
+- You have the full 1M window. The context guard (task-context-guard.py) adds one
+  line at 400k: run `/compact` at your next checkpoint, after `AGENTS.md` is up to date.
+  Native compaction keeps this session. A SessionStart hook (task-compact-context.py)
+  then re-adds the Decisions, the Plan / status, the digest, the open wakes and
+  `plan/orchestrator-handoff.md` if you wrote one. Keep that file short and current
+  before a compaction. The guard never asks for a restart.
+- `task-agent.sh restart orchestrator` is still there as a manual option, for when a
+  fresh session is cleaner than a compacted one. Run it from your own pane, only when
+  no user question is pending and work remains, as your turn's last action: work after
+  it in the turn is not carried over. The fresh session re-asks the open Decisions,
+  runs `digest` and `wakes`, and restarts `run` and `wake-wait` itself.
 - Workers and the researcher get a fresh session per node when the node says
   `session = "fresh"` (the default). Use `session = "continue"` only for a node that
   must keep the session. Nothing else needs restarting by hand.

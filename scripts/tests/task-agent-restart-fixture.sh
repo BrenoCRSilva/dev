@@ -45,8 +45,12 @@ check() { [[ "$1" == *"$2"* ]] || fail "$3: expected '$2' in: $1"; }
 # --- the orchestrator's launch -------------------------------------------------
 claude_line=$("$TASK_AGENT" --dry-run orchestrator)
 for token in 'env ENABLE_CLAUDEAI_MCP_SERVERS=false' 'CLAUDE_CODE_PROMPT_CACHE_TTL=1h' \
-    'CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000' '--strict-mcp-config' 'mcpServers' '--settings' 'orchestrator.claude-settings.json'; do
+    '--strict-mcp-config' 'mcpServers' '--settings' 'orchestrator.claude-settings.json'; do
     check "$claude_line" "$token" 'orchestrator launch'
+done
+# The full 1M window: no auto-compact cap and no 1M opt-out.
+for token in 'CLAUDE_CODE_AUTO_COMPACT_WINDOW' 'CLAUDE_CODE_DISABLE_1M_CONTEXT'; do
+    [[ "$claude_line" != *"$token"* ]] || fail "orchestrator launch must not carry $token"
 done
 for token in '--bare' '--setting-sources' '--disable-slash-commands' 'disableBundledSkills' '--resume' '--continue'; do
     [[ "$claude_line" != *"$token"* ]] || fail "orchestrator launch must not carry $token"

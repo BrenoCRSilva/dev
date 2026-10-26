@@ -87,7 +87,7 @@ def scenario_valid_and_defaults():
     check("valid plan loads its nodes in file order", list(nodes) == ["a", "r", "m1-review"], list(nodes))
     a, r, review = nodes["a"], nodes["r"], nodes["m1-review"]
     check("[defaults] session applies to nodes", a.session == "continue" and r.session == "continue")
-    check("budget merges node over defaults", a.budget == {"turns": 40, "prompt_k": 90}, a.budget)
+    check("budget merges node over defaults", a.budget == {"turns": 40, "prompt_k": 300}, a.budget)
     check("node budget overrides one key", r.budget == {"turns": 40, "prompt_k": 50}, r.budget)
     check("review falls back to the built-in default", a.review == "judge")
     check("checkpoint node needs no spec", review.spec is None and review.checkpoint is True)

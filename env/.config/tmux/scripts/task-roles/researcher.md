@@ -91,7 +91,7 @@ context: <about Nk tokens, ok | restart suggested>
 === END ===
 ```
 
-Estimate your context from how much this session holds. When it nears 90k
-tokens, write your report with `context: about 90k, restart suggested`, finish
+Estimate your context from how much this session holds. When it nears 300k
+tokens, write your report with `context: about 300k, restart suggested`, finish
 the current unit, and start no new unit. Do not compact or summarize your own session to keep
 going; the orchestrator will restart you with a fresh session.

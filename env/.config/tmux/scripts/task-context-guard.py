@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """C4 context guard: a UserPromptSubmit and PostToolUse hook for the orchestrator, wired in
 task-roles/orchestrator.claude-settings.json. It reads the prompt size of the newest main-thread assistant
-turn from the transcript tail (input + cache read + cache write). From 120k tokens it adds one line of
-context: a checkpoint reminder, and from 150k a restart request. A line is repeated only after the prompt has
-grown by 20k, or when the level changes. Silent below the checkpoint. Thresholds and the state folder are
-env-overridable (TASK_CONTEXT_CHECKPOINT, TASK_CONTEXT_RESTART, TASK_CONTEXT_STEP, TASK_CONTEXT_STATE).
+turn from the transcript tail (input + cache read + cache write). From 400k tokens it adds one soft line,
+once per crossing: run /compact at the next checkpoint. It never asks for a restart: native compaction keeps
+the session, and task-compact-context.py restores its state after it. The line is repeated only after the
+prompt has dropped below the checkpoint (a compaction does that) and crossed it again. Silent below. The
+checkpoint is env-overridable (TASK_CONTEXT_CHECKPOINT, TASK_CONTEXT_STATE).
 Any error exits 0 with no output: a hook must never block the session. Stdlib only.
 """
 import json
@@ -14,10 +15,6 @@ from pathlib import Path
 
 TAIL_BYTES = 1 << 20  # the newest turn sits at the end; tool results can be large
 STATE_ROOT = Path(os.environ.get("TASK_CONTEXT_STATE") or Path.home() / ".local/state/task-agents/context-guard")
-
-
-def threshold(name, default):
-    return int(os.environ.get(name) or default)
 
 
 def prompt_tokens(transcript):
@@ -43,25 +40,18 @@ def prompt_tokens(transcript):
 
 def guard(payload):
     """The context line to add for this event, or None."""
-    checkpoint = threshold("TASK_CONTEXT_CHECKPOINT", 120_000)
-    restart = threshold("TASK_CONTEXT_RESTART", 150_000)
-    step = threshold("TASK_CONTEXT_STEP", 20_000)
+    checkpoint = int(os.environ.get("TASK_CONTEXT_CHECKPOINT") or 400_000)
     tokens = prompt_tokens(payload["transcript_path"])
-    state_file = STATE_ROOT / f"{Path(str(payload['session_id'])).name}.json"
+    flag = STATE_ROOT / f"{Path(str(payload['session_id'])).name}.reminded"
     if tokens is None or tokens < checkpoint:
-        state_file.unlink(missing_ok=True)
+        flag.unlink(missing_ok=True)
         return None
-    level = 2 if tokens >= restart else 1
-    state = json.loads(state_file.read_text()) if state_file.exists() else {}
-    if state.get("level") == level and tokens - state.get("tokens", 0) < step:
+    if flag.exists():
         return None
     STATE_ROOT.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps({"tokens": tokens, "level": level}))
-    if level == 1:
-        return f"Context is {tokens // 1000}k: checkpoint AGENTS.md at the next step boundary and keep command output short."
-    return (f"Context is {tokens // 1000}k: checkpoint AGENTS.md (decisions, status), then run "
-            "`~/.config/tmux/scripts/task-agent.sh restart orchestrator` if no user question is pending and work "
-            "remains; otherwise finish the current task.")
+    flag.touch()
+    return (f"Context is {tokens // 1000}k: run /compact at your next checkpoint, after AGENTS.md is up to date; "
+            "the SessionStart hook restores the Decisions, the plan and the open wakes.")
 
 
 def main():

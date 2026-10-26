@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Offline checks for task-context-guard.py (C4). Runs the real hook on synthetic transcripts in a
-temporary folder: thresholds, one line per 20k growth, a level change, sidechain turns ignored, env
-overrides, a reset below the checkpoint, a turn beyond the tail, and silence on bad input."""
+temporary folder: one soft line at the 400k checkpoint, no repeat while above it, a reset once the prompt
+drops below it (a compaction), a level that never asks for a restart, sidechain turns ignored, the env
+override, a turn beyond the tail, and silence on bad input."""
 import json
 import os
 import subprocess
@@ -48,61 +49,53 @@ def main():
         write(transcript, json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n")
         assert run(transcript, state) is None, "no assistant usage yet: silent"
 
-        write(transcript, turn(119_999))
-        assert run(transcript, state) is None, "below 120k: silent"
+        write(transcript, turn(399_999))
+        assert run(transcript, state) is None, "below 400k: silent"
 
-        # Checkpoint level at 120k, then silent for 10k of growth, then again at 20k of growth.
-        write(transcript, turn(120_000))
+        # One soft line at the checkpoint, and it suggests /compact, never a restart.
+        write(transcript, turn(400_000))
         line = run(transcript, state)
-        assert line and line.startswith("Context is 120k") and "restart" not in line, line
-        assert "\n" not in line, "one line"
-        write(transcript, turn(130_000))
-        assert run(transcript, state) is None, "grew 10k: no repeat"
-        write(transcript, turn(140_000))
-        assert run(transcript, state), "grew 20k: repeat"
+        assert line and line.startswith("Context is 400k") and "/compact" in line, line
+        assert "restart" not in line and "\n" not in line, line
 
-        # Restart level at 150k is a level change, so it is reported at once.
-        write(transcript, turn(150_000))
-        line = run(transcript, state)
-        assert line and "task-agent.sh restart orchestrator" in line and "finish" in line, line
-        write(transcript, turn(160_000))
-        assert run(transcript, state) is None, "restart level, grew 10k: no repeat"
-        write(transcript, turn(170_000))
-        assert run(transcript, state), "restart level, grew 20k: repeat"
+        # Above the checkpoint the line is not repeated, however far the prompt grows.
+        write(transcript, turn(430_000))
+        assert run(transcript, state) is None, "above 400k: no repeat"
+        write(transcript, turn(600_000))
+        assert run(transcript, state) is None, "grew 200k: still no repeat"
 
-        # A sidechain turn (a subagent's) is not the orchestrator's prompt size.
-        write(transcript, turn(170_000), turn(500_000, sidechain=True))
-        assert run(transcript, state) is None, "sidechain turn ignored"
-
-        # Reset: a session that drops below the checkpoint starts over.
+        # A compaction drops the prompt below the checkpoint: the flag clears, and a new crossing reminds again.
         write(transcript, turn(10_000))
         assert run(transcript, state) is None
-        assert not (state / "fixture-session.json").exists(), "state cleared below checkpoint"
-        write(transcript, turn(125_000))
-        line = run(transcript, state)
-        assert line and line.startswith("Context is 125k"), "first reminder after reset"
+        assert not (state / "fixture-session.reminded").exists(), "flag cleared below checkpoint"
+        write(transcript, turn(405_000))
+        assert run(transcript, state), "first crossing after a compaction reminds"
+
+        # A sidechain turn (a subagent's) is not the orchestrator's prompt size.
+        write(transcript, turn(10_000), turn(900_000, sidechain=True))
+        assert run(transcript, state) is None, "sidechain turn ignored"
 
         # The event name is echoed back, so the same guard serves UserPromptSubmit.
-        write(transcript, turn(121_000))
+        write(transcript, turn(10_000))
+        run(transcript, tmp / "prompt")
+        write(transcript, turn(401_000))
         assert run(transcript, tmp / "prompt", event="UserPromptSubmit"), "UserPromptSubmit emits"
 
-        # Env overrides move both thresholds and the growth step.
+        # The env override moves the checkpoint.
         fresh = tmp / "fresh"
-        env = {"TASK_CONTEXT_CHECKPOINT": "50000", "TASK_CONTEXT_RESTART": "60000", "TASK_CONTEXT_STEP": "1000"}
+        env = {"TASK_CONTEXT_CHECKPOINT": "50000"}
+        write(transcript, turn(49_999))
+        assert run(transcript, fresh, env=env) is None, "below the overridden checkpoint: silent"
         write(transcript, turn(55_000))
-        assert run(transcript, fresh, env=env), "overridden checkpoint"
-        assert run(transcript, fresh, env=env) is None, "no growth: silent"
-        write(transcript, turn(56_000))
-        assert run(transcript, fresh, env=env), "1k growth with the overridden step"
-        write(transcript, turn(61_000))
         line = run(transcript, fresh, env=env)
-        assert line and "restart orchestrator" in line, "overridden restart threshold"
+        assert line and line.startswith("Context is 55k"), "overridden checkpoint"
+        assert run(transcript, fresh, env=env) is None, "overridden checkpoint: no repeat"
 
         # A large non-assistant record before the newest turn: the tail still finds the turn.
         big = json.dumps({"type": "user", "message": {"content": "x" * (2 << 20)}}) + "\n"
-        write(transcript, big, turn(180_000))
+        write(transcript, big, turn(450_000))
         line = run(transcript, tmp / "big")
-        assert line and line.startswith("Context is 180k"), "turn found past the tail"
+        assert line and line.startswith("Context is 450k"), "turn found past the tail"
 
         # Silent on a missing transcript and on bad input; never a failed hook.
         assert run(tmp / "missing.jsonl", state) is None

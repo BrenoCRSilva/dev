@@ -12,7 +12,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-DEFAULTS = {"session": "fresh", "review": "judge", "budget": {"turns": 60, "prompt_k": 90}}
+DEFAULTS = {"session": "fresh", "review": "judge", "budget": {"turns": 60, "prompt_k": 300}}
 SESSIONS = ("fresh", "continue")
 REVIEWS = ("rules", "judge", "opus")
 NODE_KEYS = {"id", "agent", "spec", "after", "scope", "contracts", "checkpoint", "review", "session", "budget"}

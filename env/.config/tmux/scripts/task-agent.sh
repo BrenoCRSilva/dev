@@ -24,7 +24,7 @@
 # orchestrator exports TASK_PROVIDER so the agents it starts follow it.
 # --dry-run prints the command instead of running it. --resume must be the
 # last argument. The orchestrator's claude launch has no MCP servers and no
-# claude.ai connectors, and a 200k auto-compact window (ORCHESTRATOR_ENV).
+# claude.ai connectors, and the 1h prompt-cache TTL (ORCHESTRATOR_ENV).
 # restart orchestrator ends the orchestrator in its own pane and starts a fresh
 # one there, without --resume; see restart_orchestrator.
 set -euo pipefail
@@ -32,8 +32,8 @@ set -euo pipefail
 ROLES_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/task-roles"
 
 declare -A MODEL=(
-    [claude:orchestrator]=claude-opus-5-5 [claude:worker]=claude-haiku-5-5 [claude:researcher]=claude-haiku-5-5
-    [codex:orchestrator]=gpt-6-astra      [codex:worker]=gpt-6-luna         [codex:researcher]=gpt-6-luna
+    [claude:orchestrator]=claude-opus-5-5 [claude:worker]=claude-opus-5-5 [claude:researcher]=claude-opus-5-5
+    [codex:orchestrator]=gpt-6-astra      [codex:worker]=gpt-6-luna      [codex:researcher]=gpt-6-luna
 )
 declare -A EFFORT=(
     [claude:orchestrator]=medium [claude:worker]=high [claude:researcher]=high
@@ -55,10 +55,10 @@ PONYTAIL_START_HOOK=''
 # The assignment hook is the same command for every agent and provider, so one
 # hook trust covers all of them. Deployed copies live in ~/.config/tmux/scripts.
 ASSIGN_HOOK="$HOME/.config/tmux/scripts/task-assignment.sh"
-# The orchestrator's claude launch: 1h prompt-cache TTL, and a 200k auto-compact
-# window as a backstop below the context guard's restart (task-context-guard.py).
-# Claude-only; codex has no such variables.
-ORCHESTRATOR_ENV=(ENABLE_CLAUDEAI_MCP_SERVERS=false CLAUDE_CODE_PROMPT_CACHE_TTL=1h CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000)
+# The orchestrator's claude launch: 1h prompt-cache TTL. No auto-compact cap: the model
+# has its full 1M window, and native /compact keeps the session (task-compact-context.py
+# restores its state). Claude-only; codex has no such variables.
+ORCHESTRATOR_ENV=(ENABLE_CLAUDEAI_MCP_SERVERS=false CLAUDE_CODE_PROMPT_CACHE_TTL=1h)
 SELF=$(realpath "${BASH_SOURCE[0]}")
 RESTART_LOG="${XDG_STATE_HOME:-$HOME/.local/state}/task-agents/restart-orchestrator.log"
 
