@@ -5,6 +5,7 @@ digest and an open wake from the real state.db, the handoff file when present, a
 AGENTS.md is missing or the input is bad."""
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -50,10 +51,10 @@ def check(label, condition, detail=None):
         sys.exit(1)
 
 
-def run(stdin):
-    """The hook's output, parsed, and its exit code."""
-    proc = subprocess.run([sys.executable, str(HOOK)], input=stdin, capture_output=True, text=True,
-                          timeout=60, env={**os.environ})
+def run(stdin, hook=HOOK, env=None):
+    """The hook's output, parsed, and its exit code. TASK_ROOT is removed so the walk from cwd decides, unless env sets it."""
+    proc = subprocess.run([sys.executable, str(hook)], input=stdin, capture_output=True, text=True,
+                          timeout=60, env={**{k: v for k, v in os.environ.items() if k != "TASK_ROOT"}, **(env or {})})
     out = json.loads(proc.stdout)["hookSpecificOutput"] if proc.stdout.strip() else {}
     return proc.returncode, out
 
@@ -62,17 +63,24 @@ def payload(root):
     return json.dumps({"session_id": "fixture", "cwd": str(root), "hook_event_name": "SessionStart", "source": "compact"})
 
 
+def fixture_task(tmp):
+    """A temporary task root with one plan node, so the digest and wakes run for real."""
+    root = Path(tmp) / "task"
+    root.mkdir()
+    (root / "AGENTS.md").write_text(AGENTS_MD, encoding="utf-8")
+    plan = root / "plan"
+    plan.mkdir()
+    (plan / "dag.toml").write_text('[[node]]\nid = "a"\nagent = "worker-dotfiles"\nspec = "specs/a.md"\nscope = ["env/**"]\n',
+                                   encoding="utf-8")
+    (root / "specs").mkdir()
+    (root / "specs" / "a.md").write_text("# a\n", encoding="utf-8")
+    return root
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp) / "task"
-        root.mkdir()
-        (root / "AGENTS.md").write_text(AGENTS_MD, encoding="utf-8")
+        root = fixture_task(tmp)
         plan = root / "plan"
-        plan.mkdir()
-        (plan / "dag.toml").write_text('[[node]]\nid = "a"\nagent = "worker-dotfiles"\nspec = "specs/a.md"\nscope = ["env/**"]\n',
-                                       encoding="utf-8")
-        (root / "specs").mkdir()
-        (root / "specs" / "a.md").write_text("# a\n", encoding="utf-8")
 
         code, out = run(payload(root))
         text = out.get("additionalContext", "")
@@ -113,9 +121,29 @@ def main():
         check("long part is cut with a marker", "[cut: the full text is in the file]" in text, len(text))
         check("the plan still follows a long Decisions part", "## Plan / status" in text, len(text))
 
-        # Fail soft: no AGENTS.md is a note, bad input is a note, both exit 0.
+        # The task root is found from a subfolder of the task, and from TASK_ROOT when cwd is elsewhere.
+        code, out = run(payload(root / "specs"))
+        text = out.get("additionalContext", "")
+        check("from a subfolder: the task root is found", code == 0 and f"Task root: {root}" in text and "## Decisions" in text, text)
         empty = Path(tmp) / "empty"
         empty.mkdir()
+        code, out = run(payload(empty), env={"TASK_ROOT": str(root)})
+        text = out.get("additionalContext", "")
+        check("TASK_ROOT from elsewhere: the task root is used", code == 0 and f"Task root: {root}" in text, text)
+
+        # A slow digest and a failing wakes command are notes; Decisions and Plan still print.
+        bin_dir = Path(tmp) / "bin"
+        bin_dir.mkdir()
+        shutil.copy(HOOK, bin_dir / HOOK.name)
+        (bin_dir / "task-dispatch.py").write_text(
+            "import sys, time\nif sys.argv[1] == 'digest':\n    time.sleep(60)\nsys.exit(2)\n", encoding="utf-8")
+        code, out = run(payload(root), hook=bin_dir / HOOK.name)
+        text = out.get("additionalContext", "")
+        check("slow digest and failing wakes: notes, exit 0", code == 0 and "digest: unavailable (timeout)" in text
+              and "wakes: unavailable (exit 2)" in text, text)
+        check("the Decisions and Plan parts still print", "## Decisions" in text and "## Plan / status" in text, text)
+
+        # Fail soft: no AGENTS.md is a note, bad input is a note, both exit 0.
         code, out = run(payload(empty))
         check("no AGENTS.md: a note, exit 0", code == 0 and "no AGENTS.md" in out.get("additionalContext", ""), out)
         code, out = run("not json")
