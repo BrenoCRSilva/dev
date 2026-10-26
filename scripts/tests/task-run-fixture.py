@@ -752,6 +752,10 @@ def scenario_researcher_start(tmp):
         dispatch.ensure_researcher(root)
         check("researcher start: starts it in the research pane", ("task-agent", "start", "researcher", "p9") in calls, calls)
         calls.clear()
+        state["absent"] = True
+        dispatch.ensure_researcher(root, resume=True)
+        check("researcher start: a continue node resumes it", ("task-agent", "start", "researcher", "p9", "--resume") in calls, calls)
+        calls.clear()
         state.update(absent=True, panes=[{"pane_id": "p1", "cwd": str(root)}])
         try:
             dispatch.ensure_researcher(root)

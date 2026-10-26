@@ -4,6 +4,10 @@
     "command": "~/.config/tmux/scripts/task-statusline.sh"
   },
   "disableClaudeAiConnectors": true,
+  "env": {
+    "CLAUDE_CODE_RESUME_THRESHOLD_MINUTES": "999999",
+    "CLAUDE_CODE_RESUME_TOKEN_THRESHOLD": "999999999"
+  },
   "hooks": {
     "UserPromptSubmit": [
       {

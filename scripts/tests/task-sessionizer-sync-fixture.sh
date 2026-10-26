@@ -179,7 +179,7 @@ grep -Fq 'report: herdr: orchestrator is unnamed (pane w1:p1); name it: herdr --
     fail "dry run did not report the unnamed orchestrator: $dry"
 grep -Fq 'report: herdr: agent worker (pane w2:p1) should be worker-worker; restart: TASK_SESSION=legacy' <<< "$dry" ||
     fail "dry run did not report the legacy worker name: $dry"
-grep -Fq "start worker worker w2:p1 $worker_repo --resume" <<< "$dry" || fail 'restart command lacks the start line'
+grep -Fq "start worker worker w2:p1 $worker_repo --auto" <<< "$dry" || fail 'restart command lacks the start line'
 grep -Fq 'report: worker: branch legacy is 1 commit(s) behind main' <<< "$dry" || fail "dry run did not report the behind branch: $dry"
 grep -Fq 'info: context clones are left as they are; task-sessionizer.sh refresh legacy' <<< "$dry" || fail 'dry run did not mention refresh'
 grep -Fq 'legacy: 6 change(s) planned; 0 for review; 3 report(s)' <<< "$dry" || fail "dry run summary is wrong: $dry"

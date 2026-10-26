@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Agent sessionizer tab: pick an agentic code provider, choose whether to
-# resume the last session, then launch it. Runs as the tmux window's command
+# resume the last session (plain tabs only), then launch it. Runs as the tmux window's command
 # (not via send-keys, which races shell init). Drops to an interactive shell
 # when the agent exits — or when the picker is cancelled — so the tab stays
 # usable.
@@ -93,17 +93,13 @@ ask_resume() {
 # A task's orchestrator workspace (TASK_ROLE set by task-sessionizer.sh)
 # offers only the providers task-agent.sh supports; it sets the model, effort,
 # role prompt and kickoff, and the agents the orchestrator starts follow the
-# same provider.
+# same provider. No resume prompt here: --auto resumes the task's recorded
+# orchestrator session when there is one, else starts fresh.
 if [[ "${TASK_ROLE:-}" == orchestrator ]]; then
     providers=(claude codex)
     agent=$(pick_provider)
     if [[ -n "$agent" ]]; then
-        task_agent="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/task-agent.sh"
-        if ask_resume "$agent"; then
-            "$task_agent" --provider "$agent" orchestrator --resume
-        else
-            "$task_agent" --provider "$agent" orchestrator
-        fi
+        "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/task-agent.sh" --provider "$agent" orchestrator --auto
     fi
 else
     agent=$(pick_provider)

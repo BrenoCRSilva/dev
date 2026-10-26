@@ -2,11 +2,12 @@
 # Launch a task's agents with their role prompt, model and effort; the only
 # place these are set.
 #
-#   task-agent.sh [--dry-run] [--provider claude|codex] orchestrator [--resume]
-#   task-agent.sh [--dry-run] [--provider claude|codex] start worker <repo> <pane_id> <canonical_repo> [--resume]
-#   task-agent.sh [--dry-run] [--provider claude|codex] start researcher <pane_id> [--resume]
+#   task-agent.sh [--dry-run] [--provider claude|codex] orchestrator [--auto|--resume]
+#   task-agent.sh [--dry-run] [--provider claude|codex] start worker <repo> <pane_id> <canonical_repo> [--auto|--resume]
+#   task-agent.sh [--dry-run] [--provider claude|codex] start researcher <pane_id> [--auto|--resume]
 #   task-agent.sh [--dry-run] stop <name> [--force]
 #   task-agent.sh [--dry-run] restart orchestrator
+#   task-agent.sh [--dry-run] trust <task-root>
 #
 # Agent names: worker-<repo> for a worker and researcher for the researcher. The
 # orchestrator names itself at start-up (herdr cannot name it at launch). The
@@ -22,8 +23,13 @@
 # task-guard.sh). A missing tool is skipped with a warning.
 # The provider defaults to $TASK_PROVIDER, else claude. Launching the
 # orchestrator exports TASK_PROVIDER so the agents it starts follow it.
-# --dry-run prints the command instead of running it. --resume must be the
-# last argument. The orchestrator's claude launch has no MCP servers and no
+# --dry-run prints the command instead of running it. --auto or --resume must
+# be the last argument. Every start is recorded in <task-root>/.task-sessions.json
+# (C1): {agent: {provider, session_id, cwd, updated}}. --auto resumes the recorded
+# session when it matches the agent, provider and cwd and its transcript still
+# exists, else starts fresh; --resume resumes the recorded session, else the
+# newest one in the folder; with neither, the start is fresh. Each start first
+# trusts the task's folders (trust_task_paths, C2); `trust` does only that. The orchestrator's claude launch has no MCP servers and no
 # claude.ai connectors, and the 1h prompt-cache TTL (ORCHESTRATOR_ENV).
 # restart orchestrator ends the orchestrator in its own pane and starts a fresh
 # one there, without --resume; see restart_orchestrator.
@@ -36,7 +42,7 @@ declare -A MODEL=(
     [codex:orchestrator]=gpt-6-astra      [codex:worker]=gpt-6-luna      [codex:researcher]=gpt-6-luna
 )
 declare -A EFFORT=(
-    [claude:orchestrator]=medium [claude:worker]=high [claude:researcher]=high
+    [claude:orchestrator]=medium [claude:worker]=medium [claude:researcher]=medium
     [codex:orchestrator]=medium  [codex:worker]=high  [codex:researcher]=medium
 )
 declare -A PROMPT=([orchestrator]=orchestrator.md [worker]=worker.md [researcher]=researcher.md)
@@ -65,11 +71,12 @@ RESTART_LOG="${XDG_STATE_HOME:-$HOME/.local/state}/task-agents/restart-orchestra
 # --- arguments -------------------------------------------------------------
 usage() {
     cat >&2 <<'EOF'
-usage: task-agent.sh [--dry-run] [--provider claude|codex] orchestrator [--resume]
-       task-agent.sh [--dry-run] [--provider claude|codex] start worker <repo> <pane_id> <canonical_repo> [--resume]
-       task-agent.sh [--dry-run] [--provider claude|codex] start researcher <pane_id> [--resume]
+usage: task-agent.sh [--dry-run] [--provider claude|codex] orchestrator [--auto|--resume]
+       task-agent.sh [--dry-run] [--provider claude|codex] start worker <repo> <pane_id> <canonical_repo> [--auto|--resume]
+       task-agent.sh [--dry-run] [--provider claude|codex] start researcher <pane_id> [--auto|--resume]
        task-agent.sh [--dry-run] stop <name> [--force]
        task-agent.sh [--dry-run] restart orchestrator
+       task-agent.sh [--dry-run] trust <task-root>
 EOF
     exit 2
 }
@@ -190,6 +197,87 @@ finish_restart() {
     return 1
 }
 
+# --- trust (C2) -----------------------------------------------------------------
+# Claude asks once per folder whether to trust it, which stalls a start, and
+# `claude --bg` exits in an untrusted folder. A key covers its subfolders, and a
+# worktree is trusted by either its own key or its main checkout's, so a task's
+# folders are: the task root, research/, each worktree and each worktree's main
+# checkout root.
+task_paths() {
+    local root=$1 wt common
+    printf '%s\n' "$root" "$root/research"
+    for wt in "$root"/*/; do
+        wt=${wt%/}
+        [[ -f $wt/.git ]] || continue # a worktree's .git is a file
+        printf '%s\n' "$wt"
+        common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || continue
+        printf '%s\n' "${common%/.git}"
+    done
+}
+
+# TRUST_PATHS: the extra paths given (the agent's own folder), then the task's
+# folders, each once.
+TRUST_PATHS=()
+collect_trust_paths() {
+    local root=$1 p
+    local -A seen=()
+    TRUST_PATHS=()
+    while IFS= read -r p; do
+        [[ -n $p && -z ${seen[$p]:-} ]] || continue
+        seen[$p]=1
+        TRUST_PATHS+=("$p")
+    done < <(printf '%s\n' "${@:2}"; task_paths "$root")
+}
+
+# trust_task_paths <task-root> [path...]: sets projects[<path>].hasTrustDialogAccepted
+# in ~/.claude.json for the task's folders. The write holds a lock shared by every
+# task start and goes through a temp file and mv, so other keys are kept.
+trust_task_paths() {
+    local cfg="$HOME/.claude.json" lock="${XDG_STATE_HOME:-$HOME/.local/state}/task-agents/claude-json.lock" out tmp fd
+    local -a missing=()
+    # jq programs: $p and $ARGS are jq's, not shell expansions.
+    # shellcheck disable=SC2016
+    local find='$ARGS.positional[] as $p | if .projects[$p].hasTrustDialogAccepted == true then empty else $p end'
+    # shellcheck disable=SC2016
+    local mark='reduce $ARGS.positional[] as $p (.; .projects[$p].hasTrustDialogAccepted = true)'
+    collect_trust_paths "$@"
+    if [[ -f $cfg ]]; then
+        out=$(jq -r "$find" "$cfg" --args "${TRUST_PATHS[@]}") || { echo "task-agent: cannot read $cfg" >&2; return 1; }
+        [[ -z $out ]] || mapfile -t missing <<< "$out"
+    else
+        missing=("${TRUST_PATHS[@]}")
+    fi
+    if (( ${#missing[@]} == 0 )); then
+        echo "trust: the task's folders are already trusted in $cfg"
+        return 0
+    fi
+    if [[ $dry_run == yes ]]; then
+        echo "trust: would mark trusted in $cfg: ${missing[*]}"
+        return 0
+    fi
+    mkdir -p "${lock%/*}"
+    exec {fd}>>"$lock"
+    flock "$fd"
+    tmp=$(mktemp "$cfg.XXXXXX") || { exec {fd}>&-; return 1; }
+    if [[ -f $cfg ]]; then
+        chmod --reference="$cfg" "$tmp"
+        jq "$mark" "$cfg" --args "${TRUST_PATHS[@]}" > "$tmp" || { rm -f "$tmp"; exec {fd}>&-; return 1; }
+    else
+        jq -n "{} | $mark" --args "${TRUST_PATHS[@]}" > "$tmp" || { rm -f "$tmp"; exec {fd}>&-; return 1; }
+    fi
+    mv -f "$tmp" "$cfg"
+    exec {fd}>&-
+    echo "trust: marked trusted in $cfg: ${missing[*]}"
+}
+
+trust_command() {
+    local root
+    (( $# == 1 )) || usage
+    root=$(realpath -e "$1") || { echo "task-agent: no task folder $1" >&2; exit 1; }
+    command -v jq >/dev/null || { echo "task-agent: jq is required to trust a task's folders" >&2; exit 1; }
+    trust_task_paths "$root"
+}
+
 dry_run=no
 if [[ "${1:-}" == --dry-run ]]; then dry_run=yes; shift; fi
 
@@ -200,6 +288,11 @@ fi
 
 if [[ "${1:-}" == restart ]]; then
     restart_orchestrator "$dry_run" "${@:2}"
+    exit
+fi
+
+if [[ "${1:-}" == trust ]]; then
+    trust_command "${@:2}"
     exit
 fi
 
@@ -219,9 +312,13 @@ case "$provider" in
     *) usage ;;
 esac
 
+# resume: no (fresh), yes (--resume) or auto (--auto, decided from the session record).
 resume=no restarted=no
 if (( $# > 0 )) && [[ "${!#}" == --resume ]]; then
     resume=yes
+    set -- "${@:1:$#-1}"
+elif (( $# > 0 )) && [[ "${!#}" == --auto ]]; then
+    resume=auto
     set -- "${@:1:$#-1}"
 elif (( $# > 0 )) && [[ "${!#}" == --restarted ]]; then
     restarted=yes
@@ -234,7 +331,7 @@ role='' name='' folder='' pane='' canonical_repo=''
 case "${1:-}" in
     orchestrator)
         (( $# == 1 )) || usage
-        role=orchestrator ;;
+        role=orchestrator name=orchestrator ;;
     start)
         (( $# >= 2 )) || usage
         case "$2" in
@@ -327,8 +424,7 @@ codex_session_start_args() {
 # whose pane cwd cannot be read.
 REPORTS=''
 report_dir() {
-    local cwd
-    cwd=$(pane_cwd)
+    local cwd=$CWD
     if [[ -z "$cwd" ]]; then
         if [[ $dry_run == yes ]]; then
             echo "reports: cannot read the cwd of pane $pane; no reports folder in this dry run"
@@ -375,7 +471,13 @@ agent_args() {
             ARGS+=(--permission-mode auto)
             [[ -z $REPORTS ]] || ARGS+=(--add-dir "$REPORTS")
         fi
-        if [[ $want_resume == yes ]]; then ARGS+=(--continue); fi
+        if [[ $want_resume != yes ]]; then
+            ARGS+=(--session-id "$SESSION_ID")
+        elif [[ -n $SESSION_ID ]]; then
+            ARGS+=(--resume "$SESSION_ID")
+        else
+            ARGS+=(--continue)
+        fi
     else
         if [[ $dry_run == yes ]]; then
             prompt="\"<prompt:${PROMPT[$role]}>\""
@@ -383,13 +485,17 @@ agent_args() {
             prompt=$(python3 -I -c 'import json, sys; print(json.dumps(sys.stdin.read()))' < "$file")
         fi
         ARGS=()
-        if [[ $want_resume == yes ]]; then ARGS=(resume --last); fi
+        if [[ $want_resume == yes && -n $SESSION_ID ]]; then
+            ARGS=(resume "$SESSION_ID")
+        elif [[ $want_resume == yes ]]; then
+            ARGS=(resume --last)
+        fi
         ARGS+=(-m "${MODEL[codex:$role]}" -c "model_reasoning_effort=\"${EFFORT[codex:$role]}\"" -c "developer_instructions=$prompt")
         if [[ $role == worker || $role == researcher ]]; then
             tool_args codex
             codex_session_start_args
-            codex_trust_args
         fi
+        codex_trust_args
         # Codex's closest match to Claude's auto mode: the model decides when to
         # ask (on-request), inside the same workspace-write sandbox as before.
         if [[ $role == worker ]]; then
@@ -419,11 +525,11 @@ pane_cwd() {
 # override with a dotted key that quotes the path is ignored; the inline-table
 # form is honored (checked with codex 0.162.1: the override skips the prompt for
 # that folder, and a different folder still gets it). It applies to this launch
-# only, so the global config is not edited.
+# only, so the global config is not edited. It names the same folders as
+# trust_task_paths.
 codex_trust_args() {
-    local cwd
-    cwd=$(pane_cwd)
-    if [[ -z "$cwd" ]]; then
+    local p table=''
+    if [[ -z $ROOT ]]; then
         if [[ $dry_run == yes ]]; then
             echo "trust: cannot read the cwd of pane $pane (herdr lookup failed); no codex trust override"
             return 0
@@ -431,59 +537,91 @@ codex_trust_args() {
         echo "task-agent: cannot read the cwd of pane $pane; not starting codex without its trust override" >&2
         exit 1
     fi
-    if ! safe_path "$cwd"; then
-        echo "task-agent: pane cwd has characters the codex trust override cannot quote: $cwd" >&2
-        exit 1
-    fi
-    ARGS+=(-c "projects={\"$cwd\"={trust_level=\"trusted\"}}")
-}
-
-# Claude asks once per directory whether to trust it, which stalls an unattended
-# start. Before a worker or researcher agent starts in its pane, mark the pane's
-# cwd trusted in ~/.claude.json. Only projects[<cwd>].hasTrustDialogAccepted is
-# set; the file is replaced through a temp file and mv, so other keys and other
-# sessions' entries are kept.
-trust_pane_cwd() {
-    local cfg="$HOME/.claude.json" cwd tmp state
-    # jq program: $p is jq's variable (passed by --arg), not a shell expansion.
-    # shellcheck disable=SC2016
-    local filter='.projects //= {} | .projects[$p] //= {} | .projects[$p].hasTrustDialogAccepted = true'
-    cwd=$(pane_cwd)
-    if [[ -z "$cwd" ]]; then
-        if [[ $dry_run == yes ]]; then
-            echo "trust: cannot read the cwd of pane $pane (herdr lookup failed); nothing to mark"
-            return 0
+    collect_trust_paths "$ROOT" "$CWD"
+    for p in "${TRUST_PATHS[@]}"; do
+        if ! safe_path "$p"; then
+            echo "task-agent: a task folder has characters the codex trust override cannot quote: $p" >&2
+            exit 1
         fi
-        echo "task-agent: cannot read the cwd of pane $pane; not starting without its trust set" >&2
-        exit 1
-    fi
-
-    if [[ -f $cfg ]]; then
-        state=$(jq -r --arg p "$cwd" '(.projects[$p] // {}) | .hasTrustDialogAccepted | tostring' "$cfg")
-    else
-        state=missing-file
-    fi
-    if [[ $state == true ]]; then
-        echo "trust: $cwd is already trusted in $cfg"
-        return 0
-    fi
-    if [[ $dry_run == yes ]]; then
-        echo "trust: would set projects[\"$cwd\"].hasTrustDialogAccepted = true in $cfg (currently: $state)"
-        return 0
-    fi
-
-    tmp=$(mktemp "$cfg.XXXXXX")
-    if [[ $state == missing-file ]]; then
-        printf '{}\n' | jq --arg p "$cwd" "$filter" > "$tmp" || { rm -f "$tmp"; exit 1; }
-    else
-        chmod --reference="$cfg" "$tmp"
-        jq --arg p "$cwd" "$filter" "$cfg" > "$tmp" || { rm -f "$tmp"; exit 1; }
-    fi
-    mv -f "$tmp" "$cfg"
-    echo "trust: marked $cwd trusted in $cfg (was: $state)"
+        table+="\"$p\"={trust_level=\"trusted\"},"
+    done
+    ARGS+=(-c "projects={${table%,}}")
 }
+
+# --- session record (C1) -----------------------------------------------------------
+# <task-root>/.task-sessions.json: {agent: {provider, session_id, cwd, updated}}.
+
+# The recorded session id of this agent, when the record's provider and cwd match.
+recorded_session() {
+    local file="$ROOT/.task-sessions.json"
+    [[ -n $ROOT && -f $file ]] || return 0
+    jq -r --arg a "$name" --arg p "$provider" --arg c "$CWD" \
+        '.[$a] | select(.provider == $p and .cwd == $c) | .session_id // empty' "$file" 2>/dev/null |
+        grep -xE '[A-Za-z0-9-]+' || true
+}
+
+# Whether the session's transcript still exists, so it can be resumed.
+session_exists() {
+    if [[ $provider == claude ]]; then
+        compgen -G "$HOME/.claude/projects/*/$1.jsonl" >/dev/null
+    else
+        [[ -n $(find "$HOME/.codex/sessions" -name "*$1.jsonl" -print -quit 2>/dev/null) ]]
+    fi
+}
+
+# Records this agent's session; a failure is reported and does not undo the start.
+record_session() {
+    local id=$1 file="$ROOT/.task-sessions.json" base='{}' tmp fd
+    [[ -n $id && -n $ROOT ]] || return 0
+    exec {fd}<"$ROOT"
+    flock "$fd" # the dispatcher can start several agents of one task at once
+    jq -e 'type == "object"' "$file" >/dev/null 2>&1 && base=$(<"$file")
+    if tmp=$(mktemp "$file.XXXXXX") &&
+        jq --arg a "$name" --arg p "$provider" --arg s "$id" --arg c "$CWD" --arg u "$(date -Is)" \
+            '.[$a] = {provider: $p, session_id: $s, cwd: $c, updated: $u}' <<< "$base" > "$tmp" &&
+        mv -f "$tmp" "$file"; then
+        :
+    else
+        [[ -z ${tmp:-} ]] || rm -f "$tmp"
+        echo "task-agent: could not record the session of $name in $file" >&2
+    fi
+    exec {fd}<&-
+}
+
+# The agent's folder and its task root: the orchestrator runs in the task root,
+# a worker in <root>/<repo>, the researcher in <root>/research. Empty only when
+# the pane's cwd cannot be read.
+CWD='' ROOT=''
+if [[ $role == orchestrator ]]; then
+    CWD=$(realpath -e .)
+    ROOT=$CWD
+else
+    CWD=$(pane_cwd)
+    [[ -z $CWD ]] || ROOT=${CWD%/*}
+fi
+
+# SESSION_ID: the session this start resumes, or the new id a fresh claude
+# session is given. --auto resumes only a recorded session whose transcript is
+# still there; --resume without one falls back to the newest session in the folder.
+SESSION_ID=''
+recorded=$(recorded_session)
+if [[ $resume != no && -n $recorded ]] && session_exists "$recorded"; then
+    SESSION_ID=$recorded
+    resume=yes
+elif [[ $resume == auto ]]; then
+    resume=no
+fi
+if [[ $resume == no && $provider == claude ]]; then SESSION_ID=$(cat /proc/sys/kernel/random/uuid); fi
 
 agent_args "$role" "$resume"
+
+if [[ $provider == claude ]]; then
+    if [[ -n $ROOT ]]; then
+        trust_task_paths "$ROOT" "$CWD" || { echo "task-agent: could not trust the task's folders; not starting $name" >&2; exit 1; }
+    else
+        echo "trust: cannot read the cwd of pane $pane (herdr lookup failed); nothing to mark" # dry run only: report_dir exits first
+    fi
+fi
 
 if [[ $role == orchestrator ]]; then
     if [[ $resume == yes ]]; then
@@ -497,11 +635,11 @@ if [[ $role == orchestrator ]]; then
     cmd=("$provider" "${ARGS[@]}" "$kickoff")
     if [[ $provider == claude ]]; then cmd=(env "${ORCHESTRATOR_ENV[@]}" "${cmd[@]}"); fi
 else
-    if [[ $provider == claude ]]; then trust_pane_cwd; fi
     cmd=(herdr_cmd agent start "$name" --kind "$provider" --pane "$pane" --timeout 60000 -- "${ARGS[@]}")
 fi
 
 if [[ $dry_run == yes ]]; then
+    if [[ $resume == yes ]]; then echo "session: resume ${SESSION_ID:-the newest in the folder}"; else echo "session: fresh ${SESSION_ID:-(new id)}"; fi
     # Print the herdr call as it runs, with the session flag herdr_cmd would add.
     if [[ ${cmd[0]} == herdr_cmd ]]; then
         cmd[0]=herdr
@@ -512,4 +650,16 @@ if [[ $dry_run == yes ]]; then
     exit 0
 fi
 
+if [[ $role == orchestrator ]]; then
+    # The orchestrator runs in the foreground, so it is recorded first; --auto
+    # checks its transcript before resuming it. shortcut: a codex orchestrator's id
+    # is not known up front, so it is not recorded and --auto starts it fresh;
+    # upgrade: read it from herdr once the session is up.
+    record_session "$SESSION_ID"
+    "${cmd[@]}"
+    exit
+fi
 "${cmd[@]}"
+# herdr reports the id the agent runs under (codex has no flag to set one).
+[[ -n $SESSION_ID ]] || SESSION_ID=$(herdr_cmd agent get "$name" 2>/dev/null | jq -r '.result.agent.agent_session.value // empty' 2>/dev/null) || SESSION_ID=
+record_session "$SESSION_ID"

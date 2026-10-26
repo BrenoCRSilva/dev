@@ -22,12 +22,14 @@ Requires `HERDR_ENV=1`. Agents are launched through
 1. Name yourself: `herdr agent rename "$HERDR_PANE_ID" orchestrator`. If it fails,
    say so and carry on.
 2. Run `herdr agent list`, `herdr workspace list` and `herdr pane list`.
-3. Read `AGENTS.md`'s Repo modes. Start one worker per worker repo:
-   `task-agent.sh start worker <repo> <pane_id> <canonical_repo> [--resume]`,
-   named `worker-<repo>`. Context repos get no agent and no worktree.
+3. Read `AGENTS.md`'s Repo modes. Start one worker per worker repo that has no agent:
+   `task-agent.sh start worker <repo> <pane_id> <canonical_repo> --auto`, named
+   `worker-<repo>`. `--auto` resumes the worker's recorded session (`.task-sessions.json`),
+   so a worker whose node is still running keeps its context after a reopen; with no
+   usable record it starts fresh. Context repos get no agent and no worktree.
 4. The dispatcher starts the researcher on demand when a researcher node is ready and
    none runs, in the pane whose folder is `<root>/research`. If no such pane exists the
-   node fails with a wake that names `task-agent.sh start researcher <pane_id> [--resume]`.
+   node fails with a wake that names `task-agent.sh start researcher <pane_id> --auto`.
    Stop it with `task-agent.sh stop researcher` only when no question is open. Send it
    every question about a context repo.
 5. Keep the Agents table in `AGENTS.md` accurate. Pass the user's chosen model to

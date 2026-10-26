@@ -3,7 +3,8 @@
 # gets codegraph only; the orchestrator gets neither. Each starts without a
 # missing tool (with a warning). Workers and the researcher always get the
 # assignment hook and write access to their reports folder. Codex worker and
-# researcher launches pass a trust override for the pane's cwd; the
+# researcher launches pass a trust override for the pane's cwd and the task's
+# folders; the
 # orchestrator's launch loads no MCP server (strict empty config) and no repo tool.
 set -euo pipefail
 unset TASK_SESSION
@@ -43,9 +44,11 @@ EOF
 printf '#!/bin/sh\nexit 1\n' > "$BIN/node"
 chmod +x "$BIN/herdr" "$BIN/node"
 
-# The trust override as the dry run prints it (printf %q escapes its braces and quotes).
-trust_override=$(printf '%q' "projects={\"$WORKTREE_REAL\"={trust_level=\"trusted\"}}")
-research_trust_override=$(printf '%q' "projects={\"$RESEARCH_REAL\"={trust_level=\"trusted\"}}")
+# The trust override as the dry run prints it (printf %q escapes its braces and quotes): the pane's cwd first,
+# then the task root and research/ (the fixture worktree has no .git file, so it is listed only as the cwd).
+trusted() { local p out=''; for p in "$@"; do out+="\"$p\"={trust_level=\"trusted\"},"; done; printf '%q' "projects={${out%,}}"; }
+trust_override=$(trusted "$WORKTREE_REAL" "$TASK_REAL" "$RESEARCH_REAL")
+research_trust_override=$(trusted "$RESEARCH_REAL" "$TASK_REAL")
 
 # --- absent: no codegraph on PATH, no ponytail checkout -------------------
 claude_out=$("$TASK_AGENT" --dry-run --provider claude start worker dotfiles fixture-pane "$REPO" 2> "$ERR")
@@ -171,16 +174,17 @@ ignored_status=$(XDG_CONFIG_HOME="$IGN_TEST/xdg" git -C "$IGN_TEST/repo" status 
 [[ "$ignored_status" == '?? file.txt' ]] || fail "tracked ignore does not hide the symlinked .codegraph: $ignored_status"
 printf 'PASS: tracked global ignore hides a symlinked .codegraph index\n'
 
-# The orchestrator gets no repo tools and no trust override, either provider.
-# Its --strict-mcp-config with an empty server list is not a repo tool, so mcp is not matched here.
+# The orchestrator gets no repo tools, either provider. Its --strict-mcp-config with an empty server list is not
+# a repo tool, so mcp is not matched here. It runs in the task root, and codex gets that root trusted (C2).
 for launch in "orchestrator" "--provider codex orchestrator"; do
     # shellcheck disable=SC2086
-    out=$(FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --dry-run $launch 2> "$ERR")
-    if grep -Eq 'codegraph|ponytail|plugin-dir|worker\.|hooks\.|dangerously|projects=' <<< "$out"; then
+    out=$(cd "$TASK_REAL" && FIXTURE_PANE_CWD="$WORKTREE" "$TASK_AGENT" --dry-run $launch 2> "$ERR")
+    if grep -Eq 'codegraph|ponytail|plugin-dir|worker\.|hooks\.|dangerously' <<< "$out"; then
         fail "'$launch' picked up repo-only tools: $out"
     fi
 done
-printf 'PASS: orchestrator launches carry no codegraph, ponytail or trust override\n'
+[[ "$out" == *"$(trusted "$TASK_REAL" "$RESEARCH_REAL")"* ]] || fail "codex orchestrator lacks the trust override for the task root: $out"
+printf 'PASS: orchestrator launches carry no codegraph or ponytail; codex trusts the task root\n'
 
 # Only the claude orchestrator gets the status line, through its own settings
 # file. Repo and researcher launches never see it, so their prompt prefix holds.

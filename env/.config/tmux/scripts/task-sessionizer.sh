@@ -1241,8 +1241,8 @@ sync_report() {
             [[ "$name" == "$expected" ]] && continue
             case "$expected:${name:+named}" in
                 orchestrator:*|*:) sync_line report "herdr: $expected is ${name:-unnamed} (pane $pane); name it: herdr --session $s agent rename $pane orchestrator" ;;
-                worker-*:named) sync_line report "herdr: agent $name (pane $pane) should be $expected; restart: TASK_SESSION=$s ~/.config/tmux/scripts/task-agent.sh stop $name, then ~/.config/tmux/scripts/task-agent.sh start worker $repo $pane $(origin_repo "$dir/$repo") --resume" ;;
-                researcher:named) sync_line report "herdr: agent $name (pane $pane) should be researcher; restart: TASK_SESSION=$s ~/.config/tmux/scripts/task-agent.sh stop $name, then ~/.config/tmux/scripts/task-agent.sh start researcher $pane --resume" ;;
+                worker-*:named) sync_line report "herdr: agent $name (pane $pane) should be $expected; restart: TASK_SESSION=$s ~/.config/tmux/scripts/task-agent.sh stop $name, then ~/.config/tmux/scripts/task-agent.sh start worker $repo $pane $(origin_repo "$dir/$repo") --auto" ;;
+                researcher:named) sync_line report "herdr: agent $name (pane $pane) should be researcher; restart: TASK_SESSION=$s ~/.config/tmux/scripts/task-agent.sh stop $name, then ~/.config/tmux/scripts/task-agent.sh start researcher $pane --auto" ;;
             esac
         done < <(herdr --session "$s" agent list 2>/dev/null |
             jq -r '.result.agents[] | [.pane_id, (.name // ""), .agent, (.cwd // "")] | join("|")' 2>/dev/null)
@@ -1639,6 +1639,9 @@ ensure_task_runtime() {
         created=1
     fi
     ensure_task_layout "$task"
+    # Trust the task's folders before any agent starts in them (C2); a failure only warns.
+    "$(dirname "$SELF")/task-agent.sh" trust "$TASKS_DIR/$task" >/dev/null ||
+        printf 'warning: could not mark the folders of %s trusted in ~/.claude.json\n' "$task" >&2
     if command -v herdr >/dev/null; then
         herdr_layout "$task"
         if [[ $created == 1 ]]; then tmux send-keys -t "=$s:agent" "herdr --session $s" Enter; fi

@@ -10,7 +10,9 @@
     ]
   },
   "env": {
-    "CODEGRAPH_TELEMETRY": "0"
+    "CODEGRAPH_TELEMETRY": "0",
+    "CLAUDE_CODE_RESUME_THRESHOLD_MINUTES": "999999",
+    "CLAUDE_CODE_RESUME_TOKEN_THRESHOLD": "999999999"
   },
   "hooks": {
     "PreToolUse": [
