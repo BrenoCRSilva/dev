@@ -9,6 +9,7 @@
 #   task-agent.sh [--dry-run] restart orchestrator
 #   task-agent.sh [--dry-run] trust <task-root>
 #   task-agent.sh session-hook orchestrator|worker|researcher   (claude SessionStart hook)
+#   task-agent.sh helpers   (the --agents JSON a claude worker or researcher gets)
 #
 # Agent names: worker-<repo> for a worker and researcher for the researcher. The
 # orchestrator names itself at start-up (herdr cannot name it at launch). The
@@ -80,6 +81,7 @@ usage: task-agent.sh [--dry-run] [--provider claude|codex] orchestrator [--auto|
        task-agent.sh [--dry-run] restart orchestrator
        task-agent.sh [--dry-run] trust <task-root>
        task-agent.sh session-hook orchestrator|worker|researcher
+       task-agent.sh helpers
 EOF
     exit 2
 }
@@ -149,11 +151,14 @@ stop_agent() {
 }
 
 # pick_option <name> <label> <screen lines>: picks a dialog option by moving its marker
-# (❯ before a numbered row) onto the label's row, then Enter. No marker or no label, no keys.
+# (❯ before a numbered row) onto the label's numbered row, then Enter. No marker, no such
+# row, or no "Enter to confirm"/"Esc to cancel" footer, no keys.
 pick_option() {
-    local want mark n
+    local want mark n label
     local -a keys=()
-    want=$(grep -n -F "$2" <<< "$3" | head -n 1 | cut -d: -f1)
+    [[ "$3" == *"Enter to confirm"* || "$3" == *"Esc to cancel"* ]] || return 1
+    label=$(sed 's/[][\.*^$+?(){}|/]/\\&/g' <<< "$2")
+    want=$(grep -n -E "^ *(❯ +)?[0-9]+\. +$label" <<< "$3" | head -n 1 | cut -d: -f1)
     mark=$(grep -n -E '❯ +[0-9]+\.' <<< "$3" | head -n 1 | cut -d: -f1)
     [[ -n $want && -n $mark ]] || return 1
     for (( n = mark; n > want; n-- )); do keys+=(up); done
@@ -340,9 +345,14 @@ record_session() {
 
 # A codex session of this folder that was started by hand or by this script (source
 # cli; not a subagent's or exec's). codex resume --last picks the newest one of the cwd.
+# Only rollouts of the last 30 days, newest first, up to the first match.
 codex_session_here() {
-    find "$HOME/.codex/sessions" -name 'rollout-*.jsonl' -exec head -qn 1 {} + 2>/dev/null |
-        jq -enR --arg c "$CWD" '[inputs | fromjson? | select(.payload.cwd? == $c and .payload.source? == "cli")] | length > 0' >/dev/null 2>&1
+    local file
+    while IFS= read -r file; do
+        head -n 1 "$file" 2>/dev/null |
+            jq -e --arg c "$CWD" 'select(.payload.cwd? == $c and .payload.source? == "cli")' >/dev/null 2>&1 && return 0
+    done < <(find "$HOME/.codex/sessions" -name 'rollout-*.jsonl' -mtime -30 -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
+    return 1
 }
 
 # agent_folder <role> <dir>: sets CWD, the agent's folder, and ROOT, its task root, from
@@ -385,6 +395,36 @@ session_hook() {
     record_session "$id" 2>/dev/null
 }
 
+# helpers_json: prints, on one line, the --agents JSON built from task-roles/subagents/*.md
+# (C4): each file's frontmatter (description, model, effort, tools, background) and its
+# body as the prompt. Workers and the researcher get the helpers this way, so nothing
+# is written into a worktree; the orchestrator reads the task root's .claude/agents.
+# A file without a name or description is skipped with a warning.
+helpers_json() {
+    python3 -I - "$ROLES_DIR/subagents" <<'PY'
+import json, sys
+from pathlib import Path
+out = {}
+for path in sorted(Path(sys.argv[1]).glob("*.md")):
+    head, sep, body = path.read_text(encoding="utf-8").partition("\n---\n")
+    meta = dict(line.split(":", 1) for line in head.splitlines()[1:] if ":" in line) if head.startswith("---") and sep else {}
+    meta = {key.strip(): value.strip() for key, value in meta.items()}
+    if not meta.get("name") or not meta.get("description"):
+        print(f"task-agent: {path.name}: no name or description in its frontmatter; skipped", file=sys.stderr)
+        continue
+    agent = {"description": meta["description"], "prompt": body.replace("<!-- managed: task-roles -->", "").strip()}
+    for key in ("model", "effort"):
+        if meta.get(key):
+            agent[key] = meta[key]
+    if meta.get("tools"):
+        agent["tools"] = [tool.strip() for tool in meta["tools"].split(",") if tool.strip()]
+    if meta.get("background") == "true":
+        agent["background"] = True
+    out[meta["name"]] = agent
+print(json.dumps(out, separators=(",", ":")))
+PY
+}
+
 dry_run=no
 if [[ "${1:-}" == --dry-run ]]; then dry_run=yes; shift; fi
 
@@ -406,6 +446,11 @@ fi
 if [[ "${1:-}" == session-hook ]]; then
     session_hook "${@:2}" || true
     exit 0
+fi
+
+if [[ "${1:-}" == helpers ]]; then
+    helpers_json
+    exit
 fi
 
 if [[ "${1:-}" == --restart-finish ]]; then
@@ -558,7 +603,7 @@ report_dir() {
 # herdr refuses agent arguments containing newlines, so no argument may be multi-line: claude reads the prompt from its file, codex gets it JSON-escaped on one line.
 ARGS=()
 agent_args() {
-    local role=$1 want_resume=$2 file prompt
+    local role=$1 want_resume=$2 file prompt helpers
     local dir
     local -a dirs
     file="$ROLES_DIR/${PROMPT[$role]}"
@@ -574,7 +619,14 @@ agent_args() {
         if [[ $role == orchestrator ]]; then ARGS+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}'); fi
         ARGS+=(--model "${MODEL[claude:$role]}" --effort "${EFFORT[claude:$role]}" --append-system-prompt-file "$file"
               --settings "$ROLES_DIR/$role.claude-settings.json")
-        if [[ $role == worker || $role == researcher ]]; then tool_args claude; fi
+        if [[ $role == worker || $role == researcher ]]; then
+            tool_args claude
+            if helpers=$(helpers_json) && [[ $helpers != '{}' ]]; then
+                ARGS+=(--agents "$helpers")
+            else
+                echo "task-agent: no helper subagents from $ROLES_DIR/subagents; $role agent starts without them" >&2
+            fi
+        fi
         if [[ $role == worker ]]; then
             dirs=("$canonical_repo/.git")
             [[ -z $REPORTS ]] || dirs+=("$REPORTS")
@@ -701,7 +753,7 @@ if [[ $role == orchestrator ]]; then
     if [[ $resume == yes ]]; then
         kickoff="You were resumed as this task's orchestrator. Run your start-up steps again, then tell me where the plan stands."
     elif [[ $restarted == yes ]]; then
-        kickoff='You were restarted as this task'"'"'s orchestrator in a fresh session. Rename yourself first (herdr agent rename "$HERDR_PANE_ID" orchestrator). Then resume from AGENTS.md and the dispatcher (python3 ~/.config/tmux/scripts/task-dispatch.py digest, then wakes), not from the old session. The workers and the researcher are still running: check herdr agent list and do not start them again. Re-ask the user every open question recorded under AGENTS.md Decisions, since the old session may have asked it without an answer. Then run TASK_ROLE=orchestrator TASK_JEV_LIVE=1 python3 ~/.config/tmux/scripts/task-dispatch.py run in the background (exit 23 means it is already running; that is fine), and python3 ~/.config/tmux/scripts/task-dispatch.py wake-wait in the background, so routing resumes. Then tell me where the plan stands.'
+        kickoff='You were restarted as this task'"'"'s orchestrator in a fresh session. Rename yourself first (herdr agent rename "$HERDR_PANE_ID" orchestrator). Then resume from AGENTS.md and the dispatcher (python3 ~/.config/tmux/scripts/task-dispatch.py digest, then wakes), not from the old session. The workers and the researcher are still running: check herdr agent list and do not start them again. Re-ask the user every open question recorded under AGENTS.md Decisions, since the old session may have asked it without an answer. Then run TASK_ROLE=orchestrator TASK_JEV_LIVE=1 python3 ~/.config/tmux/scripts/task-dispatch.py start (it exits 0 when the daemon is already running; do not run it as a background task), and python3 ~/.config/tmux/scripts/task-dispatch.py wake-wait in the background, so routing resumes. Then tell me where the plan stands.'
     else
         kickoff="You are this task's orchestrator. Run your start-up steps now."
     fi

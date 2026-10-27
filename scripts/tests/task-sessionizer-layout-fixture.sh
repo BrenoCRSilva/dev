@@ -90,6 +90,21 @@ for expected in "$TASKS_DIR/fixture-multi/dotfiles" "$TASKS_DIR/fixture-multi/ap
     wait_nvim_line "$expected$(printf '\t.')" || fail "nvim . did not launch in $expected"
 done
 
+# Open refreshes the managed subagents and keeps one without the marker (C4).
+TEMPLATES="$ROOT/env/.config/tmux/scripts/task-roles/subagents"
+AGENTS_DIR="$TASKS_DIR/fixture-multi/.claude/agents"
+for t in "$TEMPLATES"/*.md; do cmp -s "$t" "$AGENTS_DIR/${t##*/}" || fail "open did not copy ${t##*/}"; done
+printf -- '---\nname: diff-reviewer\n---\n<!-- managed: task-roles -->\nold\n' > "$AGENTS_DIR/diff-reviewer.md"
+printf 'edited by the user\n' > "$AGENTS_DIR/status-reader.md"
+kept=$(run_task fixture-multi 2>&1 >/dev/null)
+cmp -s "$TEMPLATES/diff-reviewer.md" "$AGENTS_DIR/diff-reviewer.md" || fail 'open did not refresh a managed subagent'
+[[ $(cat "$AGENTS_DIR/status-reader.md") == 'edited by the user' ]] || fail 'open replaced a subagent without the marker'
+[[ $kept == *'status-reader.md has no managed marker'*'kept'* ]] || fail "open did not report the kept subagent: $kept"
+# An unchanged copy of the pre-marker status-reader template is ours: open refreshes it.
+sed '/^effort: high$/d; /^<!-- managed: task-roles -->$/d' "$TEMPLATES/status-reader.md" > "$AGENTS_DIR/status-reader.md"
+run_task fixture-multi >/dev/null 2>&1
+cmp -s "$TEMPLATES/status-reader.md" "$AGENTS_DIR/status-reader.md" || fail 'open did not refresh a pre-marker copy'
+
 # A live server in a correctly rooted srv tab is kept in place on re-entry.
 tmux send-keys -t '=fixture-multi:srv-dotfiles' 'sleep 30' Enter
 wait_pane_command '=fixture-multi:srv-dotfiles' sleep || fail 'srv-dotfiles never started its server'

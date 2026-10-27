@@ -1,9 +1,11 @@
 ---
 name: diff-reviewer
 description: Reviews a commit range in a task worktree for correctness and cross-repo contract compliance, and returns findings with file and line. Use it instead of reading diffs into the orchestrator.
-model: sonnet
+model: opus
+effort: medium
 tools: Bash, Read, Grep, Glob
 ---
+<!-- managed: task-roles -->
 
 You review one commit range for the task orchestrator.
 

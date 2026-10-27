@@ -3,10 +3,11 @@
 
     task-dispatch.py wait <agent>... [--task-root <dir>]
     task-dispatch.py plan check|reconcile [--task-root <dir>]
-    task-dispatch.py run|status|wakes|wake-wait|resolve|pause|resume|digest [--task-root <dir>]
+    task-dispatch.py run|start|status|wakes|wake-wait|resolve|pause|resume|digest [--task-root <dir>]
     task-dispatch.py jev calibrate|smoke [--task-root <dir>]
 
-run is the background daemon, which installs, starts and evaluates ready nodes and raises wakes. wake-wait, status,
+run is the background daemon, which installs, starts and evaluates ready nodes and raises wakes. start runs it
+detached (setsid, log logs/dispatch-run.log) and exits 0 when it is already running. wake-wait, status,
 wakes, resolve <wake> continue|retry|skip|cancel [--note] [--release], pause|resume <agent|node> and digest (the
 checkpoint packet, read-only) are the dispatcher commands (C7). Its exit codes: 1 daemon stopped (wake-wait), 23
 dispatch.lock held, 2 a refused resolve or pause.
@@ -84,7 +85,7 @@ DAEMON_STOPPED = 1
 ASK_USER = 11
 STOP_NAMES = {NEEDS_DECISION: "needs_decision", OUT_OF_SCOPE: "out_of_scope", CHECKS_FAILED: "checks", BUDGET: "budget", 10: "escalate", ASK_USER: "ask_user", 20: "decision_unavailable", KEYWORD: "keyword-safety", JEV_ESCALATE: "jev-escalate"}
 FAIL_NAMES = {BLOCKED: "blocked", NOT_STARTED: "not_started", TIMED_OUT: "timed_out", HERDR: "herdr", INTERNAL: "internal", NO_REPORT: "no_report", STALE: "stale_report", LAUNCH: "launch"}
-V2_COMMANDS = ("run", "wake-wait", "status", "wakes", "resolve", "pause", "resume", "digest")
+V2_COMMANDS = ("run", "start", "wake-wait", "status", "wakes", "resolve", "pause", "resume", "digest")
 TICK_S = 1
 JEV_MODES = ("off", "shadow", "route")
 JEV_DEFAULT_THRESHOLD = 0.8  # shadow reporting only; route mode requires TASK_JEV_THRESHOLD
@@ -1153,12 +1154,39 @@ def digest_main(root):
     return EMPTY
 
 
+def start_detached(root, wait_s=10):
+    """`start`: runs `run` in its own session (setsid), so it outlives the orchestrator's session, logging to
+    logs/dispatch-run.log. Exits 0 when it takes dispatch.lock or the lock is already held."""
+    held = lock_holder(root)
+    if held is not None:
+        print(f"dispatcher already running (pid {held})" if held > 0 else "dispatcher already running")
+        return EMPTY
+    log = root / "logs" / "dispatch-run.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "ab") as out:
+        proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "run", "--task-root", str(root)],
+                                stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        code = proc.poll()
+        if code is not None:
+            # LOCKED: another start won the race, so a dispatcher is running.
+            print(f"dispatcher exited {code}; see {log}" if code != LOCKED else "dispatcher already running")
+            return EMPTY if code == LOCKED else code
+        if lock_holder(root) is not None:
+            print(f"dispatcher started (pid {proc.pid}), log {log}")
+            return EMPTY
+        time.sleep(0.1)
+    print(f"dispatcher (pid {proc.pid}) has not taken dispatch.lock after {wait_s}s; see {log}")
+    return INTERNAL
+
+
 def v2_main(argv):
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--task-root", type=Path, default=Path.cwd())
     parser = argparse.ArgumentParser(prog="task-dispatch.py", description="Run the dispatcher and read or resolve its wakes (C7).")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("run", "wake-wait", "status", "wakes", "digest"):
+    for name in ("run", "start", "wake-wait", "status", "wakes", "digest"):
         sub.add_parser(name, parents=[common])
     resolve_parser = sub.add_parser("resolve", parents=[common])
     resolve_parser.add_argument("wake", type=int)
@@ -1169,12 +1197,14 @@ def v2_main(argv):
         sub.add_parser(name, parents=[common]).add_argument("target")
     args = parser.parse_args(argv)
     root = args.task_root
-    if args.command == "run":
+    if args.command in ("run", "start"):
         try:
             jev_settings()
         except ValueError as error:
             print(f"refused: {error}")
             return USAGE
+        if args.command == "start":
+            return start_detached(root)
         start_ms = int(os.environ.get("TASK_DISPATCH_START_MS", 30000))
         turn_ms = int(os.environ.get("TASK_DISPATCH_TURN_MS", 4 * 60 * 60 * 1000))
         return daemon(root, start_ms, turn_ms)

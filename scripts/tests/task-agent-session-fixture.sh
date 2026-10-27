@@ -215,6 +215,10 @@ dry=$(cd "$TASK" && "$TASK_AGENT" --dry-run --provider codex orchestrator --auto
 check "$dry" 'session: fresh' 'codex auto with no cli session of the task root'
 refute "$dry" 'resume --last' 'codex auto with no cli session of the task root'
 printf '{"type":"session_meta","payload":{"cwd":"%s","source":"cli"}}\n' "$TASK" > "$CS/rollout-c.jsonl"
+touch -d '40 days ago' "$CS/rollout-c.jsonl"
+dry=$(cd "$TASK" && "$TASK_AGENT" --dry-run --provider codex orchestrator --auto)
+refute "$dry" 'resume --last' 'a cli session older than 30 days is not looked at'
+touch "$CS/rollout-c.jsonl"
 dry=$(cd "$TASK" && "$TASK_AGENT" --dry-run --provider codex orchestrator --auto)
 check "$dry" 'resume --last' 'codex auto resumes the newest session of the task root'
 dry=$(cd "$TASK" && "$TASK_AGENT" --dry-run --provider codex orchestrator)

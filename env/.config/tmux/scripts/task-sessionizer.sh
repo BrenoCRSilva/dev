@@ -873,22 +873,47 @@ except (ValueError, KeyError, TypeError):
 ' "$CLAUDE_TASK_SETTINGS" <<< "$1"
 }
 
+AGENT_MARKER='<!-- managed: task-roles -->'
+# sha256 of the subagent templates from before the marker (status-reader, diff-reviewer):
+# an unchanged copy of one is ours, so it is refreshed too.
+AGENT_LEGACY_SUMS='98a670d57ade2798ed7f7030660a7c3b1249afd8879c1dabee52dde5d49f5999 4f65b546a2eb6b74d660e2035189d0cfea6e6a962fed7d709519946ce743deab'
+
+# managed_agent <file>: a regular file with the marker, or an unchanged pre-marker copy.
+managed_agent() {
+    [[ -f "$1" && ! -L "$1" ]] || return 1
+    grep -qxF "$AGENT_MARKER" "$1" && return 0
+    [[ " $AGENT_LEGACY_SUMS " == *" $(sha256sum < "$1" | cut -c1-64) "* ]]
+}
+
 # True when a task's .claude/agents holds only the subagent files this script
-# wrote, unchanged. Anything else in it is the user's.
+# wrote: a template copy or a file with the managed marker. Anything else is the user's.
 generated_agents() {
     local dir=$1 file
     [[ -d "$dir" && ! -L "$dir" ]] || return 1
     for file in "$dir"/* "$dir"/.[!.]*; do
         [[ -e "$file" || -L "$file" ]] || continue
-        cmp -s "$file" "$TASK_ROLES_DIR/subagents/${file##*/}" || return 1
+        cmp -s "$file" "$TASK_ROLES_DIR/subagents/${file##*/}" && continue
+        managed_agent "$file" || return 1
     done
+}
+
+# agent_state <template> <copy>: what the task's copy of a subagent needs. copy (absent),
+# same, refresh (differs and carries the managed marker) or keep (differs, no marker:
+# the user's edit).
+agent_state() {
+    if [[ ! -e "$2" && ! -L "$2" ]]; then echo copy
+    elif cmp -s "$1" "$2"; then echo same
+    elif managed_agent "$2"; then echo refresh
+    else echo keep
+    fi
 }
 
 # Claude Code reads CLAUDE.md, not AGENTS.md. A symlink (rather than an
 # @AGENTS.md import) means worker agents pick it up from the parent folder
 # without the "external import" approval. The settings let the orchestrator
-# run herdr and task-agent.sh without asking. The subagents (status-reader,
-# diff-reviewer) are copied in when absent, so a file the user edited is kept.
+# run herdr and task-agent.sh without asking. The subagents are copied in when
+# absent and refreshed when they carry the managed marker; a file without it is
+# the user's, kept and reported.
 write_claude_files() {
     local dir="$TASKS_DIR/$1" agent
     [[ -e "$dir/CLAUDE.md" || -L "$dir/CLAUDE.md" ]] || ln -s AGENTS.md "$dir/CLAUDE.md"
@@ -897,9 +922,13 @@ write_claude_files() {
         printf '%s\n' "$CLAUDE_TASK_SETTINGS" > "$dir/.claude/settings.json"
     fi
     for agent in "$TASK_ROLES_DIR"/subagents/*.md; do
-        [[ -e "$dir/.claude/agents/${agent##*/}" ]] && continue
-        mkdir -p "$dir/.claude/agents"
-        cp "$agent" "$dir/.claude/agents/${agent##*/}"
+        case $(agent_state "$agent" "$dir/.claude/agents/${agent##*/}") in
+            copy|refresh)
+                mkdir -p "$dir/.claude/agents"
+                cp "$agent" "$dir/.claude/agents/${agent##*/}"
+                ;;
+            keep) echo "$1: .claude/agents/${agent##*/} has no managed marker (edited by hand); kept" >&2 ;;
+        esac
     done
 }
 
@@ -965,7 +994,7 @@ create_task() {
             name=$(basename "$repo")
             printf '%s: clone to research/context/%s (read-only, for the researcher)\n' "$name" "$name"
         done
-        printf 'agents-md: write AGENTS.md and its Repo modes block; CLAUDE.md, .claude settings and subagents if absent; reports/ and hooks/ folders (no agent is started)\n'
+        printf 'agents-md: write AGENTS.md and its Repo modes block; CLAUDE.md, .claude settings if absent, subagents if absent or managed; reports/ and hooks/ folders (no agent is started)\n'
         printf 'runtime:   task session, nvim and srv windows, post-create hooks\n'
         return 0
     fi
@@ -1106,7 +1135,7 @@ PY
 }
 
 # CLAUDE.md, settings.json and the subagents: the files create writes. A subagent
-# the user edited is kept.
+# with the managed marker is refreshed; one without it (the user's edit) is kept.
 sync_claude_files() {
     local task=$1 stamp=$2 dir="$TASKS_DIR/$1" agent name
     local -a copy=()
@@ -1117,14 +1146,13 @@ sync_claude_files() {
     sync_settings "$task" "$stamp"
     for agent in "$TASK_ROLES_DIR"/subagents/*.md; do
         name=${agent##*/}
-        if [[ ! -e "$dir/.claude/agents/$name" ]]; then
-            copy+=("$name")
-        elif ! cmp -s "$agent" "$dir/.claude/agents/$name"; then
-            sync_line review ".claude/agents/$name differs from the template; kept"
-        fi
+        case $(agent_state "$agent" "$dir/.claude/agents/$name") in
+            copy|refresh) copy+=("$name") ;;
+            keep) sync_line review ".claude/agents/$name has no managed marker and differs from the template; kept" ;;
+        esac
     done
     if ((${#copy[@]})); then
-        sync_line change ".claude/agents: copy ${copy[*]}"
+        sync_line change ".claude/agents: copy or refresh ${copy[*]}"
         if [[ $DRY_RUN != yes ]]; then
             mkdir -p "$dir/.claude/agents"
             for name in "${copy[@]}"; do cp "$TASK_ROLES_DIR/subagents/$name" "$dir/.claude/agents/$name"; done
@@ -1642,6 +1670,8 @@ ensure_task_runtime() {
     # Trust the task's folders before any agent starts in them (C2); a failure only warns.
     "$(dirname "$SELF")/task-agent.sh" trust "$TASKS_DIR/$task" >/dev/null ||
         printf 'warning: could not mark the folders of %s trusted in ~/.claude.json\n' "$task" >&2
+    # Refresh the managed subagents on every open (C4).
+    [[ ! -f "$TASKS_DIR/$task/AGENTS.md" ]] || write_claude_files "$task"
     if command -v herdr >/dev/null; then
         herdr_layout "$task"
         if [[ $created == 1 ]]; then tmux send-keys -t "=$s:agent" "herdr --session $s" Enter; fi

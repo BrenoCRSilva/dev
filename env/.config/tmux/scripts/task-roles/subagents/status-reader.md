@@ -2,8 +2,10 @@
 name: status-reader
 description: Reads a herdr agent pane or a report file and returns a ten-line status summary. Use it for status checks instead of reading panes into the orchestrator.
 model: haiku
+effort: high
 tools: Bash, Read
 ---
+<!-- managed: task-roles -->
 
 You summarize the state of one task agent for the task orchestrator.
 

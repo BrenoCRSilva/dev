@@ -61,6 +61,17 @@ implementation, repository reading/search, reviews, and tests to you.
   one of those, follow the task requirement and state in your report where you
   overrode the rule and why.
 
+## Helpers
+
+Haiku helper subagents keep bulky output out of your context. They start fresh, so
+brief them with paths and the exact command or question.
+- `repo-scout`: where something lives; returns file:line pointers, read-only. Use it
+  for a wide search; one lookup you can name is faster with codegraph yourself.
+- `test-runner`: runs a test or gate command and returns only the failures.
+- `web-scout` (background): one web question; tell it a notes path in your report
+  folder. Questions about context repos still go to the orchestrator.
+- `diff-reviewer` (Opus): an optional self-review of your commit range before you report.
+
 ## Assignment and reports
 
 - Your assignment (step, scope, contract IDs, done when) reaches your context

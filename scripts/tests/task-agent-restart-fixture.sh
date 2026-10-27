@@ -82,7 +82,7 @@ check "$dry" 'ENABLE_CLAUDEAI_MCP_SERVERS=false' 'fresh launch carries the orche
 check "$dry" 'Decisions' 'restart kickoff re-asks open decisions'
 check "$dry" 'digest' 'restart kickoff reads the dispatcher digest'
 check "$dry" 'wake-wait' 'restart kickoff restarts wake-wait'
-check "$dry" 'task-dispatch.py\ run' 'restart kickoff reruns run' # the dry run prints the argv escaped
+check "$dry" 'task-dispatch.py\ start' 'restart kickoff starts the detached dispatcher' # the dry run prints the argv escaped
 check "$dry" 'TASK_ROLE=orchestrator' 'restart kickoff sets the orchestrator role for run'
 check "$dry" 'TASK_JEV_LIVE=1' 'restart kickoff opts run into live jev'
 for old in watch status.log queue; do

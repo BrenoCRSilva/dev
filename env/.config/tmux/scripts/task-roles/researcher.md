@@ -38,6 +38,15 @@ visible to you.
   run `task-sessionizer.sh refresh <task> <repo>`; do not fetch or check out in
   a clone yourself.
 
+## Helpers
+
+Fan out web work to `web-scout` (Haiku, background): one question per helper, each
+with its own notes path under `research/`, several in parallel when the questions are
+independent. You stay on Opus for the synthesis: read their notes, check the sources
+that carry the answer, and write the answer file yourself. `repo-scout` locates code
+in a folder you name (read-only); `test-runner` runs one command and returns only the
+failures. Helpers start fresh and have no Agent tool.
+
 ## Boundaries
 
 - Write notes, source inventories, and reports only under this task's

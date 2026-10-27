@@ -124,6 +124,8 @@ printf '%s\n' '{' '  "permissions": {' '    "allow": ["Bash(herdr:*)", "Bash(git
 mkdir -p "$custom/.claude/agents"
 cp "$ROOT/env/.config/tmux/scripts/task-roles/subagents/status-reader.md" "$custom/.claude/agents/status-reader.md"
 printf 'edited by the user\n' > "$custom/.claude/agents/status-reader.md"
+# An older managed copy: it carries the marker, so sync refreshes it.
+printf -- '---\nname: diff-reviewer\nmodel: sonnet\n---\n<!-- managed: task-roles -->\nold text\n' > "$custom/.claude/agents/diff-reviewer.md"
 
 # A task whose settings.json is not JSON: left as it is.
 badjson="$TASKS_DIR/badjson"
@@ -170,7 +172,7 @@ dry=$("$SESSIONIZER" sync legacy --dry-run) || fail "dry run failed: $dry"
 [[ "$(canon_state "$worker_repo")" == "$canonical_before" ]] || fail 'dry run wrote the worker canonical .git'
 [[ ! -e "$legacy/research/context/ctx" ]] || fail 'dry run made a context clone'
 grep -Fq 'planned: settings.json: +17 allow rule(s)' <<< "$dry" || fail "dry run did not plan the settings rules: $dry"
-grep -Fq 'planned: .claude/agents: copy diff-reviewer.md status-reader.md' <<< "$dry" || fail "dry run did not plan the subagents: $dry"
+grep -Fq 'planned: .claude/agents: copy or refresh diff-reviewer.md repo-scout.md status-reader.md test-runner.md web-scout.md' <<< "$dry" || fail "dry run did not plan the subagents: $dry"
 grep -Fq 'planned: hooks/: create' <<< "$dry" || fail 'dry run did not plan hooks/'
 grep -Fq 'planned: reports/: create' <<< "$dry" || fail 'dry run did not plan reports/'
 grep -Fq "planned: research/context/ctx: clone of $ctx_repo" <<< "$dry" || fail 'dry run did not plan the context clone'
@@ -231,7 +233,7 @@ PY
 backups=("$legacy"/.claude/settings.json.bak-*)
 [[ ${#backups[@]} -eq 1 ]] || fail 'expected one settings backup'
 cmp -s "$TMP_ROOT/legacy-settings.orig" "${backups[0]}" || fail 'the backup is not the previous settings file'
-for name in status-reader diff-reviewer; do
+for name in status-reader diff-reviewer web-scout repo-scout test-runner; do
     cmp -s "$legacy/.claude/agents/$name.md" "$ROOT/env/.config/tmux/scripts/task-roles/subagents/$name.md" ||
         fail "subagent $name was not copied from the template"
 done
@@ -295,10 +297,12 @@ printf 'PASS: current Notes are left alone, marker-less and version-1 Notes are 
 custom_dry=$("$SESSIONIZER" sync custom --dry-run)
 grep -Fq 'review: AGENTS.md: Notes section differs from the template; left as it is' <<< "$custom_dry" || fail "customised Notes not held: $custom_dry"
 grep -Fq '+- Standing user preference: keep this bullet.' <<< "$custom_dry" || fail 'diff does not show the custom bullet'
-grep -Fq 'review: .claude/agents/status-reader.md differs from the template; kept' <<< "$custom_dry" || fail 'edited subagent not reported'
+grep -Fq 'review: .claude/agents/status-reader.md has no managed marker and differs from the template; kept' <<< "$custom_dry" || fail 'edited subagent not reported'
 custom_out=$("$SESSIONIZER" sync custom)
 [[ "$(cat "$custom/AGENTS.md")" == "$notes_before" ]] || fail 'customised Notes were changed'
 [[ $(cat "$custom/.claude/agents/status-reader.md") == 'edited by the user' ]] || fail 'edited subagent was replaced'
+cmp -s "$custom/.claude/agents/diff-reviewer.md" "$ROOT/env/.config/tmux/scripts/task-roles/subagents/diff-reviewer.md" ||
+    fail 'a managed subagent was not refreshed'
 grep -Fq 'Bash(git status:*)' "$custom/.claude/settings.json" || fail 'custom rule was removed'
 jq -e '.permissions.allow | index("Bash(git status:*)") == 1 and index("Bash(herdr:*)") == 0' "$custom/.claude/settings.json" >/dev/null ||
     fail 'custom rule moved'

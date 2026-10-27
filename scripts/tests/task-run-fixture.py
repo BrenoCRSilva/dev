@@ -876,6 +876,33 @@ def scenario_internal(tmp):
     stop(proc)
 
 
+def scenario_start(tmp):
+    """start runs the daemon in its own session with a log, and a second start while it runs exits 0."""
+    root, fake, env = plan_root(tmp, "start", [("st1", WORKER, [], False)])
+    first = cli(env, root, "start")
+    check("start: exits 0 and reports the pid", first.returncode == 0 and "dispatcher started (pid" in first.stdout, first.stdout)
+    pid = dispatch_pid(root)
+    check("start: the daemon holds dispatch.lock in its own session", pid and os.getsid(pid) == pid, pid)
+    again = cli(env, root, "start")
+    check("start: a second start exits 0 while it runs", again.returncode == 0 and "already running" in again.stdout, again.stdout)
+    if pid:
+        os.kill(pid, signal.SIGTERM)
+        wait_for(lambda: dispatch_pid(root) is None)
+    log = root / "logs" / "dispatch-run.log"
+    check("start: the daemon logs to logs/dispatch-run.log", log.exists() and "dispatcher started" in log.read_text(encoding="utf-8"))
+
+
+def dispatch_pid(root):
+    text = (root / "dispatch.lock").read_text(encoding="utf-8").strip() if (root / "dispatch.lock").exists() else ""
+    if not text.isdigit():
+        return None
+    try:
+        os.kill(int(text), 0)
+    except ProcessLookupError:
+        return None
+    return int(text)
+
+
 def scenario_lock_scope(tmp):
     """The dispatch.lock flock: a garbled file nothing holds is stale, and a second taker is refused. A plain Scope
     path covers the files under it. herdr's reply is the last JSON line of stderr when a log line precedes it."""
@@ -1279,6 +1306,7 @@ def main():
         scenario_checks(tmp)
         scenario_internal(tmp)
         scenario_lock_scope(tmp)
+        scenario_start(tmp)
         scenario_t0_tiers(tmp)
         scenario_keyword_path(tmp)
         scenario_outcomes(tmp)

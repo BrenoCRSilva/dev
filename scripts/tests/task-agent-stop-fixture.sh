@@ -33,16 +33,18 @@ case "$*" in
         fi ;;
     "agent read worker-dotfiles --source visible")
         case "$pending" in
-            background|background-stuck|background-moved)
+            background|background-stuck|background-moved|background-label|background-nofooter)
                 printf '❯ run four background shells\n\n● ok\n\n▔▔▔▔\n   Background work is running\n   The following will stop when you exit:\n\n'
                 for i in 0 0 1 2; do printf '   shell · sleep 180%s\n' "$i"; done
+                # A task line holding a label's words is not an option row.
+                [[ $pending == background-label ]] && printf '   shell · echo Exit and stop tasks\n'
                 if [[ $pending == background-moved ]]; then
                     printf '\n     1. Exit and stop tasks\n   ❯ 2. Move to background and exit\n     3. Stay\n'
                 else
                     printf '\n   ❯ 1. Exit and stop tasks\n     2. Move to background and exit\n     3. Stay\n'
                 fi
-                printf '\n   Enter to confirm · Esc to cancel\n' ;;
-            compact) printf 'We recommend compacting earlier.\n  1. Keep auto\n❯ 2. Compact now\n' ;;
+                [[ $pending == background-nofooter ]] || printf '\n   Enter to confirm · Esc to cancel\n' ;;
+            compact) printf 'We recommend compacting earlier.\n  1. Keep auto\n❯ 2. Compact now\n\n  Enter to confirm · Esc to cancel\n' ;;
             text)
                 # The same words in normal output, far above the prompt: no option lines in the bottom lines, no keys.
                 echo "We recommend compacting earlier. Keep auto / Compact now"
@@ -51,7 +53,7 @@ case "$*" in
             *) echo "> " ;;
         esac ;;
     "agent send-keys worker-dotfiles enter")
-        if [[ "$pending" == background ]]; then rm -f "$FAKE_STATE/pending"; touch "$FAKE_STATE/gone"; fi ;;
+        if [[ "$pending" == background || "$pending" == background-label ]]; then rm -f "$FAKE_STATE/pending"; touch "$FAKE_STATE/gone"; fi ;;
     "agent send-keys worker-dotfiles up enter")
         [[ "$pending" == compact ]] && rm -f "$FAKE_STATE/pending"
         if [[ "$pending" == background-moved ]]; then rm -f "$FAKE_STATE/pending"; touch "$FAKE_STATE/gone"; fi ;;
@@ -99,6 +101,17 @@ run_stop background-moved idle
 check "$out" 'stopped worker-dotfiles' 'moved marker: stopped'
 [[ $(count 'agent send-keys worker-dotfiles up enter') -eq 1 ]] || fail "moved marker: up, enter must be sent once"
 [[ $(count 'agent send-keys worker-dotfiles enter') -eq 0 ]] || fail "moved marker: no plain Enter"
+
+# --- a task line with the label's words: the numbered row is picked (plain Enter) ---
+run_stop background-label idle
+[[ $code -eq 0 ]] || fail "label in a task line: exited $code: $out"
+[[ $(count 'agent send-keys worker-dotfiles enter') -eq 1 ]] || fail "label in a task line: plain Enter must be sent once"
+[[ $(count 'agent send-keys worker-dotfiles up enter') -eq 0 ]] || fail "label in a task line: the marker was moved to a task line"
+
+# --- no "Enter to confirm" footer: no keys, the stop gives up ------------------
+run_stop background-nofooter idle
+[[ $code -eq 1 ]] || fail "no footer: exited $code, expected 1: $out"
+[[ $(grep -c 'send-keys' "$FAKE_LOG" || true) -eq 0 ]] || fail "no footer: keys were sent"
 
 # --- the autocompact dialog eats /exit: Keep auto, then /exit again ------------
 run_stop compact idle

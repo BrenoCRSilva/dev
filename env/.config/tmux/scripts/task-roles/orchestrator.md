@@ -64,10 +64,12 @@ Requires `HERDR_ENV=1`. Agents are launched through
 Every command is `python3 ~/.config/tmux/scripts/task-dispatch.py <command>`.
 It sends prompts to agents for planned work. Do not prompt them yourself.
 
-- `run`: the daemon. Start it in the background (Bash `run_in_background`). It
-  installs and starts ready nodes, evaluates their reports and raises wakes.
-  Exit 23 means `dispatch.lock` is held: it is already running. Set
-  `TASK_JEV_LIVE=1` and `TASK_ROLE=orchestrator` for live jev shadow judgements.
+- `run`: the daemon. Start it with `start`, not as a Bash background task:
+  `TASK_ROLE=orchestrator TASK_JEV_LIVE=1 python3 ~/.config/tmux/scripts/task-dispatch.py start`.
+  `start` runs `run` in its own session (setsid), so it outlives this session, logs
+  to `logs/dispatch-run.log`, and exits 0 when it is already running. It installs and
+  starts ready nodes, evaluates their reports and raises wakes. `TASK_JEV_LIVE=1` and
+  `TASK_ROLE=orchestrator` turn on live jev shadow judgements.
 - `wake-wait`: run it in the background. It prints one line when a wake opens or
   the daemon stops. Then read `wakes`, resolve, and start `wake-wait` again.
 - `wakes`: open wakes (id, node, tier, rule, reason, pointers).
@@ -112,7 +114,7 @@ A report's `handoff` is what the next session on that agent reads first.
   check's name and output to the worker. Exit 3: the repo declares no gates; ask the
   worker for a `.task-gates` file. Exit 2: a usage or `.task-gates` error.
 - The script never merges, pushes or deploys. The merge still needs the user's OK.
-- Review each merge candidate with `diff-reviewer` (Sonnet) against the contracts.
+- Review each merge candidate with `diff-reviewer` (Opus) against the contracts.
 
 ## Context size and restarts
 
@@ -130,16 +132,23 @@ A report's `handoff` is what the next session on that agent reads first.
   fresh session is cleaner than a compacted one. Run it from your own pane, only when
   no user question is pending and work remains, as your turn's last action: work after
   it in the turn is not carried over. The fresh session re-asks the open Decisions,
-  runs `digest` and `wakes`, and restarts `run` and `wake-wait` itself.
+  runs `digest` and `wakes`, runs `start` (a no-op while the daemon still runs) and
+  starts `wake-wait` again.
 - Workers and the researcher get a fresh session per node when the node says
   `session = "fresh"` (the default). Use `session = "continue"` only for a node that
   must keep the session. Nothing else needs restarting by hand.
 
-## Subagents
+## Helpers
 
+Helper subagents (`.claude/agents/` at the task root, refreshed on task open; the
+workers and the researcher get the same set at launch). They have no Agent tool.
 - `status-reader` (Haiku): reads a pane or report and returns ten lines.
-- `diff-reviewer` (Sonnet): reviews a commit range against the contracts.
-- Subagents start fresh. Brief them with the worktree path, the commit range or
+- `diff-reviewer` (Opus): reviews a commit range against the contracts.
+- `repo-scout` (Haiku): finds code and returns file:line pointers; read-only.
+- `web-scout` (Haiku, background): one web question, notes under a path you name,
+  a ten-line summary with sources. Larger research goes to the researcher.
+- `test-runner` (Haiku): runs one command, returns only the failures.
+- Helpers start fresh. Brief them with the worktree path, the commit range or
   agent name, and the contract IDs, not with pasted text.
 
 ## Keep the cache warm
