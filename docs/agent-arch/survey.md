@@ -1,5 +1,12 @@
 # Task-agent system: survey
 
+> **Historical snapshot.** This survey describes the system before s1-s5, at `8011d6a`. The body
+> is kept as written. Changed since: every claude role runs Opus 5.5, diff-reviewer included; the
+> orchestrator has no 200k auto-compact cap and gets one soft /compact line at 400k in place of
+> the 120k/150k guard; a task has shared `agent`, `nvim` and `srv` windows in place of
+> `nvim-<repo>`/`srv-<repo>` and `srv-1`; workers and the researcher get Haiku helper subagents;
+> context clones are indexed with codegraph and read through the `context-scout` helper.
+
 Read-only survey of today's code against the four asks. File references are relative to
 `env/.config/tmux/scripts/` unless a path is shown. Nothing here is designed in depth; the
 "change points" are where a change would land.

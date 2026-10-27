@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""C4 context guard: a UserPromptSubmit and PostToolUse hook for the orchestrator, wired in
+"""Orchestrator context guard (soft /compact line at 400k): a UserPromptSubmit and PostToolUse hook, wired in
 task-roles/orchestrator.claude-settings.json. It reads the prompt size of the newest main-thread assistant
 turn from the transcript tail (input + cache read + cache write). From 400k tokens it adds one soft line,
 once per crossing: run /compact at the next checkpoint. It never asks for a restart: native compaction keeps
