@@ -8,7 +8,7 @@ local ORDER = ".task-worker-order"
 
 -- Seeded tags are direct children of the root named after their folder; any
 -- other tag in the scope is the user's and is left alone.
-function M.sync(root)
+local function sync(root)
 	local grapple = require("grapple")
 	local names, want = {}, {}
 	local ok, lines = pcall(vim.fn.readfile, root .. "/" .. ORDER)
@@ -27,6 +27,15 @@ function M.sync(root)
 	end
 	for i, name in ipairs(names) do
 		grapple.tag({ path = root .. "/" .. name, name = name, index = i, scope = "task" })
+	end
+end
+
+-- Runs at startup and from the fs_event callback, so a Grapple error is a
+-- warning, never a throw.
+function M.sync(root)
+	local ok, err = pcall(sync, root)
+	if not ok then
+		vim.notify("task-grapple: " .. tostring(err), vim.log.levels.WARN)
 	end
 end
 

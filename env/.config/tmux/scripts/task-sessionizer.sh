@@ -1433,11 +1433,12 @@ task_window_exists() {
 }
 
 # nvim in a task window (the shared nvim, or an old nvim-<repo>) quits with :qa,
-# so unsaved buffers keep it open and this returns 1.
+# so unsaved buffers keep it open and this returns 1. C-\ C-n first leaves
+# terminal, insert or command-line mode, so :qa never reaches a job.
 quit_nvim_window() {
     local s=$1 win=$2 i
     [[ "$(tmux display-message -p -t "=$s:$win" '#{pane_current_command}' 2>/dev/null)" == nvim ]] || return 0
-    tmux send-keys -t "=$s:$win" Escape ':qa' Enter
+    tmux send-keys -t "=$s:$win" 'C-\' C-n ':qa' Enter
     for i in $(seq 1 20); do
         [[ "$(tmux display-message -p -t "=$s:$win" '#{pane_current_command}' 2>/dev/null)" == nvim ]] || return 0
         sleep 0.25
@@ -1636,13 +1637,30 @@ ensure_task_window() {
     fi
 }
 
-# Old layout (before C3): nvim-<repo> and srv-<repo> windows. On open, a
-# one-pane window at an idle shell closes, an nvim-<repo> is asked to :qa and
-# closes if it quit; anything else stays. Each step is reported on stderr.
+# Old layout (before C3): nvim-<repo> and srv-<repo> windows. On open, only a
+# window named after a worker repo of this task, with its one pane in that
+# repo's worktree (srv: or the task root), is a candidate: at an idle shell it
+# closes, an nvim-<repo> is asked to :qa and closes if it quit; anything else
+# stays. Each step is reported on stderr.
 migrate_task_windows() {
-    local s=$1 win n cmd
+    local task=$1 s=$2 win repo n cmd cwd d root
+    local -A wt=()
+    root=$(realpath "$TASKS_DIR/$task")
+    while IFS= read -r d; do
+        [[ -n "$d" ]] && wt[$(basename "$d")]=$(realpath "$d")
+    done < <(task_worktrees "$task")
     while IFS= read -r win; do
-        [[ "$win" =~ ^(nvim|srv)-.+$ ]] || continue
+        [[ "$win" =~ ^(nvim|srv)-(.+)$ ]] || continue
+        repo=${BASH_REMATCH[2]}
+        if [[ -z "${wt[$repo]:-}" ]]; then
+            printf 'layout: kept window %s (%s is not a worker repo)\n' "$win" "$repo" >&2
+            continue
+        fi
+        cwd=$(tmux display-message -p -t "=$s:$win" '#{pane_current_path}')
+        if [[ "$cwd" != "${wt[$repo]}" && ! ( "$win" == srv-* && "$cwd" == "$root" ) ]]; then
+            printf 'layout: kept window %s (not at the %s worktree: %s)\n' "$win" "$repo" "$cwd" >&2
+            continue
+        fi
         n=$(tmux list-panes -t "=$s:$win" -F x | wc -l)
         cmd=$(tmux display-message -p -t "=$s:$win" '#{pane_current_command}')
         if ((n != 1)); then
@@ -1678,7 +1696,7 @@ ensure_task_layout() {
         awk '$1 == "1" { print $2; exit }')
     ensure_task_window "$task" "$s" agent agent "$root"
     ensure_task_window "$task" "$s" nvim nvim "$root"
-    migrate_task_windows "$s"
+    migrate_task_windows "$task" "$s"
     task_window_exists "$s" srv && standard+=(srv)
 
     # Closed old windows leave gaps, so number from the first index, gap-free.
@@ -2132,7 +2150,7 @@ stop_task() {
     # nvim: ask each instance to quit, then give its language servers a moment
     # to exit with it; any left over are sent SIGTERM.
     for pane in "${nvim_panes[@]}"; do
-        tmux send-keys -t "$pane" Escape ':qa' Enter
+        tmux send-keys -t "$pane" 'C-\' C-n ':qa' Enter
     done
     for pane in "${nvim_panes[@]}"; do
         pid=${nvim_of[$pane]}

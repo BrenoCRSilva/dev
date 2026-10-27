@@ -21,15 +21,18 @@ cat > "$HOME/.tmux.conf" <<'EOF'
 set-option -g default-shell /bin/bash
 set-option -g status off
 EOF
-# Fake nvim (its process name is nvim): logs its start, quits on :qa unless
-# $NVIM_DIRTY/<its folder name> exists, like a real nvim with unsaved buffers.
+# Fake nvim (its process name is nvim): logs its start, quits on C-\ C-n :qa
+# (the keys that leave terminal mode first) unless $NVIM_DIRTY/<its folder name>
+# exists, like a real nvim with unsaved buffers. Like nvim it takes C-\ as a key,
+# not as SIGQUIT.
 cat > "$BIN/nvim" <<'EOF'
 #!/bin/bash
 # tmux names a pane's command from argv[0], which for a script is bash.
 [[ -n "${FAKE_NVIM:-}" ]] || FAKE_NVIM=1 exec -a nvim /bin/bash "$0" "$@"
+stty -isig 2>/dev/null
 printf '%s\t%s\n' "$PWD" "$*" >> "$NVIM_LOG"
 while IFS= read -r line; do
-    [[ "$line" == *:qa* && ! -e "$NVIM_DIRTY/${PWD##*/}" ]] && exit 0
+    [[ "$line" == $'\x1c\x0e:qa' && ! -e "$NVIM_DIRTY/${PWD##*/}" ]] && exit 0
 done
 EOF
 cat > "$BIN/uwsm-app" <<'EOF'
@@ -167,6 +170,7 @@ active=$(tmux list-windows -t '=fixture-new' -F '#W|#{window_active}' | awk -F'|
 # --- reopen of an old-layout task: idle shells and clean nvims close, others stay ---
 make_repo fixture-old a
 make_repo fixture-old b
+make_repo fixture-old c
 printf '# fixture-old\n\n## Repos\n- b: first\n- a: second\n' > "$TASKS_DIR/fixture-old/AGENTS.md"
 old="$TASKS_DIR/fixture-old"
 tmux new-session -ds fixture-old -n agent -c "$old"
@@ -175,6 +179,10 @@ tmux new-window -d -t '=fixture-old:' -n nvim-b -c "$old/b" nvim
 tmux new-window -d -t '=fixture-old:' -n srv-a -c "$old/a"
 tmux new-window -d -t '=fixture-old:' -n srv-b -c "$old/b"
 tmux send-keys -t '=fixture-old:srv-b' 'sleep 30' Enter
+# Idle windows the user made: srv-c is not at c's worktree, nvim-notes is no repo
+# of the task.
+tmux new-window -d -t '=fixture-old:' -n srv-c -c "$TMP_ROOT"
+tmux new-window -d -t '=fixture-old:' -n nvim-notes -c "$old"
 wait_pane_command '=fixture-old:nvim-a' nvim || fail 'old nvim-a did not start'
 wait_pane_command '=fixture-old:nvim-b' nvim || fail 'old nvim-b did not start'
 wait_pane_command '=fixture-old:srv-b' sleep || fail 'old srv-b server did not start'
@@ -183,14 +191,15 @@ touch "$NVIM_DIRTY/b"
 report=$(run_task fixture-old 2>&1 >/dev/null)
 # The kept old windows follow agent and nvim (swaps may reorder them).
 [[ $(tmux list-windows -t '=fixture-old' -F '#W' | head -n2) == $'agent\nnvim' ]] || fail 'old task does not start with agent, nvim'
-[[ $(tmux list-windows -t '=fixture-old' -F '#W' | tail -n +3 | sort) == $'nvim-b\nsrv-b' ]] || fail 'old task kept the wrong windows' 
+[[ $(tmux list-windows -t '=fixture-old' -F '#W' | tail -n +3 | sort) == $'nvim-b\nnvim-notes\nsrv-b\nsrv-c' ]] || fail 'old task kept the wrong windows' 
 [[ $(tmux display-message -p -t '=fixture-old:nvim-b' '#{pane_current_command}') == nvim ]] || fail 'the dirty old nvim was ended'
 [[ $(tmux display-message -p -t '=fixture-old:srv-b' '#{pane_current_command}') == sleep ]] || fail 'the busy old srv window was ended'
 for line in 'closed old window nvim-a (idle)' 'kept old window nvim-b (nvim has unsaved buffers)' \
-    'closed old window srv-a (idle)' 'kept old window srv-b (running sleep)'; do
+    'closed old window srv-a (idle)' 'kept old window srv-b (running sleep)' \
+    'kept window nvim-notes (notes is not a worker repo)' "kept window srv-c (not at the c worktree: $TMP_ROOT)"; do
     [[ "$report" == *"layout: $line"* ]] || fail "open did not report: $line; got: $report"
 done
-[[ $(cat "$old/.task-worker-order") == $'b\na' ]] || fail 'worker order was not rebuilt from AGENTS.md'
+[[ $(cat "$old/.task-worker-order") == $'b\na\nc' ]] || fail 'worker order was not rebuilt from AGENTS.md'
 wait_nvim_line "$(realpath "$old")$(printf '\t.')" || fail 'the old task did not get the shared nvim'
 rm -f "$NVIM_DIRTY/b"
 

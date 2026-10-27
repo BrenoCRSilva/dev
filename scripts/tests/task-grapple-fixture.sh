@@ -3,7 +3,7 @@
 # whose data folder is temporary: a task root gets one "task"-scope tag per
 # worker in .task-worker-order, the user's cwd scope stays empty, and a new
 # order file (written by rename, like task-sessionizer.sh) drops a removed repo
-# and keeps a tag the user added.
+# and keeps a tag the user added; a Grapple error only warns.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -46,6 +46,21 @@ grapple.tag({ path = "$task/AGENTS.md", scope = "task" })
 vim.fn.writefile({ "web" }, "$task/.task-worker-order.tmp")
 vim.uv.fs_rename("$task/.task-worker-order.tmp", "$task/.task-worker-order")
 check(vim.wait(3000, function() return names() == "web,AGENTS.md" end, 50), "refresh left " .. names())
+-- A Grapple error is one WARN per sync, from a direct call and from the
+-- fs_event callback, and never a throw.
+local warns, real_tag = {}, grapple.tag
+vim.notify = function(msg, level)
+	if level == vim.log.levels.WARN then table.insert(warns, msg) end
+end
+grapple.tag = function() error("boom") end
+check(pcall(require("brenocrs.task-grapple").sync, "$task"), "sync threw on a Grapple error")
+check(#warns == 1 and warns[1]:find("boom", 1, true), "direct sync warned " .. #warns .. " times")
+vim.fn.writefile({ "api" }, "$task/.task-worker-order.tmp")
+vim.uv.fs_rename("$task/.task-worker-order.tmp", "$task/.task-worker-order")
+check(vim.wait(3000, function() return #warns >= 2 end, 50), "the fs_event sync did not warn")
+check(#warns == 2, "the fs_event sync warned " .. #warns .. " times in all")
+grapple.tag = real_tag
+vim.fn.writefile({ "web" }, "$task/.task-worker-order")
 -- Opening the same root again keeps the tags (saved per task, not per cwd).
 vim.cmd("qall!")
 EOF
