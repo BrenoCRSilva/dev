@@ -47,6 +47,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.config/tmux/scripts/task-agent.sh session-hook worker",
+            "timeout": 5
+          }
+        ]
       }
     ]
   }

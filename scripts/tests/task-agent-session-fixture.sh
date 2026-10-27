@@ -31,7 +31,10 @@ cat > "$TMP/bin/herdr" <<'STUB'
 #!/bin/bash
 case "$1 $2" in
     "pane get")
-        case "$3" in wpane) cwd=$WT ;; rpane) cwd=$TASK/research ;; *) exit 1 ;; esac
+        case "$3" in
+            wpane) cwd=$WT ;; rpane) cwd=$TASK/research ;;
+            wsub) cwd=$WT/sub/deeper ;; rsub) cwd=$TASK/research/context/repo/docs ;; *) exit 1 ;;
+        esac
         printf '{"result":{"pane":{"cwd":"%s"}}}\n' "$cwd" ;;
     "agent start") echo "$*" >> "$FAKE_LOG" ;;
     "agent get") printf '{"result":{"agent":{"agent_session":{"value":"%s"}}}}\n' "${FAKE_CODEX_ID:-}" ;;
@@ -161,6 +164,62 @@ refute "$dry" '--resume' 'a restarted orchestrator is fresh'
 check "$dry" 'session: fresh' 'restarted dry run names a fresh session'
 [[ $(field orchestrator session_id) == "$id" ]] || fail 'a dry run changed the record'
 echo 'PASS: the orchestrator is recorded and resumed by --auto; --restarted stays fresh'
+
+# --- a pane cwd below the agent's folder ---------------------------------------------
+mkdir -p "$WT/sub/deeper" "$TASK/research/context/repo/docs"
+rm -f "$RECORD"
+"$TASK_AGENT" start worker dotfiles wsub "$MAIN" >/dev/null 2>&1 || fail 'worker in a worktree subfolder did not start'
+[[ $(field worker-dotfiles cwd) == "$WT" ]] || fail "worker subfolder: record cwd is not the worktree: $(cat "$RECORD")"
+check "$(last_start)" "$TASK/reports/worker-dotfiles" 'worker subfolder: reports folder of the task'
+"$TASK_AGENT" start researcher rsub >/dev/null 2>&1 || fail 'researcher in a research subfolder did not start'
+[[ $(field researcher cwd) == "$TASK/research" ]] || fail "researcher subfolder: record cwd: $(cat "$RECORD")"
+echo 'PASS: a pane cwd below the worktree or research/ records the agent folder in the task root'
+
+# --- session-hook: the record follows /clear and compaction -----------------------------
+hook() { printf '{"session_id":"%s","cwd":"%s","source":"%s"}' "$2" "$3" "${4:-clear}" | "$TASK_AGENT" session-hook "$1"; }
+for r in orchestrator worker researcher; do
+    jq -e --arg r "$r" '[.hooks.SessionStart[] | select(.matcher | test("clear") and test("compact") and test("startup"))
+        | .hooks[].command] | index("~/.config/tmux/scripts/task-agent.sh session-hook " + $r)' \
+        "$ROOT/env/.config/tmux/scripts/task-roles/$r.claude-settings.json" >/dev/null || fail "$r settings: no session-hook on SessionStart"
+done
+rm -f "$RECORD"
+out=$(hook worker 5e55-1 "$WT/sub/deeper") || fail 'session-hook outside a task must still exit 0'
+[[ ! -e $RECORD ]] || fail 'session-hook wrote outside a task root (no AGENTS.md)'
+touch "$TASK/AGENTS.md"
+out=$(hook worker 5e55-1 "$WT/sub/deeper")
+[[ -z $out ]] || fail "session-hook printed: $out"
+[[ $(field worker-dotfiles session_id) == 5e55-1 && $(field worker-dotfiles cwd) == "$WT" && $(field worker-dotfiles provider) == claude ]] ||
+    fail "session-hook worker record: $(cat "$RECORD")"
+hook orchestrator 5e55-2 "$TASK" compact >/dev/null
+hook researcher 5e55-3 "$TASK/research/context/repo" startup >/dev/null
+[[ $(field orchestrator session_id) == 5e55-2 && $(field orchestrator cwd) == "$TASK" ]] || fail "session-hook orchestrator: $(cat "$RECORD")"
+[[ $(field researcher session_id) == 5e55-3 && $(field researcher cwd) == "$TASK/research" ]] || fail "session-hook researcher: $(cat "$RECORD")"
+before=$(cat "$RECORD")
+hook worker 'bad id; rm' "$WT" >/dev/null
+echo 'not json' | "$TASK_AGENT" session-hook worker || fail 'session-hook on bad input must exit 0'
+hook nobody 5e55-4 "$TASK" >/dev/null
+[[ $(cat "$RECORD") == "$before" ]] || fail 'session-hook changed the record on bad input'
+touch "$HOME/.claude/projects/-wt/5e55-1.jsonl"
+worker --auto
+check "$(last_start)" '--resume 5e55-1' 'auto resumes the id the hook recorded'
+rm "$TASK/AGENTS.md"
+echo 'PASS: session-hook records the current session id of each role, prints nothing and ignores bad input'
+
+# --- codex orchestrator: --auto falls back to resume --last ------------------------------
+rm -f "$RECORD"
+CS="$HOME/.codex/sessions/2026/10/27"
+mkdir -p "$CS"
+printf '{"type":"session_meta","payload":{"cwd":"%s","source":"exec"}}\n' "$TASK" > "$CS/rollout-a.jsonl"
+printf '{"type":"session_meta","payload":{"cwd":"/elsewhere","source":"cli"}}\n' > "$CS/rollout-b.jsonl"
+dry=$(cd "$TASK" && "$TASK_AGENT" --dry-run --provider codex orchestrator --auto)
+check "$dry" 'session: fresh' 'codex auto with no cli session of the task root'
+refute "$dry" 'resume --last' 'codex auto with no cli session of the task root'
+printf '{"type":"session_meta","payload":{"cwd":"%s","source":"cli"}}\n' "$TASK" > "$CS/rollout-c.jsonl"
+dry=$(cd "$TASK" && "$TASK_AGENT" --dry-run --provider codex orchestrator --auto)
+check "$dry" 'resume --last' 'codex auto resumes the newest session of the task root'
+dry=$(cd "$TASK" && "$TASK_AGENT" --dry-run --provider codex orchestrator)
+refute "$dry" 'resume' 'a plain codex orchestrator start stays fresh'
+echo 'PASS: a codex orchestrator --auto resumes --last only when a cli session of the task root exists'
 
 # --- picker ---------------------------------------------------------------------------
 # The task tab has no y/n prompt: the orchestrator branch only launches with --auto.

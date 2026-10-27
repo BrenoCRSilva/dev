@@ -8,6 +8,7 @@
 #   task-agent.sh [--dry-run] stop <name> [--force]
 #   task-agent.sh [--dry-run] restart orchestrator
 #   task-agent.sh [--dry-run] trust <task-root>
+#   task-agent.sh session-hook orchestrator|worker|researcher   (claude SessionStart hook)
 #
 # Agent names: worker-<repo> for a worker and researcher for the researcher. The
 # orchestrator names itself at start-up (herdr cannot name it at launch). The
@@ -32,7 +33,8 @@
 # trusts the task's folders (trust_task_paths, C2); `trust` does only that. The orchestrator's claude launch has no MCP servers and no
 # claude.ai connectors, and the 1h prompt-cache TTL (ORCHESTRATOR_ENV).
 # restart orchestrator ends the orchestrator in its own pane and starts a fresh
-# one there, without --resume; see restart_orchestrator.
+# one there, without --resume; see restart_orchestrator. session-hook keeps the
+# record on the session a claude agent is in after /clear or a compaction.
 set -euo pipefail
 
 ROLES_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/task-roles"
@@ -77,6 +79,7 @@ usage: task-agent.sh [--dry-run] [--provider claude|codex] orchestrator [--auto|
        task-agent.sh [--dry-run] stop <name> [--force]
        task-agent.sh [--dry-run] restart orchestrator
        task-agent.sh [--dry-run] trust <task-root>
+       task-agent.sh session-hook orchestrator|worker|researcher
 EOF
     exit 2
 }
@@ -96,12 +99,11 @@ herdr_cmd() {
 # that is working is left alone unless --force is given (--force only skips that
 # check). Nothing is killed: if the agent is still there after the wait, that is
 # reported. Two dialogs can hold /exit, and each is answered once while the wait
-# runs: the background-work confirm gets Enter, and the autocompact dialog gets
-# "Keep auto" (up, enter) followed by a second /exit. Failures return 1 rather
+# runs: the background-work confirm gets "Exit and stop tasks", and the autocompact
+# dialog gets "Keep auto" followed by a second /exit. Failures return 1 rather
 # than exit, because finish_restart calls this and must log its own line.
 stop_agent() {
-    local dry=$1 name=${2:-} arg info state pane screen bottom keep mark n force=no enter_sent=no keep_sent=no
-    local -a keys=()
+    local dry=$1 name=${2:-} arg info state pane screen bottom force=no enter_sent=no keep_sent=no
     [[ -n "$name" ]] || usage
     for arg in "${@:3}"; do
         [[ "$arg" == --force ]] || usage
@@ -126,18 +128,16 @@ stop_agent() {
         # A dialog counts only in the last 12 lines and with its option lines, so the same text in normal output above a
         # prompt sends no keys.
         bottom=$(tail -n 12 <<< "$screen")
-        if [[ $enter_sent == no && "$bottom" == *"Background work is running"* && "$bottom" == *"Exit and stop tasks"* ]]; then
-            herdr_cmd agent send-keys "$name" enter >/dev/null
-            enter_sent=yes
+        # The background-work confirm lists one line per running task above its options, so with three or more
+        # tasks its title is above the bottom lines: it is found by its own two option lines.
+        if [[ $enter_sent == no && "$bottom" == *"Exit and stop tasks"* && "$bottom" == *"Move to background and exit"* ]]; then
+            if pick_option "$name" "Exit and stop tasks" "$bottom"; then
+                echo "task-agent: $name: answered the background-work confirm with Exit and stop tasks" >&2
+                enter_sent=yes
+            fi
         elif [[ $keep_sent == no && "$bottom" == *"compacting earlier"* && "$bottom" == *"Keep auto"* ]]; then
-            # Keep auto is picked by moving the marker (❯) onto its row, not by a fixed Up; no marker, no keys.
-            keep=$(grep -n "Keep auto" <<< "$bottom" | head -n 1 | cut -d: -f1)
-            mark=$(grep -n "❯" <<< "$bottom" | head -n 1 | cut -d: -f1)
-            if [[ -n "$mark" ]]; then
-                keys=()
-                for (( n = mark; n > keep; n-- )); do keys+=(up); done
-                for (( n = mark; n < keep; n++ )); do keys+=(down); done
-                herdr_cmd agent send-keys "$name" "${keys[@]}" enter >/dev/null
+            if pick_option "$name" "Keep auto" "$bottom"; then
+                echo "task-agent: $name: answered the autocompact dialog with Keep auto; sending /exit again" >&2
                 herdr_cmd agent prompt "$name" /exit >/dev/null
                 keep_sent=yes
             fi
@@ -148,13 +148,28 @@ stop_agent() {
     return 1
 }
 
+# pick_option <name> <label> <screen lines>: picks a dialog option by moving its marker
+# (❯ before a numbered row) onto the label's row, then Enter. No marker or no label, no keys.
+pick_option() {
+    local want mark n
+    local -a keys=()
+    want=$(grep -n -F "$2" <<< "$3" | head -n 1 | cut -d: -f1)
+    mark=$(grep -n -E '❯ +[0-9]+\.' <<< "$3" | head -n 1 | cut -d: -f1)
+    [[ -n $want && -n $mark ]] || return 1
+    for (( n = mark; n > want; n-- )); do keys+=(up); done
+    for (( n = mark; n < want; n++ )); do keys+=(down); done
+    herdr_cmd agent send-keys "$1" "${keys[@]}" enter >/dev/null
+}
+
 # --- restart --------------------------------------------------------------------
 # restart orchestrator ends the orchestrator's session and starts a fresh one in
 # the same pane, with no --resume. It runs in the orchestrator's own pane, and
 # that pane's session is the one it ends, so the work is detached: the caller's
 # turn ends first. The detached --restart-finish waits for the orchestrator to go
 # idle, ends it with /exit, and types the fresh launch into the pane. Its log is
-# in the state folder.
+# in the state folder. The launch is --restarted, not --auto: --auto would resume
+# the recorded session, the one being ended, while a restart wants a fresh one;
+# AGENTS.md, the digest and the handoff note carry the state over.
 restart_orchestrator() {
     local dry=$1 pane=${HERDR_PANE_ID:-} provider=${TASK_PROVIDER:-claude} info cmd
     [[ "${2:-}" == orchestrator && $# -eq 2 ]] || usage
@@ -174,26 +189,31 @@ restart_orchestrator() {
         return 0
     fi
     mkdir -p "${RESTART_LOG%/*}"
+    echo "$(date -Is) restart: scheduled for pane $pane: $cmd" >> "$RESTART_LOG"
     setsid -f "$SELF" --restart-finish "$pane" "$cmd" </dev/null >> "$RESTART_LOG" 2>&1
     printf 'restart: scheduled; the orchestrator in pane %s ends after this turn and a fresh one starts there (log: %s)\n' "$pane" "$RESTART_LOG"
 }
 
 # Run detached by restart_orchestrator. Gives up after 10 minutes, or at once when
-# the orchestrator is gone, leaving the pane alone.
+# the orchestrator is gone, leaving the pane alone; a give-up logs the command to
+# type by hand.
 finish_restart() {
     local pane=$1 cmd=$2 state
+    by_hand() { echo "$(date -Is) restart: $1; not restarted. By hand: end the orchestrator in pane $pane (/exit), then type there: $cmd"; }
+    echo "$(date -Is) restart: waiting for the orchestrator in pane $pane to go idle"
     for _ in $(seq 1 1200); do
         state=$(herdr_cmd agent get orchestrator 2>/dev/null | jq -r '.result.agent.agent_status // empty' 2>/dev/null) || state=
         if [[ "$state" == idle ]]; then
-            stop_agent no orchestrator || { echo "$(date -Is) restart: orchestrator did not end; not restarted"; return 1; }
-            herdr_cmd pane run "$pane" "$cmd" >/dev/null
+            echo "$(date -Is) restart: orchestrator idle; sending /exit"
+            stop_agent no orchestrator || { by_hand "orchestrator did not end"; return 1; }
+            herdr_cmd pane run "$pane" "$cmd" >/dev/null || { by_hand "could not type the launch into pane $pane"; return 1; }
             echo "$(date -Is) restart: fresh orchestrator started in pane $pane"
             return 0
         fi
         [[ -n "$state" ]] || { echo "$(date -Is) restart: no orchestrator agent; nothing done"; return 1; }
         sleep 0.5
     done
-    echo "$(date -Is) restart: orchestrator did not go idle within 10 minutes; not restarted"
+    by_hand "orchestrator did not go idle within 10 minutes"
     return 1
 }
 
@@ -278,6 +298,93 @@ trust_command() {
     trust_task_paths "$root"
 }
 
+# --- session record (C1) -----------------------------------------------------------
+# <task-root>/.task-sessions.json: {agent: {provider, session_id, cwd, updated}}.
+
+# The recorded session id of this agent, when the record's provider and cwd match.
+recorded_session() {
+    local file="$ROOT/.task-sessions.json"
+    [[ -n $ROOT && -f $file ]] || return 0
+    jq -r --arg a "$name" --arg p "$provider" --arg c "$CWD" \
+        '.[$a] | select(.provider == $p and .cwd == $c) | .session_id // empty' "$file" 2>/dev/null |
+        grep -xE '[A-Za-z0-9-]+' || true
+}
+
+# Whether the session's transcript still exists, so it can be resumed.
+session_exists() {
+    if [[ $provider == claude ]]; then
+        compgen -G "$HOME/.claude/projects/*/$1.jsonl" >/dev/null
+    else
+        [[ -n $(find "$HOME/.codex/sessions" -name "*$1.jsonl" -print -quit 2>/dev/null) ]]
+    fi
+}
+
+# Records this agent's session; a failure is reported and does not undo the start.
+record_session() {
+    local id=$1 file="$ROOT/.task-sessions.json" base='{}' tmp fd
+    [[ -n $id && -n $ROOT ]] || return 0
+    exec {fd}<"$ROOT"
+    flock "$fd" # the dispatcher can start several agents of one task at once
+    jq -e 'type == "object"' "$file" >/dev/null 2>&1 && base=$(<"$file")
+    if tmp=$(mktemp "$file.XXXXXX") &&
+        jq --arg a "$name" --arg p "$provider" --arg s "$id" --arg c "$CWD" --arg u "$(date -Is)" \
+            '.[$a] = {provider: $p, session_id: $s, cwd: $c, updated: $u}' <<< "$base" > "$tmp" &&
+        mv -f "$tmp" "$file"; then
+        :
+    else
+        [[ -z ${tmp:-} ]] || rm -f "$tmp"
+        echo "task-agent: could not record the session of $name in $file" >&2
+    fi
+    exec {fd}<&-
+}
+
+# A codex session of this folder that was started by hand or by this script (source
+# cli; not a subagent's or exec's). codex resume --last picks the newest one of the cwd.
+codex_session_here() {
+    find "$HOME/.codex/sessions" -name 'rollout-*.jsonl' -exec head -qn 1 {} + 2>/dev/null |
+        jq -enR --arg c "$CWD" '[inputs | fromjson? | select(.payload.cwd? == $c and .payload.source? == "cli")] | length > 0' >/dev/null 2>&1
+}
+
+# agent_folder <role> <dir>: sets CWD, the agent's folder, and ROOT, its task root, from
+# a folder the agent runs in, which may be below its own: a worker's is its worktree's
+# top level (<root>/<repo>), the researcher's is <root>/research, and the orchestrator's
+# is the task root itself.
+agent_folder() {
+    local role=$1 top
+    CWD=$2 ROOT=''
+    [[ -n $CWD ]] || return 0
+    if [[ $role == worker ]] && top=$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null); then
+        CWD=$top
+    elif [[ $role == researcher && $CWD == */research/* ]]; then
+        CWD=${CWD%%/research/*}/research
+    fi
+    if [[ $role == orchestrator ]]; then ROOT=$CWD; else ROOT=${CWD%/*}; fi
+}
+
+# SessionStart hook of the claude roles (task-agent.sh session-hook <role>, sources
+# startup, resume, clear, compact). /clear starts a new session id, so the hook records
+# the id the agent runs under now, and --auto resumes that one. It reads the hook's JSON
+# on stdin, writes only inside a task root (a folder with AGENTS.md), prints nothing and
+# never fails the session.
+session_hook() {
+    local input id dir
+    provider=claude
+    input=$(cat)
+    id=$(jq -r '.session_id // empty' <<< "$input" 2>/dev/null) || return 0
+    dir=$(jq -r '.cwd // empty' <<< "$input" 2>/dev/null) || return 0
+    [[ $id =~ ^[A-Za-z0-9-]+$ ]] || return 0
+    dir=$(realpath -e "${dir:-.}" 2>/dev/null) || return 0
+    agent_folder "${1:-}" "$dir"
+    case ${1:-} in
+        orchestrator) name=orchestrator ;;
+        worker) name=worker-${CWD##*/} ;;
+        researcher) [[ ${CWD##*/} == research ]] || return 0; name=researcher ;;
+        *) return 0 ;;
+    esac
+    [[ -f $ROOT/AGENTS.md ]] || return 0
+    record_session "$id" 2>/dev/null
+}
+
 dry_run=no
 if [[ "${1:-}" == --dry-run ]]; then dry_run=yes; shift; fi
 
@@ -294,6 +401,11 @@ fi
 if [[ "${1:-}" == trust ]]; then
     trust_command "${@:2}"
     exit
+fi
+
+if [[ "${1:-}" == session-hook ]]; then
+    session_hook "${@:2}" || true
+    exit 0
 fi
 
 if [[ "${1:-}" == --restart-finish ]]; then
@@ -548,65 +660,27 @@ codex_trust_args() {
     ARGS+=(-c "projects={${table%,}}")
 }
 
-# --- session record (C1) -----------------------------------------------------------
-# <task-root>/.task-sessions.json: {agent: {provider, session_id, cwd, updated}}.
-
-# The recorded session id of this agent, when the record's provider and cwd match.
-recorded_session() {
-    local file="$ROOT/.task-sessions.json"
-    [[ -n $ROOT && -f $file ]] || return 0
-    jq -r --arg a "$name" --arg p "$provider" --arg c "$CWD" \
-        '.[$a] | select(.provider == $p and .cwd == $c) | .session_id // empty' "$file" 2>/dev/null |
-        grep -xE '[A-Za-z0-9-]+' || true
-}
-
-# Whether the session's transcript still exists, so it can be resumed.
-session_exists() {
-    if [[ $provider == claude ]]; then
-        compgen -G "$HOME/.claude/projects/*/$1.jsonl" >/dev/null
-    else
-        [[ -n $(find "$HOME/.codex/sessions" -name "*$1.jsonl" -print -quit 2>/dev/null) ]]
-    fi
-}
-
-# Records this agent's session; a failure is reported and does not undo the start.
-record_session() {
-    local id=$1 file="$ROOT/.task-sessions.json" base='{}' tmp fd
-    [[ -n $id && -n $ROOT ]] || return 0
-    exec {fd}<"$ROOT"
-    flock "$fd" # the dispatcher can start several agents of one task at once
-    jq -e 'type == "object"' "$file" >/dev/null 2>&1 && base=$(<"$file")
-    if tmp=$(mktemp "$file.XXXXXX") &&
-        jq --arg a "$name" --arg p "$provider" --arg s "$id" --arg c "$CWD" --arg u "$(date -Is)" \
-            '.[$a] = {provider: $p, session_id: $s, cwd: $c, updated: $u}' <<< "$base" > "$tmp" &&
-        mv -f "$tmp" "$file"; then
-        :
-    else
-        [[ -z ${tmp:-} ]] || rm -f "$tmp"
-        echo "task-agent: could not record the session of $name in $file" >&2
-    fi
-    exec {fd}<&-
-}
-
 # The agent's folder and its task root: the orchestrator runs in the task root,
 # a worker in <root>/<repo>, the researcher in <root>/research. Empty only when
 # the pane's cwd cannot be read.
 CWD='' ROOT=''
 if [[ $role == orchestrator ]]; then
-    CWD=$(realpath -e .)
-    ROOT=$CWD
+    agent_folder orchestrator "$(realpath -e .)"
 else
-    CWD=$(pane_cwd)
-    [[ -z $CWD ]] || ROOT=${CWD%/*}
+    agent_folder "$role" "$(pane_cwd)"
 fi
 
 # SESSION_ID: the session this start resumes, or the new id a fresh claude
 # session is given. --auto resumes only a recorded session whose transcript is
 # still there; --resume without one falls back to the newest session in the folder.
+# A codex orchestrator is never recorded, so its --auto resumes the newest codex
+# session of the task root when there is one (codex resume --last).
 SESSION_ID=''
 recorded=$(recorded_session)
 if [[ $resume != no && -n $recorded ]] && session_exists "$recorded"; then
     SESSION_ID=$recorded
+    resume=yes
+elif [[ $resume == auto && $provider == codex && $role == orchestrator ]] && codex_session_here; then
     resume=yes
 elif [[ $resume == auto ]]; then
     resume=no
@@ -653,8 +727,8 @@ fi
 if [[ $role == orchestrator ]]; then
     # The orchestrator runs in the foreground, so it is recorded first; --auto
     # checks its transcript before resuming it. shortcut: a codex orchestrator's id
-    # is not known up front, so it is not recorded and --auto starts it fresh;
-    # upgrade: read it from herdr once the session is up.
+    # is not known up front, so it is not recorded and --auto falls back to codex
+    # resume --last; upgrade: read the id from herdr once the session is up.
     record_session "$SESSION_ID"
     "${cmd[@]}"
     exit

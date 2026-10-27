@@ -101,7 +101,11 @@ if HERDR_PANE_ID=w1:p1 "$TASK_AGENT" restart worker 2>/dev/null; then fail "rest
 # Idle orchestrator: /exit first, then the fresh launch typed into the pane, in that order.
 : > "$FAKE_LOG"
 cmd=$(HERDR_PANE_ID=w1:p1 "$TASK_AGENT" --dry-run restart orchestrator | sed -n '2p' | sed 's/^  //')
-"$TASK_AGENT" --restart-finish w1:p1 "task-agent.sh --restarted fixture"  >/dev/null
+out=$("$TASK_AGENT" --restart-finish w1:p1 "task-agent.sh --restarted fixture" 2>&1)
+for step in 'waiting for the orchestrator in pane w1:p1' 'orchestrator idle; sending /exit' 'stopped orchestrator' \
+    'fresh orchestrator started in pane w1:p1'; do
+    check "$out" "$step" 'finish logs each step'
+done
 [[ $(cat "$FAKE_STATE/ran") == "task-agent.sh --restarted fixture" ]] || fail "finish types the command into the pane"
 exit_line=$(grep -n 'agent prompt orchestrator /exit' "$FAKE_LOG" | cut -d: -f1)
 run_line=$(grep -n '^pane run ' "$FAKE_LOG" | cut -d: -f1)
@@ -120,6 +124,8 @@ rm -f "$FAKE_STATE/gone"
 rm -f "$FAKE_STATE/ran" "$FAKE_STATE/seen"
 out=$(FAKE_VANISH=1 "$TASK_AGENT" --restart-finish w1:p1 "task-agent.sh --restarted fixture" 2>&1) && fail "vanished orchestrator must not restart"
 check "$out" 'did not end; not restarted' 'vanished orchestrator is logged by the job'
+check "$out" 'By hand: end the orchestrator in pane w1:p1 (/exit), then type there: task-agent.sh --restarted fixture' \
+    'give-up names the task-agent.sh command to type'
 [[ ! -e "$FAKE_STATE/ran" ]] || fail "vanished orchestrator: pane left alone"
 rm -f "$FAKE_STATE/seen"
 
@@ -131,5 +137,6 @@ for _ in $(seq 1 40); do [[ -e "$FAKE_STATE/ran" ]] && break; sleep 0.25; done
 [[ -e "$FAKE_STATE/ran" ]] || fail "detached restart never typed the fresh launch"
 check "$(cat "$FAKE_STATE/ran")" '--restarted' 'detached restart types the fresh launch'
 check "$(cat "$FAKE_STATE/ran")" 'orchestrator' 'fresh launch names the orchestrator'
+check "$(cat "$XDG_STATE_HOME/task-agents/restart-orchestrator.log")" 'restart: scheduled for pane w1:p1:' 'the log names the scheduled launch'
 
 echo "task-agent restart fixture: ok"

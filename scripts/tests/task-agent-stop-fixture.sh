@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Offline checks for `task-agent.sh stop` (M4a item 3): /exit ends an idle agent, the background-work confirm
-# gets one Enter, the autocompact dialog gets "Keep auto" (up, enter) and one more /exit, a dialog that never
+# gets "Exit and stop tasks" once (also with four tasks listed, whose title is then above the bottom 12 lines, and
+# with the marker on another row), the autocompact dialog gets "Keep auto" (up, enter) and one more /exit, a dialog that never
 # clears leaves the agent running with one Enter, and a working agent is refused without --force. A fake herdr
 # keeps the pending dialog in a file and shows it through `agent read`. Writes only inside a temporary folder.
 set -euo pipefail
@@ -11,7 +12,8 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 mkdir -p "$TMP/bin" "$TMP/home"
-# Fake herdr. FAKE_DIALOG names the dialog the first /exit raises: background, compact, background-stuck or empty.
+# Fake herdr. FAKE_DIALOG names the dialog the first /exit raises: background, background-moved, compact,
+# background-stuck or empty. The background dialog is Claude Code 2.1.303's, read from a pane with four tasks.
 # `agent get` answers until the agent is gone; an /exit with nothing pending ends it; Enter ends a background
 # confirm (never for background-stuck); "up enter" picks Keep auto; the second /exit then ends the agent.
 cat > "$TMP/bin/herdr" <<'STUB'
@@ -31,7 +33,15 @@ case "$*" in
         fi ;;
     "agent read worker-dotfiles --source visible")
         case "$pending" in
-            background|background-stuck) printf 'Background work is running. Exit anyway?\n❯ 1. Exit and stop tasks\n  2. Keep running\n' ;;
+            background|background-stuck|background-moved)
+                printf '❯ run four background shells\n\n● ok\n\n▔▔▔▔\n   Background work is running\n   The following will stop when you exit:\n\n'
+                for i in 0 0 1 2; do printf '   shell · sleep 180%s\n' "$i"; done
+                if [[ $pending == background-moved ]]; then
+                    printf '\n     1. Exit and stop tasks\n   ❯ 2. Move to background and exit\n     3. Stay\n'
+                else
+                    printf '\n   ❯ 1. Exit and stop tasks\n     2. Move to background and exit\n     3. Stay\n'
+                fi
+                printf '\n   Enter to confirm · Esc to cancel\n' ;;
             compact) printf 'We recommend compacting earlier.\n  1. Keep auto\n❯ 2. Compact now\n' ;;
             text)
                 # The same words in normal output, far above the prompt: no option lines in the bottom lines, no keys.
@@ -43,7 +53,8 @@ case "$*" in
     "agent send-keys worker-dotfiles enter")
         if [[ "$pending" == background ]]; then rm -f "$FAKE_STATE/pending"; touch "$FAKE_STATE/gone"; fi ;;
     "agent send-keys worker-dotfiles up enter")
-        [[ "$pending" == compact ]] && rm -f "$FAKE_STATE/pending" ;;
+        [[ "$pending" == compact ]] && rm -f "$FAKE_STATE/pending"
+        if [[ "$pending" == background-moved ]]; then rm -f "$FAKE_STATE/pending"; touch "$FAKE_STATE/gone"; fi ;;
     *) exit 1 ;;
 esac
 STUB
@@ -81,6 +92,13 @@ run_stop background idle
 check "$out" 'stopped worker-dotfiles' 'background confirm: stopped'
 [[ $(count 'agent send-keys worker-dotfiles enter') -eq 1 ]] || fail "background confirm: Enter must be sent once"
 [[ $(count 'agent send-keys worker-dotfiles up enter') -eq 0 ]] || fail "background confirm: no autocompact keys"
+
+# --- the marker on "Move to background and exit": up, then Enter -------------
+run_stop background-moved idle
+[[ $code -eq 0 ]] || fail "moved marker stop exited $code: $out"
+check "$out" 'stopped worker-dotfiles' 'moved marker: stopped'
+[[ $(count 'agent send-keys worker-dotfiles up enter') -eq 1 ]] || fail "moved marker: up, enter must be sent once"
+[[ $(count 'agent send-keys worker-dotfiles enter') -eq 0 ]] || fail "moved marker: no plain Enter"
 
 # --- the autocompact dialog eats /exit: Keep auto, then /exit again ------------
 run_stop compact idle
