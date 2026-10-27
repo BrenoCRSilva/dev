@@ -30,7 +30,8 @@
 # (C1): {agent: {provider, session_id, cwd, updated}}. --auto resumes the recorded
 # session when it matches the agent, provider and cwd and its transcript still
 # exists, else starts fresh (with no record it tries $TASK_RESTORED_SESSION, the id
-# herdr saved for the pane, set by task-sessionizer.sh); --resume resumes the recorded session, else the
+# herdr saved for the pane, set by task-sessionizer.sh, when its transcript is in
+# this agent's folder); --resume resumes the recorded session, else the
 # newest one in the folder; with neither, the start is fresh. Each start first
 # trusts the task's folders (trust_task_paths, C2); `trust` does only that. The orchestrator's claude launch has no MCP servers and no
 # claude.ai connectors, and the 1h prompt-cache TTL (ORCHESTRATOR_ENV).
@@ -322,6 +323,21 @@ session_exists() {
         compgen -G "$HOME/.claude/projects/*/$1.jsonl" >/dev/null
     else
         [[ -n $(find "$HOME/.codex/sessions" -name "*$1.jsonl" -print -quit 2>/dev/null) ]]
+    fi
+}
+
+# Whether a session id herdr saved for this pane may be resumed here: a uuid whose
+# transcript belongs to this folder (claude's project dir for $CWD, a codex rollout
+# whose cwd is $CWD), never a session of another folder.
+# shortcut: claude hashes project dirs of paths over 200 chars; such a task starts fresh.
+restored_session_ok() {
+    local id=$1 file
+    [[ -n $CWD && $id =~ ^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$ ]] || return 1
+    if [[ $provider == claude ]]; then
+        [[ -f "$HOME/.claude/projects/${CWD//[^a-zA-Z0-9]/-}/$id.jsonl" ]]
+    else
+        file=$(find "$HOME/.codex/sessions" -name "rollout-*$id.jsonl" -print -quit 2>/dev/null)
+        [[ -n $file ]] && head -n 1 "$file" | jq -e --arg c "$CWD" '.payload.cwd? == $c' >/dev/null 2>&1
     fi
 }
 
@@ -726,19 +742,22 @@ fi
 # SESSION_ID: the session this start resumes, or the new id a fresh claude
 # session is given. --auto resumes only a recorded session whose transcript is
 # still there; --resume without one falls back to the newest session in the folder.
-# A codex orchestrator is never recorded, so its --auto resumes the newest codex
-# session of the task root when there is one (codex resume --last).
+# A fresh codex orchestrator has no id up front and is not recorded, so with no
+# record its --auto resumes the newest codex session of the task root when there
+# is one (codex resume --last).
 SESSION_ID=''
 recorded=$(recorded_session)
 # A pane herdr saved with a session id but no record (an older task): the
-# sessionizer passes that id so --auto resumes it. Unset so no agent this one
-# starts inherits it.
-if [[ -z $recorded && $resume == auto && ${TASK_RESTORED_SESSION:-} =~ ^[A-Za-z0-9-]+$ ]]; then
-    recorded=$TASK_RESTORED_SESSION
-fi
+# sessionizer passes that id so --auto resumes it when it belongs to this folder.
+# Unset so no agent this one starts inherits it.
+restored=''
+[[ $resume == auto ]] && restored=${TASK_RESTORED_SESSION:-}
 unset TASK_RESTORED_SESSION
 if [[ $resume != no && -n $recorded ]] && session_exists "$recorded"; then
     SESSION_ID=$recorded
+    resume=yes
+elif [[ -z $recorded && -n $restored ]] && restored_session_ok "$restored"; then
+    SESSION_ID=$restored
     resume=yes
 elif [[ $resume == auto && $provider == codex && $role == orchestrator ]] && codex_session_here; then
     resume=yes
@@ -765,6 +784,10 @@ if [[ $role == orchestrator ]]; then
     else
         kickoff="You are this task's orchestrator. Run your start-up steps now."
     fi
+    # The sessionizer starts a restored task's workers and researcher before it.
+    if [[ -n $restored ]]; then
+        kickoff+=" The task was reopened and its workers and researcher were started again before you: check herdr agent list and do not start them again."
+    fi
     export TASK_PROVIDER=$provider
     cmd=("$provider" "${ARGS[@]}" "$kickoff")
     if [[ $provider == claude ]]; then cmd=(env "${ORCHESTRATOR_ENV[@]}" "${cmd[@]}"); fi
@@ -786,9 +809,10 @@ fi
 
 if [[ $role == orchestrator ]]; then
     # The orchestrator runs in the foreground, so it is recorded first; --auto
-    # checks its transcript before resuming it. shortcut: a codex orchestrator's id
-    # is not known up front, so it is not recorded and --auto falls back to codex
-    # resume --last; upgrade: read the id from herdr once the session is up.
+    # checks its transcript before resuming it. shortcut: a fresh codex
+    # orchestrator's id is not known up front, so it is not recorded (a resumed one
+    # is) and --auto falls back to codex resume --last; upgrade: read the id from
+    # herdr once the session is up.
     record_session "$SESSION_ID"
     "${cmd[@]}"
     exit

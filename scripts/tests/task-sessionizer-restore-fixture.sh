@@ -31,7 +31,8 @@ EOF
 
 # Fake herdr: `server` marks the session running and snapshots session.json as
 # the server would restore it; workspaces and panes (w<N>:p1) come from that
-# snapshot; pane run and agent start are logged.
+# snapshot; pane run and agent start are logged, and agent get finds an agent
+# once it was started.
 cat > "$BIN/herdr" <<'EOF'
 #!/bin/bash
 s=
@@ -47,7 +48,7 @@ case "$*" in
     'pane get '*)
         jq -c --arg w "${3%%:*}" '{result: {pane: {cwd: (.workspaces[] | select(.id == $w) | .identity_cwd)}}}' "$snap" ;;
     'pane run '*|'agent start '*|'workspace create'*) printf '%s\n' "$*" >> "$HERDR_LOG" ;;
-    'agent get '*) echo '{}' ;;
+    'agent get '*) grep -q "^agent start $3 " "$HERDR_LOG" 2>/dev/null && echo '{}' || exit 1 ;;
     *) exit 0 ;;
 esac
 EOF
@@ -97,9 +98,16 @@ save_session() {
     jq -s '{version: 3, workspaces: .}' <(ws w1 t1 "$TASK" $H_ORCH) <(ws w2 api "$TASK/api" $H_API) \
         <(ws w3 research "$TASK/research" $H_RES) <(ws w4 scratch "$TASK" $H_SCR) > "$SESSION_JSON"
 }
-# Every saved session has a transcript, so --auto may resume it.
-mkdir -p "$HOME/.claude/projects/-t"
-for id in $H_ORCH $H_API $H_RES; do touch "$HOME/.claude/projects/-t/$id.jsonl"; done
+# Every saved session has a transcript in its own folder's project dir, so --auto may resume it.
+project() { printf '%s/.claude/projects/%s' "$HOME" "${1//[^a-zA-Z0-9]/-}"; }
+mkdir -p "$(project "$TASK")" "$(project "$TASK/api")" "$(project "$TASK/research")" "$HOME/.claude/projects/-t"
+touch "$(project "$TASK")/$H_ORCH.jsonl" "$(project "$TASK/api")/$H_API.jsonl" "$(project "$TASK/research")/$H_RES.jsonl"
+RESTORE="$TASK/.task-restore.tsv"
+# Waits until the background relaunch is done (it removes the restore file).
+wait_relaunch() {
+    for _ in $(seq 1 100); do [[ -e $RESTORE ]] || return 0; sleep 0.1; done
+    fail "the relaunch did not finish: $(cat "$RESTORE" "$XDG_STATE_HOME/task-agents/restore-t1.log" 2>&1)"
+}
 reset_herdr() {
     TMUX_TMPDIR="$TMUX_TMPDIR" tmux kill-server 2>/dev/null || true
     rm -f "$HERDR_STATE"/* "$HERDR_LOG" "$FAKE_CLAUDE"
@@ -107,6 +115,7 @@ reset_herdr() {
 # Runs the orchestrator command the sessionizer typed into pane w1:p1.
 run_orchestrator_pane() {
     local cmd
+    wait_log '^pane run w1:p1 ' || true
     cmd=$(grep -m1 '^pane run w1:p1 ' "$HERDR_LOG" || true)
     [[ -n $cmd ]] || fail "no orchestrator launch in pane w1:p1: $(cat "$HERDR_LOG" 2>/dev/null)"
     cmd=${cmd#pane run w1:p1 }
@@ -129,7 +138,7 @@ refute "$(cat "$HERDR_LOG" 2>/dev/null)" 'workspace create' 'restored workspaces
 
 run_orchestrator_pane
 args=$(cat "$FAKE_CLAUDE")
-for want in "--resume $H_ORCH" '--model claude-opus-5-5' '--effort medium' '--append-system-prompt-file' '--settings' 'You were resumed'; do
+for want in "--resume $H_ORCH" '--model claude-opus-5-5' '--effort medium' '--append-system-prompt-file' '--settings' 'You were resumed' 'do not start them again'; do
     check "$args" "$want" 'orchestrator without a record'
 done
 [[ $(record orchestrator) == "$H_ORCH" ]] || fail "the orchestrator's restored id was not recorded: $(cat "$TASK/.task-sessions.json")"
@@ -144,7 +153,14 @@ check "$w" '--model claude-opus-5-5' 'worker model'
 check "$(grep 'agent start researcher' "$HERDR_LOG")" "--resume $H_RES" 'researcher resumes its saved id'
 [[ $(record worker-api) == "$H_API" && $(record researcher) == "$H_RES" ]] ||
     fail "worker/researcher records: $(cat "$TASK/.task-sessions.json")"
+# Start order: the workers and the researcher are registered before the orchestrator is typed in.
+line() { grep -n -m1 -- "$1" "$HERDR_LOG" | cut -d: -f1; }
+(( $(line 'agent start worker-api') < $(line '^pane run w1:p1') && $(line 'agent start researcher') < $(line '^pane run w1:p1') )) ||
+    fail "the orchestrator started before its workers: $(cat "$HERDR_LOG")"
+wait_relaunch
 echo 'PASS: with no record, open strips the role panes and resumes their saved ids through task-agent.sh --auto'
+
+echo 'PASS: workers and the researcher are registered before the orchestrator starts'
 
 # Reopening with the server running starts nothing again.
 n=$(wc -l < "$HERDR_LOG")
@@ -167,7 +183,33 @@ check "$args" "--resume $R_ORCH" 'orchestrator with a record'
 refute "$args" "$H_ORCH" 'orchestrator with a record'
 [[ $(record orchestrator) == "$R_ORCH" ]] || fail 'the record changed'
 wait_log 'agent start researcher' || fail 'the researcher was not started'
+wait_relaunch
 echo 'PASS: with a record, the orchestrator resumes the recorded id'
+
+# --- a leftover restore row (a failed open) is relaunched on the next open ------------
+reset_herdr
+save_session
+jq '.workspaces |= map(.tabs[0].panes["1"] |= del(.agent_session))' "$SESSION_JSON" > "$TMP_ROOT/r" && mv "$TMP_ROOT/r" "$SESSION_JSON"
+printf 'api\tworker-api\tclaude\t%s\n' $H_API > "$RESTORE"
+TASK_SEARCH=1 "$SESSIONIZER" open t1 >/dev/null 2>&1 || fail 'open with a leftover row failed'
+wait_log 'agent start worker-api' || fail "the leftover row was not relaunched: $(cat "$HERDR_LOG" 2>&1)"
+check "$(grep 'agent start worker-api' "$HERDR_LOG")" "--resume $H_API" 'leftover row'
+wait_relaunch
+refute "$(cat "$HERDR_LOG")" 'pane run w1:p1' 'only the leftover row is relaunched'
+echo 'PASS: a leftover restore row is relaunched on the next open and then removed'
+
+# --- a session.json that is not version 3 is left alone ----------------------------------
+reset_herdr
+save_session
+jq '.version = 4' "$SESSION_JSON" > "$TMP_ROOT/r" && mv "$TMP_ROOT/r" "$SESSION_JSON"
+cp "$SESSION_JSON" "$TMP_ROOT/v4"
+err=$(TASK_SEARCH=1 "$SESSIONIZER" open t1 2>&1 >/dev/null) || fail 'open with a version 4 session failed'
+cmp -s "$SESSION_JSON" "$TMP_ROOT/v4" || fail 'a version 4 session.json was changed'
+check "$err" 'not a herdr version 3 session' 'version 4 warning'
+[[ ! -e $RESTORE ]] || fail 'a version 4 session wrote restore rows'
+sleep 0.3
+refute "$(cat "$HERDR_LOG" 2>/dev/null)" 'agent start' 'version 4 starts nothing'
+echo 'PASS: a session.json of another version is left untouched, with a warning'
 
 # --- a stale TASK_RESTORED_SESSION never reaches the agents it starts -----------------------
 reset_herdr
@@ -178,3 +220,16 @@ printf '#!/bin/sh\nenv > "$FAKE_CLAUDE"\n' > "$BIN/claude"
 (cd "$TASK" && TASK_RESTORED_SESSION=$H_ORCH "$ROOT/env/.config/tmux/scripts/task-agent.sh" orchestrator --auto >/dev/null 2>&1)
 refute "$(cat "$FAKE_CLAUDE")" 'TASK_RESTORED_SESSION' 'the orchestrator inherits TASK_RESTORED_SESSION'
 echo 'PASS: TASK_RESTORED_SESSION applies to --auto only and is not passed on'
+
+# --- a restored id resumes only from this folder's own transcripts --------------------
+printf '#!/bin/sh\necho "$@" > "$FAKE_CLAUDE"\n' > "$BIN/claude"
+H_OTHER=cccccccc-0000-0000-0000-000000000001
+touch "$HOME/.claude/projects/-t/$H_OTHER.jsonl" "$(project "$TASK")/not-a-uuid.jsonl"
+for id in $H_OTHER not-a-uuid; do
+    rm -f "$TASK/.task-sessions.json"
+    (cd "$TASK" && TASK_RESTORED_SESSION=$id "$ROOT/env/.config/tmux/scripts/task-agent.sh" orchestrator --auto >/dev/null 2>&1)
+    args=$(cat "$FAKE_CLAUDE")
+    refute "$args" "--resume" "restored id $id"
+    check "$args" '--session-id' "restored id $id starts fresh"
+done
+echo 'PASS: a restored id with no transcript in this folder (or not a uuid) starts fresh'
