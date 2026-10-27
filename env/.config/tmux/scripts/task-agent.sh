@@ -29,7 +29,8 @@
 # be the last argument. Every start is recorded in <task-root>/.task-sessions.json
 # (C1): {agent: {provider, session_id, cwd, updated}}. --auto resumes the recorded
 # session when it matches the agent, provider and cwd and its transcript still
-# exists, else starts fresh; --resume resumes the recorded session, else the
+# exists, else starts fresh (with no record it tries $TASK_RESTORED_SESSION, the id
+# herdr saved for the pane, set by task-sessionizer.sh); --resume resumes the recorded session, else the
 # newest one in the folder; with neither, the start is fresh. Each start first
 # trusts the task's folders (trust_task_paths, C2); `trust` does only that. The orchestrator's claude launch has no MCP servers and no
 # claude.ai connectors, and the 1h prompt-cache TTL (ORCHESTRATOR_ENV).
@@ -729,6 +730,13 @@ fi
 # session of the task root when there is one (codex resume --last).
 SESSION_ID=''
 recorded=$(recorded_session)
+# A pane herdr saved with a session id but no record (an older task): the
+# sessionizer passes that id so --auto resumes it. Unset so no agent this one
+# starts inherits it.
+if [[ -z $recorded && $resume == auto && ${TASK_RESTORED_SESSION:-} =~ ^[A-Za-z0-9-]+$ ]]; then
+    recorded=$TASK_RESTORED_SESSION
+fi
+unset TASK_RESTORED_SESSION
 if [[ $resume != no && -n $recorded ]] && session_exists "$recorded"; then
     SESSION_ID=$recorded
     resume=yes

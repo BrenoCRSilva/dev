@@ -1901,6 +1901,7 @@ herdr_layout() {
     local task=$1 s wt label labels pane picker i wts=() want=() role=()
     s=$(session_name "$task")
     if ! herdr_running "$s"; then
+        herdr_take_resumes "$task"
         (setsid herdr --session "$s" server >/dev/null 2>&1 &)
         for i in 1 2 3 4 5 6 7 8 9 10; do
             herdr --session "$s" workspace list >/dev/null 2>&1 && break
@@ -1934,6 +1935,70 @@ herdr_layout() {
         [[ -n "$picker" && -n "$pane" && -x "$AGENT_PICKER" ]] &&
             herdr --session "$s" pane run "$pane" "$AGENT_PICKER" >/dev/null 2>&1
     done
+    herdr_relaunch "$task"
+}
+
+# herdr resumes every saved agent pane by itself when a session's server starts
+# (session.resume_agents_on_restore), as a bare `claude --resume <id>`: no model,
+# role prompt, hooks or C1 record. So before a task's server starts, take the
+# saved session of each role pane (the root pane of the task-root, worker and
+# research workspaces) out of its session.json; herdr_relaunch then starts those
+# panes through task-agent.sh --auto. Other workspaces and sessions are left alone.
+# RESTORED: one "label<TAB>provider<TAB>id" line per pane taken.
+RESTORED=
+herdr_take_resumes() {
+    local task=$1 file tmp labels
+    local -a names=("$task" research)
+    RESTORED=
+    file="${XDG_CONFIG_HOME:-$HOME/.config}/herdr/sessions/$(session_name "$task")/session.json"
+    [[ -f $file ]] && command -v jq >/dev/null || return 0
+    while IFS= read -r tmp; do names+=("$(basename "$tmp")"); done < <(task_worktrees "$task")
+    labels=$(jq -nc '$ARGS.positional' --args "${names[@]}")
+    RESTORED=$(jq -r --argjson labels "$labels" '.workspaces[]? | select(.custom_name | IN($labels[])) | .custom_name as $l
+        | .tabs[0] | select(.root_pane != null) | .panes[(.root_pane | tostring)].agent_session? // empty
+        | select(.kind == "id" and (.agent == "claude" or .agent == "codex") and (.value | test("^[A-Za-z0-9-]+$")))
+        | [$l, .agent, .value] | @tsv' "$file" 2>/dev/null) || RESTORED=
+    [[ -n $RESTORED ]] || return 0
+    # The server is not running, so herdr does not write the file meanwhile.
+    if tmp=$(mktemp "$file.XXXXXX") &&
+        jq --argjson labels "$labels" '.workspaces |= map(if (.custom_name | IN($labels[])) and .tabs[0].root_pane != null
+            and .tabs[0].panes[(.tabs[0].root_pane | tostring)] != null
+            then .tabs[0].panes[(.tabs[0].root_pane | tostring)] |= del(.agent_session) else . end)' "$file" > "$tmp" &&
+        chmod --reference="$file" "$tmp" && mv -f "$tmp" "$file"; then
+        :
+    else
+        [[ -z ${tmp:-} ]] || rm -f "$tmp"
+        printf 'warning: could not clear the saved agent sessions of %s; herdr resumes them without their role\n' "$task" >&2
+        RESTORED=
+    fi
+}
+
+# Starts the panes herdr_take_resumes took through task-agent.sh --auto, which
+# resumes the C1 record, else the id herdr had saved (TASK_RESTORED_SESSION). The
+# orchestrator runs in its pane's shell; workers and the researcher start in the
+# background, logged to the task-agents state folder.
+herdr_relaunch() {
+    local task=$1 s label provider id ws pane agent_sh log
+    [[ -n ${RESTORED:-} ]] || return 0
+    s=$(session_name "$task")
+    agent_sh="$(dirname "$SELF")/task-agent.sh"
+    log="${XDG_STATE_HOME:-$HOME/.local/state}/task-agents/restore-$s.log"
+    mkdir -p "${log%/*}"
+    while IFS=$'\t' read -r label provider id; do
+        ws=$(herdr --session "$s" workspace list 2>/dev/null |
+            jq -r --arg l "$label" '.result.workspaces[] | select(.label == $l) | .workspace_id' | head -n1)
+        pane=$(herdr --session "$s" pane list 2>/dev/null |
+            jq -r --arg w "$ws" '.result.panes[] | select(.workspace_id == $w) | .pane_id' | head -n1)
+        [[ -n $ws && -n $pane ]] || continue
+        if [[ $label == "$task" ]]; then
+            herdr --session "$s" pane run "$pane" "cd $(printf %q "$TASKS_DIR/$task") && TASK_ROLE=orchestrator TASK_RESTORED_SESSION=$id $(printf %q "$agent_sh") --provider $provider orchestrator --auto" >/dev/null 2>&1
+        elif [[ $label == research ]]; then
+            (TASK_SESSION=$s TASK_RESTORED_SESSION=$id setsid "$agent_sh" --provider "$provider" start researcher "$pane" --auto >>"$log" 2>&1 &)
+        else
+            (TASK_SESSION=$s TASK_RESTORED_SESSION=$id setsid "$agent_sh" --provider "$provider" start worker "$label" "$pane" "$(origin_repo "$TASKS_DIR/$task/$label")" --auto >>"$log" 2>&1 &)
+        fi
+    done <<< "$RESTORED"
+    RESTORED=
 }
 
 # Switch to a session from wherever we are: inside tmux, a plain terminal, or
