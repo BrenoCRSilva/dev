@@ -40,6 +40,9 @@ Use [tmux-sessionizer](https://github.com/ThePrimeagen/tmux-sessionizer) for ses
 - **Grapple** maintains separate tag lists per tmux session
 - **Telescope** searches within session's working directory
 - Each project gets isolated file navigation and tagging
+- A task root (a folder with `.task-worker-order`) uses its own Grapple `task`
+  scope with one tag per worker worktree, kept in step with that file
+  (`lua/brenocrs/task-grapple.lua`)
 
 ## Project Structure
 

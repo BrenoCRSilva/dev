@@ -105,8 +105,8 @@ task_worktrees() {
     done
 }
 
-# Persist worker insertion order. When upgrading an existing task that lacks
-# metadata, retain the current tmux nvim-window order before appending workers.
+# Persist worker insertion order. .task-worker-order is the source; when it is
+# missing it is rebuilt from the AGENTS.md Repo modes, then the worktree folders.
 ensure_worker_order() {
     local task=$1 file="$TASKS_DIR/$1/.task-worker-order" tmp wt name
     local -a names=()
@@ -120,16 +120,6 @@ ensure_worker_order() {
         names+=("$name")
         seen[$name]=1
     done < <(task_agents_worker_order "$task")
-    if tmux has-session -t "=$(session_name "$task")" 2>/dev/null; then
-        while IFS= read -r name; do
-            [[ "$name" == nvim-* ]] || continue
-            name=${name#nvim-}
-            [[ -e "$TASKS_DIR/$task/$name/.git" ]] || continue
-            [[ -n "${seen[$name]:-}" ]] && continue
-            names+=("$name")
-            seen[$name]=1
-        done < <(tmux list-windows -t "=$(session_name "$task")" -F '#W')
-    fi
     while IFS= read -r wt; do
         name=$(basename "$wt")
         [[ -n "${seen[$name]:-}" ]] && continue
@@ -188,34 +178,16 @@ PY
 }
 
 record_worker_order() {
-    local task=$1 added=$2 file="$TASKS_DIR/$1/.task-worker-order" tmp wt name
+    local task=$1 added=$2 file="$TASKS_DIR/$1/.task-worker-order" tmp name
     local -a names=()
     local -A seen=()
-    if [[ ! -f "$file" ]]; then
-        if tmux has-session -t "=$(session_name "$task")" 2>/dev/null; then
-            while IFS= read -r name; do
-                [[ "$name" == nvim-* ]] || continue
-                name=${name#nvim-}
-                [[ -e "$TASKS_DIR/$task/$name/.git" && "$name" != "$added" ]] || continue
-                [[ -n "${seen[$name]:-}" ]] && continue
-                names+=("$name")
-                seen[$name]=1
-            done < <(tmux list-windows -t "=$(session_name "$task")" -F '#W')
-        fi
-        while IFS= read -r wt; do
-            name=$(basename "$wt")
-            [[ "$name" == "$added" || -n "${seen[$name]:-}" ]] && continue
-            names+=("$name")
-            seen[$name]=1
-        done < <(task_worktrees "$task")
-    else
-        while IFS= read -r name; do
-            [[ -n "$name" && "$name" != "$added" && -z "${seen[$name]:-}" ]] || continue
-            [[ -e "$TASKS_DIR/$task/$name/.git" ]] || continue
-            names+=("$name")
-            seen[$name]=1
-        done < "$file"
-    fi
+    ensure_worker_order "$task" || return 1
+    while IFS= read -r name; do
+        [[ -n "$name" && "$name" != "$added" && -z "${seen[$name]:-}" ]] || continue
+        [[ -e "$TASKS_DIR/$task/$name/.git" ]] || continue
+        names+=("$name")
+        seen[$name]=1
+    done < "$file"
     names+=("$added")
     tmp=$(mktemp "$TASKS_DIR/$task/.task-worker-order.XXXXXX") || return 1
     printf '%s\n' "${names[@]}" > "$tmp" || { rm -f "$tmp"; return 1; }
@@ -324,16 +296,38 @@ run_hook() {
     install_deps "$wt"
 }
 
-# Run pending hooks in the task's server windows when its session is up (so a
-# slow install is visible and doesn't block the picker), else right here.
+# Pane id of a repo's server pane in the task's shared srv window (C3): found by
+# its pane title srv:<repo>, else created at the worktree (and the srv window,
+# placed after nvim, when it is missing). allow-set-title off keeps the title.
+srv_pane() {
+    local s=$1 name=$2 wt=$3 pane
+    local -a at=(-t "=$s:")
+    pane=$(srv_pane_find "$s" "$name")
+    if [[ -z "$pane" ]]; then
+        if task_window_exists "$s" srv; then
+            tmux select-layout -t "=$s:srv" tiled
+            pane=$(tmux split-window -d -P -F '#{pane_id}' -t "=$s:srv" -c "$wt") || return 1
+            tmux select-layout -t "=$s:srv" tiled
+        else
+            task_window_exists "$s" nvim && at=(-a -t "=$s:nvim")
+            pane=$(tmux new-window -d -P -F '#{pane_id}' "${at[@]}" -n srv -c "$wt") || return 1
+        fi
+        [[ -n "$pane" ]] || return 1
+        tmux set-option -p -t "$pane" allow-set-title off
+        tmux select-pane -t "$pane" -T "srv:$name"
+    fi
+    printf '%s\n' "$pane"
+}
+
+# Run pending hooks in the repo's srv pane when its session is up (so a slow
+# install is visible and doesn't block the picker), else right here.
 dispatch_hooks() {
-    local task=$1 s name win
+    local task=$1 s name pane
     s=$(session_name "$task")
     for name in "${PENDING[@]}"; do
-        if tmux has-session -t "=$s" 2>/dev/null; then
-            win="srv-$name"
-            tmux list-windows -t "=$s" -F '#W' | grep -qx "$win" || win=srv-1
-            tmux send-keys -t "=$s:$win" "$(printf '%q hook %q %q' "$SELF" "$task" "$name")" Enter
+        if tmux has-session -t "=$s" 2>/dev/null &&
+            pane=$(srv_pane "$s" "$name" "$TASKS_DIR/$task/$name"); then
+            tmux send-keys -t "$pane" "$(printf '%q hook %q %q' "$SELF" "$task" "$name")" Enter
         else
             run_hook "$task" "$name"
         fi
@@ -995,7 +989,7 @@ create_task() {
             printf '%s: clone to research/context/%s (read-only, for the researcher)\n' "$name" "$name"
         done
         printf 'agents-md: write AGENTS.md and its Repo modes block; CLAUDE.md, .claude settings if absent, subagents if absent or managed; reports/ and hooks/ folders (no agent is started)\n'
-        printf 'runtime:   task session, nvim and srv windows, post-create hooks\n'
+        printf 'runtime:   task session, agent and nvim windows, post-create hooks in srv panes\n'
         return 0
     fi
     mkdir -p "$TASKS_DIR/$task/research"
@@ -1044,7 +1038,7 @@ promote_context() {
         printf 'clone:     remove research/context/%s\n' "$name"
         printf 'record:    drop %s from .task-context.tsv; add it to .task-worker-order\n' "$name"
         printf 'agents-md: regenerate the Repo modes block\n'
-        printf 'runtime:   nvim and srv windows, post-create hook, herdr layout\n'
+        printf 'runtime:   srv pane for the post-create hook, herdr layout\n'
         return 0
     fi
     add_repo "$task" "$branch" "$path" yes
@@ -1429,26 +1423,38 @@ task_workspace_id() {
         jq -r --arg l "$label" '.result.workspaces[] | select(.label == $l) | .workspace_id' | head -n1
 }
 
+# The shared nvim window and any old nvim-<repo> ones.
+task_nvim_windows() {
+    tmux list-windows -t "=$1" -F '#W' 2>/dev/null | grep -E '^nvim(-.+)?$' || true
+}
+
 task_window_exists() {
     tmux list-windows -t "=$1" -F '#W' 2>/dev/null | grep -Fxq -- "$2"
 }
 
-# nvim in a task window quits with :qa, so unsaved buffers keep it open.
+# nvim in a task window (the shared nvim, or an old nvim-<repo>) quits with :qa,
+# so unsaved buffers keep it open and this returns 1.
 quit_nvim_window() {
-    local s=$1 name=$2 i
-    [[ "$(tmux display-message -p -t "=$s:nvim-$name" '#{pane_current_command}' 2>/dev/null)" == nvim ]] || return 0
-    tmux send-keys -t "=$s:nvim-$name" Escape ':qa' Enter
+    local s=$1 win=$2 i
+    [[ "$(tmux display-message -p -t "=$s:$win" '#{pane_current_command}' 2>/dev/null)" == nvim ]] || return 0
+    tmux send-keys -t "=$s:$win" Escape ':qa' Enter
     for i in $(seq 1 20); do
-        [[ "$(tmux display-message -p -t "=$s:nvim-$name" '#{pane_current_command}' 2>/dev/null)" == nvim ]] || return 0
+        [[ "$(tmux display-message -p -t "=$s:$win" '#{pane_current_command}' 2>/dev/null)" == nvim ]] || return 0
         sleep 0.25
     done
     return 1
 }
 
+# Pane id of a repo's srv:<repo> pane, if one exists.
+srv_pane_find() {
+    tmux list-panes -s -t "=$1" -F "#{pane_title}"$'\t'"#{pane_id}" 2>/dev/null |
+        awk -F '\t' -v t="srv:$2" '$1 == t { print $2; exit }'
+}
+
 # demote_repo <task> <repo> <dry-run yes|no> <force yes|no>
 demote_repo() {
     local task=$1 selector=$2 dry=$3 force=$4 kind name wt origin s branch base ahead status
-    local agent_pane agent_status agent_name agent ws wtforce=() stopforce=()
+    local agent_pane agent_status agent_name agent ws pane wtforce=() stopforce=()
     IFS=$'\t' read -r kind name wt origin < <(task_repo_lookup "$task" "$selector") ||
         die "no repo $selector in $task"
     [[ "$kind" == worker ]] || die "$name is already context in $task"
@@ -1495,12 +1501,22 @@ demote_repo() {
         printf 'agent:     none running\n'
     fi
 
-    # Window and workspace: nvim must quit cleanly; the server window and the herdr workspace close.
+    # Windows and workspace: the shared nvim stays (its Grapple tag for the repo
+    # goes); an old nvim-<repo> must quit cleanly; the repo's srv:<repo> pane, an
+    # old srv-<repo> window and the herdr workspace close.
     if task_window_exists "$s" "nvim-$name"; then
         if [[ "$dry" == yes ]]; then
             printf 'window:    quit nvim-%s (:qa; refused if it has unsaved buffers)\n' "$name"
-        elif ! quit_nvim_window "$s" "$name"; then
+        elif ! quit_nvim_window "$s" "nvim-$name"; then
             die "nvim-$name still has unsaved buffers; save or quit it, then retry"
+        fi
+    fi
+    pane=$(srv_pane_find "$s" "$name")
+    if [[ -n "$pane" ]]; then
+        if [[ "$dry" == yes ]]; then
+            printf 'pane:      close srv:%s (%s; its processes stop)\n' "$name" "$pane"
+        else
+            tmux kill-pane -t "$pane" 2>/dev/null || true
         fi
     fi
     if task_window_exists "$s" "srv-$name"; then
@@ -1620,30 +1636,54 @@ ensure_task_window() {
     fi
 }
 
+# Old layout (before C3): nvim-<repo> and srv-<repo> windows. On open, a
+# one-pane window at an idle shell closes, an nvim-<repo> is asked to :qa and
+# closes if it quit; anything else stays. Each step is reported on stderr.
+migrate_task_windows() {
+    local s=$1 win n cmd
+    while IFS= read -r win; do
+        [[ "$win" =~ ^(nvim|srv)-.+$ ]] || continue
+        n=$(tmux list-panes -t "=$s:$win" -F x | wc -l)
+        cmd=$(tmux display-message -p -t "=$s:$win" '#{pane_current_command}')
+        if ((n != 1)); then
+            printf 'layout: kept old window %s (%s panes)\n' "$win" "$n" >&2
+            continue
+        fi
+        if [[ "$cmd" == nvim && "$win" == nvim-* ]]; then
+            if ! quit_nvim_window "$s" "$win"; then
+                printf 'layout: kept old window %s (nvim has unsaved buffers)\n' "$win" >&2
+                continue
+            fi
+            cmd=$(tmux display-message -p -t "=$s:$win" '#{pane_current_command}' 2>/dev/null)
+        fi
+        case "$cmd" in
+            bash | zsh | sh | dash | fish | ksh)
+                tmux kill-window -t "=$s:$win"
+                printf 'layout: closed old window %s (idle)\n' "$win" >&2 ;;
+            '') printf 'layout: old window %s closed itself\n' "$win" >&2 ;;
+            *) printf 'layout: kept old window %s (running %s)\n' "$win" "$cmd" >&2 ;;
+        esac
+    done < <(tmux list-windows -t "=$s" -F '#W')
+}
+
+# C3: windows agent and nvim at the task root, then srv when a repo has a server
+# pane (srv_pane makes it). Other windows keep their panes and move behind them.
 ensure_task_layout() {
-    local task=$1 s root wt name active_id current_id index=1
-    local -a wts=() standard=()
+    local task=$1 s root name active_id current_id index
+    local -a standard=(agent nvim)
     s=$(session_name "$task")
     root=$(realpath "$TASKS_DIR/$task")
     ensure_worker_order "$task"
-    mapfile -t wts < <(task_worktrees "$task")
     active_id=$(tmux list-windows -t "=$s" -F '#{window_active} #{window_id}' |
         awk '$1 == "1" { print $2; exit }')
     ensure_task_window "$task" "$s" agent agent "$root"
-    standard+=(agent)
-    for wt in "${wts[@]}"; do
-        name=$(basename "$wt")
-        ensure_task_window "$task" "$s" nvim "nvim-$name" "$wt"
-        standard+=("nvim-$name")
-    done
-    for wt in "${wts[@]}"; do
-        name=$(basename "$wt")
-        ensure_task_window "$task" "$s" shell "srv-$name" "$wt"
-        standard+=("srv-$name")
-    done
+    ensure_task_window "$task" "$s" nvim nvim "$root"
+    migrate_task_windows "$s"
+    task_window_exists "$s" srv && standard+=(srv)
 
-    # Swap standard windows into their canonical leading order. Extra existing
-    # windows naturally move behind them and keep their panes/processes.
+    # Closed old windows leave gaps, so number from the first index, gap-free.
+    tmux move-window -r -t "=$s"
+    index=$(tmux list-windows -t "=$s" -F '#{window_index}' | head -n1)
     for name in "${standard[@]}"; do
         current_id=$(tmux display-message -p -t "=$s:$name" '#{window_index}')
         if [[ "$current_id" != "$index" ]]; then
@@ -1652,9 +1692,10 @@ ensure_task_layout() {
         index=$((index + 1))
     done
 
+    # The active window may have been an old one that closed.
     current_id=$(tmux list-windows -t "=$s" -F '#{window_active} #{window_id}' |
         awk '$1 == "1" { print $2; exit }')
-    [[ "$current_id" == "$active_id" ]] || tmux select-window -t "$active_id"
+    [[ "$current_id" == "$active_id" ]] || tmux select-window -t "$active_id" 2>/dev/null || true
 }
 
 ensure_task_runtime() {
@@ -1866,7 +1907,7 @@ pick_session() {
 # --- cleanup -----------------------------------------------------------------
 
 remove_task() {
-    local task=${1:-} force=${2:-} dry=${3:-no} dir wt origin s issues wts=() origins=() settings d bak
+    local task=${1:-} force=${2:-} dry=${3:-no} dir wt origin s issues win wts=() origins=() settings d bak
     [[ -n "$task" ]] || die "usage: rm <task> [--force]"
     dir="$TASKS_DIR/$task"
     [[ -d "$dir" ]] || die "no such task: $task"
@@ -1880,6 +1921,9 @@ remove_task() {
             [[ -d "$d" ]] && printf 'clone:     remove %s (read-only context clone)\n' "${d%/}"
         done
         printf 'files:     remove AGENTS.md, CLAUDE.md, REPORT.md, .task-context.tsv, .task-worker-order, prompts/, reports/, hooks/, generated .claude settings and subagents\n'
+        for win in $(task_nvim_windows "$(session_name "$task")"); do
+            printf 'window:    quit %s (:qa; refused if it has unsaved buffers)\n' "$win"
+        done
         printf 'session:   stop herdr session and kill tmux session %s\n' "$(session_name "$task")"
         if [[ -n "$issues" && "$force" != --force ]]; then
             printf 'refused:   close would be blocked; review the items above, then close %s --force\n' "$task"
@@ -1892,6 +1936,12 @@ remove_task() {
         printf 'Close blocked for %s; review these items first:\n%s\n' "$task" "$issues" >&2
         die "use close $task --force only after reviewing; task branches are kept"
     fi
+    # nvim quits before anything is removed, so unsaved buffers stop the close.
+    s=$(session_name "$task")
+    for win in $(task_nvim_windows "$s"); do
+        quit_nvim_window "$s" "$win" || [[ "$force" == --force ]] ||
+            die "$win in $s still has unsaved buffers; save or quit it, then retry (or close --force)"
+    done
 
     for wt in "${wts[@]}"; do
         origin=$(origin_repo "$wt")
@@ -2468,7 +2518,7 @@ menu_repo_picker() {
         IFS=$'\t' read -r name display <<< "$sel"
         [[ "$name" == "$FINISH_LABEL" ]] && break
         repo=${display/#\~/$HOME}
-        mode_rows=$(printf '%s\tWORKER\tCreate a task worktree, nvim/srv windows, and worker agent\n%s\tCONTEXT\tRead-only canonical checkout; no worktree or agent' "$ICON_REPO" "$ICON_CONTEXT")
+        mode_rows=$(printf '%s\tWORKER\tCreate a task worktree, Grapple tag, srv pane, and worker agent\n%s\tCONTEXT\tRead-only canonical checkout; no worktree or agent' "$ICON_REPO" "$ICON_CONTEXT")
         sel=$(menu_choose "Repo mode: $name" "$mode_rows") || return 1
         IFS=$'\t' read -r mode _ <<< "$sel"
         case "$mode" in

@@ -21,6 +21,7 @@ else
 	require("brenocrs.plugin-keymaps")
 	require("brenocrs.lazy")
 	require("brenocrs.pane-style").setup()
+	require("brenocrs.task-grapple").setup()
 
 	vim.cmd([[
         augroup HighlightYank

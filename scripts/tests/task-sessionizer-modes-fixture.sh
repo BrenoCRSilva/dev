@@ -162,8 +162,8 @@ cat > "$legacy_task/AGENTS.md" <<'EOF'
 EOF
 TASK_SEARCH=1 "$SESSIONIZER" open fixture-legacy
 legacy_windows=$(grep 'new-window -d -t =fixture-legacy: -n ' "$TMUX_LOG" | sed 's/.* -n \([^ ]*\).*/\1/')
-[[ "$legacy_windows" == $'agent\nnvim-dotfiles\nnvim-api\nsrv-dotfiles\nsrv-api' ]] ||
-    fail "legacy task window requests ignored AGENTS.md order: $legacy_windows"
+[[ "$legacy_windows" == $'agent\nnvim' ]] ||
+    fail "legacy task did not get the shared agent and nvim windows: $legacy_windows"
 [[ $(cat "$legacy_task/.task-worker-order") == $'dotfiles\napi' ]] ||
     fail 'legacy order was not saved for future opens'
 
@@ -172,7 +172,7 @@ legacy_windows=$(grep 'new-window -d -t =fixture-legacy: -n ' "$TMUX_LOG" | sed 
 queue_file "$MENU_SELECT_CHOICES" \
     $'Create\tstart a new task' \
     $'worker\t'"$(display_path "$repo_worker")" \
-    $'WORKER\tCreate a task worktree, nvim/srv windows, and worker agent' \
+    $'WORKER\tCreate a task worktree, Grapple tag, srv pane, and worker agent' \
     $'context\t'"$(display_path "$repo_context")" \
     $'CONTEXT\tRead-only canonical checkout; no worktree or agent' \
     $'Finish selection\t1 worker, 1 context chosen'
@@ -208,13 +208,12 @@ grep -Fq $'added\t'"$repo_added" "$task/.task-context.tsv" || fail 'Add repo to 
 grep -Fq "**context** — worktree" "$task/AGENTS.md" && grep -Fq "$task/context" "$task/AGENTS.md" &&
     grep -Fq "$repo_context" "$task/AGENTS.md" && grep -Fq 'branch `fixture-menu`' "$task/AGENTS.md" ||
     fail 'AGENTS.md was not updated after promotion'
-grep -Fq 'new-window -d -t =fixture-menu: -n nvim-worker' "$TMUX_LOG" || fail 'worker nvim window was not requested'
-grep -Fq 'new-window -d -t =fixture-menu: -n srv-worker' "$TMUX_LOG" || fail 'worker server window was not requested'
-grep -Fq 'new-window -d -t =fixture-menu: -n nvim-context' "$TMUX_LOG" || fail 'promoted repo nvim window was not requested'
-grep -Fq 'new-window -d -t =fixture-menu: -n srv-context' "$TMUX_LOG" || fail 'promoted repo server window was not requested'
-window_order=$(grep 'new-window -d -t =fixture-menu: -n ' "$TMUX_LOG" | sed 's/.* -n \([^ ]*\).*/\1/' | tail -n 5)
-[[ "$window_order" == $'agent\nnvim-worker\nnvim-context\nsrv-worker\nsrv-context' ]] ||
-    fail "worker windows were not requested in canonical order: $window_order"
+# C3: one shared nvim at the task root; no per-repo nvim or srv windows.
+grep -Fq "new-window -d -t =fixture-menu: -n nvim -c $task" "$TMUX_LOG" || fail 'shared nvim window was not requested'
+! grep -Eq -- '-n (nvim|srv)-' "$TMUX_LOG" || fail 'a per-repo nvim or srv window was requested'
+window_order=$(grep 'new-window -d -t =fixture-menu: -n ' "$TMUX_LOG" | sed 's/.* -n \([^ ]*\).*/\1/' | tail -n 2)
+[[ "$window_order" == $'agent\nnvim' ]] ||
+    fail "task windows were not requested in canonical order: $window_order"
 [[ $(cat "$task/.task-worker-order") == $'worker\ncontext' ]] ||
     fail 'worker insertion order was not persisted across promotion'
 grep -Fq "workspace create --cwd $task/research --label research" "$HERDR_LOG" || fail 'research workspace was not requested'
