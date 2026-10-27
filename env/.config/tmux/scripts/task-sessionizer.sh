@@ -368,27 +368,26 @@ clone_context() {
 # index_context <task> <name> init|sync: runs codegraph in the clone in the
 # background (C7), logging to research/context/.codegraph-<name>.log. A lock folder
 # beside it holds the job's pid while it runs, so `contexts` can show "indexing" and a
-# second call while one runs is a no-op. A lock whose pid is gone is stale: it is
-# renamed away first, so of two callers that both saw it stale only one takes it, and
-# a lock that turns out live after the rename (another caller's fresh one) is put back.
+# second call while one runs is a no-op. A lock whose pid is gone is stale and is
+# replaced. A flock on .codegraph-<name>.lock.guard covers the check, the removal and
+# the mkdir, so of callers that see it stale only one takes it.
 # Without codegraph or setsid nothing runs; the researcher's SessionStart hook still
 # indexes any clone that has no index.
 index_context() {
-    local task=$1 name=$2 cmd=$3 dir lock stale
-    command -v codegraph >/dev/null 2>&1 && command -v setsid >/dev/null 2>&1 || return 0
+    local task=$1 name=$2 cmd=$3 dir lock
+    command -v codegraph >/dev/null 2>&1 && command -v setsid >/dev/null 2>&1 &&
+        command -v flock >/dev/null 2>&1 || return 0
     dir=$(context_clone_dir "$task" "$name")
     lock="${dir%/*}/.codegraph-$name.lock"
-    if ! mkdir "$lock" 2>/dev/null; then
-        index_running "$lock" && return 0
-        stale="$lock.stale.$$"
-        mv -T -- "$lock" "$stale" 2>/dev/null || return 0
-        if index_running "$stale"; then
-            mv -T -- "$stale" "$lock" 2>/dev/null || true
-            return 0
+    # The clone check keeps a caller that waited out drop_context_clone from indexing.
+    (
+        flock -w 10 9 && [[ -d $dir/.git ]] || exit 1
+        if ! mkdir "$lock" 2>/dev/null; then
+            index_running "$lock" && exit 1
+            rm -rf -- "$lock"
+            mkdir "$lock" 2>/dev/null || exit 1
         fi
-        rm -rf -- "$stale"
-        mkdir "$lock" 2>/dev/null || return 0
-    fi
+    ) 9>"$lock.guard" || return 0
     # CODEGRAPH_NO_WATCH is unset as in task-assignment.sh: init installs git hooks,
     # and here they go into the clone's own .git.
     # shellcheck disable=SC2016 # the script runs in the child bash
@@ -447,19 +446,30 @@ print(json.dumps([dict(zip(keys, line.rstrip("\n").split("\t"))) for line in sys
 }
 
 # Removes a context clone with its index log and lock, and research/context once it
-# is empty. A running index job is stopped first (its process group: setsid made it
-# the leader). A symlink at the clone path is removed as a link; its target is not
-# touched.
+# is empty. A running index job is stopped first: its process group (setsid made it
+# the leader), only when the pid leads its own group, is not ours, and its command
+# line names this lock, so a reused or bogus pid is never signalled. A symlink at the
+# clone path is removed as a link; its target is not touched.
 drop_context_clone() {
-    local dir lock pid
+    local dir lock pid ours
     dir=$(context_clone_dir "$1" "$2")
     lock="${dir%/*}/.codegraph-$2.lock"
-    if pid=$(cat "$lock/pid" 2>/dev/null) && [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
-        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-        for _ in $(seq 30); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
-        kill -KILL -- "-$pid" 2>/dev/null || true
-    fi
-    rm -rf -- "$dir" "${dir%/*}/.codegraph-$2.log" "$lock" "$lock".stale.*
+    [[ -d ${dir%/*} ]] || return 0
+    ours=$(ps -o pgid= -p $$ 2>/dev/null)
+    ours=${ours// /}
+    (
+        flock -w 10 9 || true
+        if pid=$(cat "$lock/pid" 2>/dev/null) && [[ $pid =~ ^[1-9][0-9]*$ ]] &&
+            ((pid > 1 && pid != $$ && pid != PPID)) && [[ $pid != "$ours" ]] &&
+            [[ $(ps -o pgid= -p "$pid" 2>/dev/null) =~ ^\ *$pid$ ]] &&
+            tr '\0' '\n' 2>/dev/null < "/proc/$pid/cmdline" | grep -Fxq -- "$lock"; then
+            kill -TERM -- "-$pid" 2>/dev/null || true
+            for _ in $(seq 30); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+            if kill -0 "$pid" 2>/dev/null; then kill -KILL -- "-$pid" 2>/dev/null || true; fi
+        fi
+        rm -rf -- "$dir" "${dir%/*}/.codegraph-$2.log" "$lock"
+    ) 9>>"$lock.guard"
+    rm -f -- "$lock.guard"
     rmdir "$(dirname "$dir")" 2>/dev/null || true
 }
 
@@ -529,7 +539,7 @@ context_clone_issues() {
     [[ -d "$dir" && ! -L "$dir" ]] || return 0
     for entry in "$dir"/* "$dir"/.[!.]*; do
         [[ -e "$entry" || -L "$entry" ]] || continue
-        # index_context's log and lock (and a lock it renamed aside) are generated too.
+        # index_context's log, lock and lock guard are generated too.
         [[ ${entry##*/} == .codegraph-*.log || ${entry##*/} == .codegraph-*.lock* ]] && continue
         if [[ ! -d "$entry/.git" ]]; then
             printf '%s: custom data in research/context/%s (force close removes it)\n' "$task" "${entry##*/}"

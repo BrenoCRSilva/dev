@@ -129,24 +129,42 @@ wait_pid() {
     fail "index of $1 wrote no pid"
 }
 
-# Stale lock race: this caller saw alpha's lock stale, then another caller took a fresh
-# one. The fresh lock is kept (put back after the rename) and nothing runs.
+# Stale lock race: eight callers see alpha's lock stale (dead pid) at once; the guard
+# lets only one take it, so exactly one job runs.
 rm -rf "$ctx/.codegraph-alpha.lock"
 mkdir "$ctx/.codegraph-alpha.lock"
-touch "$ctx/.codegraph-alpha.lock/mark"
-before=$(wc -l < "$ctx/.codegraph-alpha.log")
-run_fns 'eval "real_$(declare -f index_running)"
-    index_running() { [[ -e $HOLD.seen ]] && { real_index_running "$@"; return; }; touch "$HOLD.seen"; return 1; }
-    index_context t alpha sync'
-[[ -e "$ctx/.codegraph-alpha.lock/mark" ]] || fail 'the fresh lock of another caller was removed'
-compgen -G "$ctx/.codegraph-alpha.lock.stale.*" > /dev/null && fail 'a renamed lock was left behind'
-sleep 0.3
-[[ $(wc -l < "$ctx/.codegraph-alpha.log") == "$before" ]] || fail "a second job ran on alpha: $(cat "$ctx/.codegraph-alpha.log")"
-# A stale lock (dead pid) is taken over and the job runs.
 echo 999999 > "$ctx/.codegraph-alpha.lock/pid"
-run_fns 'index_context t alpha sync'
+before=$(grep -c '^codegraph ' "$ctx/.codegraph-alpha.log")
+touch "$HOLD"
+for _ in $(seq 8); do run_fns 'index_context t alpha sync' & done
+wait
+wait_pid alpha > /dev/null
+sleep 0.3
+rm -f "$HOLD"
 wait_idle alpha
+[[ $(grep -c '^codegraph ' "$ctx/.codegraph-alpha.log") == $((before + 1)) ]] ||
+    fail "not exactly one job ran after a stale lock: $(cat "$ctx/.codegraph-alpha.log")"
 grep -q "codegraph sync in $ctx/alpha" "$ctx/.codegraph-alpha.log" || fail "no sync after a stale lock: $(cat "$ctx/.codegraph-alpha.log")"
+
+# drop never signals a pid that is not this lock's job: 0, our own process group, and
+# an unrelated live group leader all survive, and the files still go.
+drop_bogus() { # <pid> <what>
+    mkdir -p "$ctx/.codegraph-gamma.lock"
+    echo "$1" > "$ctx/.codegraph-gamma.lock/pid"
+    touch "$ctx/.codegraph-gamma.log"
+    run_fns 'drop_context_clone t gamma' || fail "drop failed with $2"
+    compgen -G "$ctx/.codegraph-gamma*" > /dev/null && fail "drop left gamma files with $2: $(ls -a "$ctx")"
+    return 0
+}
+drop_bogus 0 'pid 0'
+drop_bogus "$(ps -o pgid= -p $$ | tr -d ' ')" 'our own pgid'
+setsid sleep 30 &
+other=$!
+sleep 0.2
+[[ $(ps -o pgid= -p "$other" | tr -d ' ') == "$other" ]] || fail 'the unrelated sleep does not lead its group'
+drop_bogus "$other" 'an unrelated process'
+kill -0 "$other" 2>/dev/null || fail 'drop killed an unrelated process'
+kill "$other" 2>/dev/null || true
 
 # drop with the clone already gone and an index job running: the job is stopped and
 # the log and lock go too.
@@ -164,4 +182,4 @@ run_fns 'drop_context_clone t alpha'
 
 "$SESSIONIZER" contexts nosuch 2>/dev/null && fail 'contexts accepted a missing task'
 "$SESSIONIZER" contexts t --bad 2>/dev/null && fail 'contexts accepted a bad flag'
-printf 'PASS: contexts rows (table and --json), init on clone, sync on fast-forward, indexing state, stale lock, close ignores index logs, stale lock race, drop stops the job and removes log and lock\n'
+printf 'PASS: contexts rows (table and --json), init on clone, sync on fast-forward, indexing state, stale lock, close ignores index logs, stale lock race (one job of eight callers), drop spares pid 0, our pgid and an unrelated process, drop stops the job and removes log and lock\n'
