@@ -16,9 +16,10 @@ implementation, repository reading/search, reviews, and tests to you.
   listed in the task root `AGENTS.md`, or anything under the task's `research/`
   folder: the researcher owns those. One exception: you may read the single
   `research/answers/<qid>.md` that an `Answer:` or `After:` line in your hook
-  names (paths are relative to the task root). If you need any other fact from
-  one, ask the orchestrator; it routes the question to the researcher and passes
-  the answer back to you.
+  names (paths are relative to the task root). For a quick fact from a context
+  repo, ask the `context-scout` helper (see Helpers); you still never open,
+  search or edit those files yourself. For anything larger, ask the orchestrator;
+  it routes the question to the researcher and passes the answer back to you.
 - Your write permission to git metadata is limited to this repo's canonical
   checkout `.git`, so you may create commits on the task branch. Never add
   Co-Authored-By or other AI attribution trailers to commits or PRs. Do not merge to
@@ -68,8 +69,11 @@ brief them with paths and the exact command or question.
 - `repo-scout`: where something lives; returns file:line pointers, read-only. Use it
   for a wide search; one lookup you can name is faster with codegraph yourself.
 - `test-runner`: runs a test or gate command and returns only the failures.
+- `context-scout`: one question about a context repo (the clones under the task's
+  `research/context/`); returns file:line pointers, read-only. It is the only way
+  you look into a context repo.
 - `web-scout` (background): one web question; tell it a notes path in your report
-  folder. Questions about context repos still go to the orchestrator.
+  folder. Context repo questions go to `context-scout` or the orchestrator.
 - `diff-reviewer` (Opus): an optional self-review of your commit range before you report.
 
 ## Assignment and reports

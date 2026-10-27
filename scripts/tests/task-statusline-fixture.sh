@@ -22,6 +22,18 @@ start=$(line '{"model":{"display_name":"Haiku 5.5"},"cost":{"total_cost_usd":0},
 cold=$(line '{"model":{"display_name":"Opus 5.5"},"cost":{"total_cost_usd":3},"context_window":{"used_percentage":77.6},"prompt_cache":{"warm":false,"hit_ratio":null,"misses":2,"ttl":"5m"}}')
 [[ "$cold" == 'orchestrator | Opus 5.5 | cost $3.00 est | ctx 78% | cache cold, misses 2 (5m)' ]] || fail "cold status line: $cold"
 
+# C7: ctx-repos from the task root's .task-context.tsv (workspace.project_dir, else cwd).
+task="$(mktemp -d)"
+trap 'rm -rf -- "$task"' EXIT
+printf 'a\t/x/a\nb\t/x/b\n' > "$task/.task-context.tsv"
+repos=$(line '{"model":{"display_name":"Opus 5.5"},"cost":{"total_cost_usd":0},"workspace":{"project_dir":"'"$task"'"}}')
+[[ "$repos" == 'orchestrator | Opus 5.5 | cost $0.00 est | ctx - | cache - | ctx-repos: 2' ]] || fail "ctx-repos line: $repos"
+repos=$(line '{"model":{"display_name":"Opus 5.5"},"cost":{"total_cost_usd":0},"cwd":"'"$task"'"}')
+[[ "$repos" == *' | ctx-repos: 2' ]] || fail "ctx-repos from cwd: $repos"
+: > "$task/.task-context.tsv"
+repos=$(line '{"model":{"display_name":"Opus 5.5"},"cost":{"total_cost_usd":0},"cwd":"'"$task"'"}')
+[[ "$repos" != *ctx-repos* ]] || fail "ctx-repos shown for zero repos: $repos"
+
 for bad in 'not json' ''; do
     [[ "$(line "$bad")" == 'orchestrator: status input unreadable' ]] || fail "bad input '$bad' not reported"
 done
@@ -31,4 +43,4 @@ done
 command=$(jq -r '.statusLine.command' "$SETTINGS")
 [[ "$(basename "$command")" == task-statusline.sh ]] || fail "orchestrator settings point at $command"
 
-printf 'PASS: status line renders full, pre-response, cold-cache and unreadable input; settings point at it\n'
+printf 'PASS: status line renders full, pre-response, cold-cache, ctx-repos and unreadable input; settings point at it\n'

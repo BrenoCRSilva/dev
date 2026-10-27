@@ -73,13 +73,14 @@ from pathlib import Path
 d = json.loads(sys.argv[1])
 names = {p.stem for p in Path(sys.argv[2]).glob("*.md")}
 assert set(d) == names, (set(d), names)
-assert {"web-scout", "repo-scout", "test-runner", "status-reader", "diff-reviewer"} <= names
+assert {"web-scout", "repo-scout", "test-runner", "status-reader", "diff-reviewer", "context-scout"} <= names
 for name, a in d.items():
     assert "Agent" not in a["tools"], name
     assert a["description"] and a["prompt"] and "managed: task-roles" not in a["prompt"], name
     assert (a["model"], a["effort"]) == (("opus", "medium") if name == "diff-reviewer" else ("haiku", "high")), name
 assert d["web-scout"].get("background") is True and "background" not in d["repo-scout"]
-assert "Write" not in d["repo-scout"]["tools"] and "Edit" not in d["repo-scout"]["tools"]
+for name in ("repo-scout", "context-scout"):
+    assert not {"Write", "Edit", "Bash"} & set(d[name]["tools"]), name
 for path in Path(sys.argv[2]).glob("*.md"):
     assert "\n<!-- managed: task-roles -->\n" in path.read_text(), path.name
 PY

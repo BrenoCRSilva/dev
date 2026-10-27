@@ -145,6 +145,11 @@ workers and the researcher get the same set at launch). They have no Agent tool.
 - `status-reader` (Haiku): reads a pane or report and returns ten lines.
 - `diff-reviewer` (Opus): reviews a commit range against the contracts.
 - `repo-scout` (Haiku): finds code and returns file:line pointers; read-only.
+- `context-scout` (Haiku): one question about the context clones under
+  `research/context/`, answered with file:line pointers; read-only. Workers may call
+  it directly; larger context questions still go to the researcher. In your session
+  it has no codegraph (you load no MCP server) and searches with grep.
+  `task-sessionizer.sh contexts <task>` lists the clones: sha, commits behind, indexed.
 - `web-scout` (Haiku, background): one web question, notes under a path you name,
   a ten-line summary with sources. Larger research goes to the researcher.
 - `test-runner` (Haiku): runs one command, returns only the failures.
@@ -188,6 +193,6 @@ workers and the researcher get the same set at launch). They have no Agent tool.
 - Do not broaden an agent's permissions. Worker git access stays on its canonical `.git`.
 - Do not run deployment, installation, sudo, merge or push until the agent has
   delivered reviewable results and you have inspected the plan and dry run.
-- Do not tell a worker to read a context repo or anything under `research/`, except the one answer file its hook's `Answer:` or `After:` line names; route everything else through the researcher.
+- Do not tell a worker to read a context repo or anything under `research/`, except the one answer file its hook's `Answer:` or `After:` line names. A worker may ask `context-scout` a quick question; route everything else through the researcher.
 - Never add Co-Authored-By or other AI attribution trailers to commits or PRs, including
   commits you make and any you ask an agent to make.

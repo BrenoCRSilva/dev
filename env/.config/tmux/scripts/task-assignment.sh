@@ -83,9 +83,13 @@ main() {
     elif [[ ${cwd##*/} == research ]]; then
         agent=researcher
         root=${cwd%/*}
+        # Fallback only: the sessionizer indexes each clone when it makes or refreshes
+        # it, and a clone it is indexing now (its lock exists) is skipped.
         for d in "$cwd"/context/*/; do
+            d=${d%/}
+            [[ -e "$cwd/context/.codegraph-${d##*/}.lock" ]] && continue
             [[ -d $d && $(git -C "$d" rev-parse --show-toplevel 2>/dev/null) == "$(realpath -e "$d")" ]] &&
-                folders+=("${d%/}")
+                folders+=("$d")
         done
     else
         return 0

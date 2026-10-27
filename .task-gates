@@ -34,4 +34,5 @@ fixture-task-sessionizer-layout: bash scripts/tests/task-sessionizer-layout-fixt
 fixture-task-grapple: bash scripts/tests/task-grapple-fixture.sh
 fixture-task-sessionizer-modes: bash scripts/tests/task-sessionizer-modes-fixture.sh
 fixture-task-sessionizer-sync: bash scripts/tests/task-sessionizer-sync-fixture.sh
+fixture-task-sessionizer-contexts: bash scripts/tests/task-sessionizer-contexts-fixture.sh
 fixture-task-statusline: bash scripts/tests/task-statusline-fixture.sh

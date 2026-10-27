@@ -15,6 +15,8 @@
 #   task-sessionizer.sh remove <task> <repo> [--dry-run] [--force]
 #                                            drop a repo from the task; branch kept
 #   task-sessionizer.sh refresh <task> [repo] fetch each context clone and fast-forward it
+#   task-sessionizer.sh contexts <task> [--json]
+#                                            context repos: canonical, clone sha, behind, indexed
 #   task-sessionizer.sh sync <task>|--all [--dry-run]
 #                                            bring generated files up to the current
 #                                            templates: adds only, reports the rest
@@ -358,6 +360,82 @@ clone_context() {
         rm -rf -- "$dir"
         die "could not clone $repo for the researcher"
     }
+    # The index must not make the clone look dirty to refresh and close.
+    printf '.codegraph\n' >> "$dir/.git/info/exclude"
+    index_context "$task" "$name" init
+}
+
+# index_context <task> <name> init|sync: runs codegraph in the clone in the
+# background (C7), logging to research/context/.codegraph-<name>.log. A lock folder
+# beside it holds the job's pid while it runs, so `contexts` can show "indexing" and a
+# second call while one runs is a no-op. A lock whose pid is gone is stale and removed.
+# Without codegraph or setsid nothing runs; the researcher's SessionStart hook still
+# indexes any clone that has no index.
+index_context() {
+    local task=$1 name=$2 cmd=$3 dir lock
+    command -v codegraph >/dev/null 2>&1 && command -v setsid >/dev/null 2>&1 || return 0
+    dir=$(context_clone_dir "$task" "$name")
+    lock="${dir%/*}/.codegraph-$name.lock"
+    if ! mkdir "$lock" 2>/dev/null; then
+        index_running "$lock" && return 0
+        rm -rf -- "$lock"
+        mkdir "$lock" 2>/dev/null || return 0
+    fi
+    # CODEGRAPH_NO_WATCH is unset as in task-assignment.sh: init installs git hooks,
+    # and here they go into the clone's own .git.
+    # shellcheck disable=SC2016 # the script runs in the child bash
+    setsid -f bash -c 'trap "rm -rf -- \"$1\"" EXIT; echo $$ > "$1/pid"
+        printf "%s %s %s\n" "$(date -Is)" "$3" "$2"
+        cd "$2" && env -u CODEGRAPH_NO_WATCH CODEGRAPH_TELEMETRY=0 codegraph "$3" ${4:+"$4"} </dev/null ||
+            printf "%s %s failed in %s\n" "$(date -Is)" "$3" "$2"' \
+        _ "$lock" "$dir" "$cmd" "$([[ $cmd == init ]] && echo -y)" </dev/null >> "${dir%/*}/.codegraph-$name.log" 2>&1
+}
+
+# index_running <lock>: the job's pid is alive, or the lock is under a minute old and
+# has no pid yet (the detached job writes it as it starts).
+index_running() {
+    local pid
+    [[ -d $1 ]] || return 1
+    if pid=$(cat "$1/pid" 2>/dev/null); then kill -0 "$pid" 2>/dev/null
+    else [[ -n $(find "$1" -maxdepth 0 -newermt '-1 minute' 2>/dev/null) ]]; fi
+}
+
+# context_index_state <task> <name>: indexing while a job holds the lock, else yes
+# when the clone has a .codegraph index, else no.
+context_index_state() {
+    local dir
+    dir=$(context_clone_dir "$1" "$2")
+    if index_running "${dir%/*}/.codegraph-$2.lock"; then echo indexing
+    elif [[ -e "$dir/.codegraph" ]]; then echo yes
+    else echo no; fi
+}
+
+# contexts <task> [--json] (C7): one row per context repo: name, canonical path,
+# clone HEAD short sha, commits the clone is behind the canonical HEAD, indexed.
+# A missing clone shows "-" for sha and behind; an unknown count shows "?".
+list_contexts() {
+    local task=$1 json=${2:-} name path dir sha behind indexed
+    valid_name "$task" || die "invalid task name: $task"
+    [[ -d "$TASKS_DIR/$task" ]] || die "no such task: $task"
+    [[ -z $json || $json == --json ]] || die "usage: contexts <task> [--json]"
+    while IFS=$'\t' read -r name path; do
+        [[ -n "$name" ]] || continue
+        dir=$(context_clone_dir "$task" "$name")
+        sha=- behind=-
+        if [[ -d "$dir/.git" ]] && sha=$(git -C "$dir" rev-parse --short HEAD 2>/dev/null); then
+            behind=$(git -C "$path" rev-list --count "$(git -C "$dir" rev-parse HEAD)..HEAD" 2>/dev/null) || behind='?'
+        else
+            sha=-
+        fi
+        indexed=$(context_index_state "$task" "$name")
+        printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$path" "$sha" "$behind" "$indexed"
+    done < <(task_contexts "$task") | if [[ $json == --json ]]; then
+        python3 -Ic 'import json, sys
+keys = ("name", "canonical", "sha", "behind", "indexed")
+print(json.dumps([dict(zip(keys, line.rstrip("\n").split("\t"))) for line in sys.stdin]))'
+    else
+        column -t -s $'\t' -N NAME,CANONICAL,SHA,BEHIND,INDEXED 2>/dev/null || cat
+    fi
 }
 
 # Removes a context clone, and research/context once it is empty. A symlink at
@@ -366,7 +444,7 @@ drop_context_clone() {
     local dir
     dir=$(context_clone_dir "$1" "$2")
     [[ -e "$dir" || -L "$dir" ]] || return 0
-    rm -rf -- "$dir"
+    rm -rf -- "$dir" "${dir%/*}/.codegraph-$2.log" "${dir%/*}/.codegraph-$2.lock"
     rmdir "$(dirname "$dir")" 2>/dev/null || true
 }
 
@@ -407,6 +485,8 @@ refresh_context_clone() {
     fi
     new=$(git -C "$dir" rev-parse --short HEAD)
     echo "$name: $old -> $new on ${branch:-a detached HEAD}"
+    if [[ ! -e "$dir/.codegraph" ]]; then index_context "$task" "$name" init
+    elif [[ $old != "$new" ]]; then index_context "$task" "$name" sync; fi
 }
 
 # refresh <task> [repo]: every context clone, or the one named.
@@ -434,6 +514,8 @@ context_clone_issues() {
     [[ -d "$dir" && ! -L "$dir" ]] || return 0
     for entry in "$dir"/* "$dir"/.[!.]*; do
         [[ -e "$entry" || -L "$entry" ]] || continue
+        # index_context's log and lock are generated too.
+        [[ ${entry##*/} == .codegraph-*.log || ${entry##*/} == .codegraph-*.lock ]] && continue
         if [[ ! -d "$entry/.git" ]]; then
             printf '%s: custom data in research/context/%s (force close removes it)\n' "$task" "${entry##*/}"
             continue
@@ -479,14 +561,14 @@ add_repo() {
 }
 
 # The Notes section as written now. Its markers let sync replace it exactly. The
-# texts written before, which sync replaces, are AGENTS_NOTES_V1..V4 ({branch}
+# texts written before, which sync replaces, are AGENTS_NOTES_V1..V5 ({branch}
 # stands for the task's branch, as V1 had it expanded).
 AGENTS_NOTES=$(cat <<'EOF'
 ## Notes for agents
 <!-- task-sessionizer:notes:start -->
 - Worker repo subfolders are task worktrees on the branch shown in Repo modes. Each worker writes only inside its assigned worktree.
 - Agent names: `orchestrator`, `researcher`, and `worker-<repo>` for each worker repo (listed under Repo modes). Hook files and report folders use these names.
-- Context-only repos are canonical checkouts listed in Repo modes; they are read-only references with no worktree or agent. Only the researcher reads them, through its clones under `research/context/`. Workers never read them; ask the orchestrator for the facts you need.
+- Context-only repos are canonical checkouts listed in Repo modes; they are read-only references with no worktree or agent. The researcher reads them through its clones under `research/context/`. Workers never open, search or edit them; ask the `context-scout` helper for a quick fact (file:line pointers), or the orchestrator for more.
 - Researcher notes belong under the task root's `research/`; researcher never edits repository trees, its context clones included.
 - `hooks/<agent>.md` is an agent's assignment (step, scope, contract IDs, done when), e.g. `hooks/worker-dotfiles.md`. The orchestrator writes it; the agent gets it at session start. Workers never write it.
 - `reports/<agent>/<step>.json` is an agent's step report, checked with `task-report.py`, e.g. `reports/worker-dotfiles/9.json`. Each agent writes only its own folder.
@@ -527,6 +609,19 @@ AGENTS_NOTES_V4=$(cat <<'EOF'
 - Researcher notes belong under the task root's `research/`; researcher never edits repository trees, its context clones included.
 - `hooks/<agent>.md` is an agent's assignment (step, scope, contract IDs, done when). The orchestrator writes it; the agent gets it at session start. Workers never write it.
 - `reports/<agent>/<step>.json` is an agent's step report, checked with `task-report.py`. Each agent writes only its own folder.
+- Don't `git checkout` other branches; use the existing task worktrees.
+- Each agent's role comes from its launch prompt (~/.config/tmux/scripts/task-roles/). The orchestrator maintains the task plan and shared contracts.
+EOF
+)
+
+AGENTS_NOTES_V5=$(cat <<'EOF'
+## Notes for agents
+- Worker repo subfolders are task worktrees on the branch shown in Repo modes. Each worker writes only inside its assigned worktree.
+- Agent names: `orchestrator`, `researcher`, and `worker-<repo>` for each worker repo (listed under Repo modes). Hook files and report folders use these names.
+- Context-only repos are canonical checkouts listed in Repo modes; they are read-only references with no worktree or agent. Only the researcher reads them, through its clones under `research/context/`. Workers never read them; ask the orchestrator for the facts you need.
+- Researcher notes belong under the task root's `research/`; researcher never edits repository trees, its context clones included.
+- `hooks/<agent>.md` is an agent's assignment (step, scope, contract IDs, done when), e.g. `hooks/worker-dotfiles.md`. The orchestrator writes it; the agent gets it at session start. Workers never write it.
+- `reports/<agent>/<step>.json` is an agent's step report, checked with `task-report.py`, e.g. `reports/worker-dotfiles/9.json`. Each agent writes only its own folder.
 - Don't `git checkout` other branches; use the existing task worktrees.
 - Each agent's role comes from its launch prompt (~/.config/tmux/scripts/task-roles/). The orchestrator maintains the task plan and shared contracts.
 EOF
@@ -1185,12 +1280,12 @@ sync_contexts() {
 }
 
 # AGENTS.md's Notes section. It is replaced only when its text is one this script
-# wrote: AGENTS_NOTES_V1..V4, or the current text without markers. Any other text
+# wrote: AGENTS_NOTES_V1..V5, or the current text without markers. Any other text
 # is shown as a diff and left alone. The rest of the file is never touched.
 sync_notes() {
     local task=$1 out
     out=$(python3 - "$TASKS_DIR/$task/AGENTS.md" "$DRY_RUN" "$(task_branch "$task")" \
-        "$AGENTS_NOTES" "$AGENTS_NOTES_V1" "$AGENTS_NOTES_V2" "$AGENTS_NOTES_V3" "$AGENTS_NOTES_V4" <<'PY'
+        "$AGENTS_NOTES" "$AGENTS_NOTES_V1" "$AGENTS_NOTES_V2" "$AGENTS_NOTES_V3" "$AGENTS_NOTES_V4" "$AGENTS_NOTES_V5" <<'PY'
 import difflib, os, sys, tempfile
 
 path, dry_run, branch, current, *previous = sys.argv[1:]
@@ -2666,6 +2761,7 @@ case "$(basename "$0"):${1:-}" in
         [[ $# -ge 1 && $# -le 2 ]] || die "usage: refresh <task> [repo]"
         refresh_context "$@"
         ;;
+    *:contexts) shift; [[ $# -ge 1 && $# -le 2 ]] || die "usage: contexts <task> [--json]"; list_contexts "$@" ;;
     *:sync) shift; sync_command "$@" ;;
     *:demote) shift; repo_command demote "$@" ;;
     *:remove) shift; repo_command remove "$@" ;;

@@ -15,14 +15,15 @@ shows committed history only, so work not committed in the canonical is not
 visible to you.
 
 - Read and search only those clones. Never open the canonical checkout.
-- Each clone is indexed automatically when your session starts, one after the
-  other in the background; the status line tells you whether indexing is
-  building or present. To check a clone, run `codegraph status` from its root:
+- The sessionizer indexes each clone in the background when it makes or
+  refreshes it (log: `research/context/.codegraph-<repo>.log`); your session start
+  indexes any clone still without an index, and the status line tells you whether
+  that is building or present. To check a clone, run `codegraph status` from its root:
   it is ready when it shows statistics, not "Not initialized". The codegraph
   tools take the clone's absolute path as `projectPath`; the server has no
   default project. Use grep for shell, TOML, Markdown and string literals, which
   codegraph does not index. If codegraph is unavailable, use grep.
-- After the orchestrator refreshes a clone, run `codegraph sync` in it if
+- A refresh runs `codegraph sync` itself; run it again in a clone only if
   results look stale.
 - Answer each question with file:line evidence (path relative to the clone),
   and the branch and short commit (`git -C <clone> rev-parse --short HEAD`).
@@ -45,7 +46,8 @@ with its own notes path under `research/`, several in parallel when the question
 independent. You stay on Opus for the synthesis: read their notes, check the sources
 that carry the answer, and write the answer file yourself. `repo-scout` locates code
 in a folder you name (read-only); `test-runner` runs one command and returns only the
-failures. Helpers start fresh and have no Agent tool.
+failures; `context-scout` answers one question about the clones with file:line
+pointers. Helpers start fresh and have no Agent tool.
 
 ## Boundaries
 

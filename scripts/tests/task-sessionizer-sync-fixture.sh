@@ -172,7 +172,7 @@ dry=$("$SESSIONIZER" sync legacy --dry-run) || fail "dry run failed: $dry"
 [[ "$(canon_state "$worker_repo")" == "$canonical_before" ]] || fail 'dry run wrote the worker canonical .git'
 [[ ! -e "$legacy/research/context/ctx" ]] || fail 'dry run made a context clone'
 grep -Fq 'planned: settings.json: +17 allow rule(s)' <<< "$dry" || fail "dry run did not plan the settings rules: $dry"
-grep -Fq 'planned: .claude/agents: copy or refresh diff-reviewer.md repo-scout.md status-reader.md test-runner.md web-scout.md' <<< "$dry" || fail "dry run did not plan the subagents: $dry"
+grep -Fq 'planned: .claude/agents: copy or refresh context-scout.md diff-reviewer.md repo-scout.md status-reader.md test-runner.md web-scout.md' <<< "$dry" || fail "dry run did not plan the subagents: $dry"
 grep -Fq 'planned: hooks/: create' <<< "$dry" || fail 'dry run did not plan hooks/'
 grep -Fq 'planned: reports/: create' <<< "$dry" || fail 'dry run did not plan reports/'
 grep -Fq "planned: research/context/ctx: clone of $ctx_repo" <<< "$dry" || fail 'dry run did not plan the context clone'
@@ -233,7 +233,7 @@ PY
 backups=("$legacy"/.claude/settings.json.bak-*)
 [[ ${#backups[@]} -eq 1 ]] || fail 'expected one settings backup'
 cmp -s "$TMP_ROOT/legacy-settings.orig" "${backups[0]}" || fail 'the backup is not the previous settings file'
-for name in status-reader diff-reviewer web-scout repo-scout test-runner; do
+for name in status-reader diff-reviewer web-scout repo-scout test-runner context-scout; do
     cmp -s "$legacy/.claude/agents/$name.md" "$ROOT/env/.config/tmux/scripts/task-roles/subagents/$name.md" ||
         fail "subagent $name was not copied from the template"
 done

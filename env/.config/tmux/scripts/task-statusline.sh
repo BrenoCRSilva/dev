@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Status line for the task orchestrator: model, cost, context and prompt cache.
+# Status line for the task orchestrator: model, cost, context, prompt cache and the
+# task's context repo count (ctx-repos, omitted when there are none).
 # task-agent.sh wires it with --settings for the orchestrator launch only. Repo
 # and researcher agents never get it, so their prompt prefix does not change.
 # Input is Claude Code's status JSON on stdin. The cost is Claude Code's own
@@ -16,10 +17,11 @@ fields=$(jq -r '
       (.prompt_cache.warm | text),
       (.prompt_cache.hit_ratio | text),
       (.prompt_cache.misses | text),
-      (.prompt_cache.ttl // "")
+      (.prompt_cache.ttl // ""),
+      (.workspace.project_dir // .cwd // "")
     ] | join("|")' <<< "$input" 2>/dev/null) && [[ -n $fields ]] ||
     { echo "orchestrator: status input unreadable"; exit 0; }
-IFS='|' read -r model cost used warm hit misses ttl <<< "$fields"
+IFS='|' read -r model cost used warm hit misses ttl root <<< "$fields"
 
 money='cost -'
 [[ -n $cost ]] && money=$(printf 'cost $%.2f est' "$cost")
@@ -34,4 +36,10 @@ if [[ -n $warm ]]; then
     [[ -n $misses ]] && cache+=", misses $misses"
     [[ -n $ttl ]] && cache+=" ($ttl)"
 fi
-printf 'orchestrator | %s | %s | %s | %s\n' "$model" "$money" "$context" "$cache"
+# C7: the task's context repo count from its records file; no git calls here.
+repos=''
+if [[ -n $root && -f $root/.task-context.tsv ]]; then
+    n=$(grep -c . "$root/.task-context.tsv")
+    (( n > 0 )) && repos=" | ctx-repos: $n"
+fi
+printf 'orchestrator | %s | %s | %s | %s%s\n' "$model" "$money" "$context" "$cache" "$repos"
